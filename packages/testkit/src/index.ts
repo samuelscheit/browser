@@ -1,0 +1,76 @@
+import { createId, type Principal, type Profile, type ProjectId, type Worker } from "@browser-fabric/contracts";
+import { BrowserScheduler, FakeClock, InMemoryFabricStore, CapabilitySigner, MemoryEphemeralInputVault } from "@browser-fabric/control-plane";
+import { builtInRecipes } from "@browser-fabric/recipes";
+
+export const TEST_PROJECT = "project_test" as ProjectId;
+export const TEST_PRINCIPAL: Principal = {
+  id: "principal_test" as Principal["id"],
+  displayName: "test principal",
+  projectGrants: [TEST_PROJECT],
+  roles: ["fabric_admin", "project_admin", "project_operator"],
+  certificateFingerprint: "test-principal-cert",
+  createdAt: "2026-01-01T00:00:00.000Z"
+};
+
+export function makeWorker(overrides: Partial<Worker> = {}): Worker {
+  const now = "2026-01-01T00:00:00.000Z";
+  return {
+    id: (overrides.id ?? createId("worker")) as Worker["id"],
+    certificateFingerprint: overrides.certificateFingerprint ?? `cert-${crypto.randomUUID()}`,
+    endpoint: overrides.endpoint ?? "https://worker.internal",
+    cdpRelayEndpoint: overrides.cdpRelayEndpoint ?? "wss://worker.internal/cdp",
+    capabilities: overrides.capabilities ?? {
+      runtimeFamilies: ["chromium-cdp", "patchright", "rebrowser-puppeteer", "playwright-social", "companion", "media-relay"],
+      recipeRefs: builtInRecipes.map((recipe) => recipe.ref),
+      browserVersions: { chromium: "stable" },
+      supportsInteractive: overrides.isLocal ?? false,
+      supportsCompanionCompanion: true,
+      supportedProfileFamilies: ["reporting-reporting", "news-browser", "media", "social", "avatar-account", "chat", "interactive", "account-signup"]
+    },
+    capacity: overrides.capacity ?? (overrides.isLocal ? 1 : 3),
+    activeLeases: overrides.activeLeases ?? 0,
+    mediaCapacity: overrides.mediaCapacity ?? 8,
+    activeMediaTasks: overrides.activeMediaTasks ?? 0,
+    health: overrides.health ?? "healthy",
+    isLocal: overrides.isLocal ?? false,
+    volumeNames: overrides.volumeNames ?? ["profile-volume", "profile-volume-g1", "profile-volume-g2"],
+    resourceLimits: overrides.resourceLimits ?? { maxBrowserLeases: 3, cpuMilli: 2_000, memoryMiB: 4_096, pids: 512, shmMiB: 1_024, temporaryStorageMiB: 4_096 },
+    lastHeartbeatAt: overrides.lastHeartbeatAt ?? now,
+    createdAt: overrides.createdAt ?? now,
+    updatedAt: overrides.updatedAt ?? now
+  };
+}
+
+export function makeProfile(worker: Worker, overrides: Partial<Profile> = {}): Profile {
+  return {
+    ref: (overrides.ref ?? createId("profile")) as Profile["ref"],
+    ownerProject: overrides.ownerProject ?? TEST_PROJECT,
+    grants: overrides.grants ?? [TEST_PROJECT],
+    workerId: worker.id,
+    volumeName: overrides.volumeName ?? worker.volumeNames[0] ?? "profile-volume",
+    profileFamily: overrides.profileFamily ?? "reporting-reporting",
+    volumeGeneration: overrides.volumeGeneration ?? 1,
+    status: overrides.status ?? "active",
+    createdAt: overrides.createdAt ?? "2026-01-01T00:00:00.000Z",
+    updatedAt: overrides.updatedAt ?? "2026-01-01T00:00:00.000Z"
+  };
+}
+
+export function createTestScheduler(options: { clock?: FakeClock; maxActiveBrowserLeases?: number } = {}): { scheduler: BrowserScheduler; clock: FakeClock; store: InMemoryFabricStore; worker: Worker } {
+  const clock = options.clock ?? new FakeClock("2026-01-01T00:00:00.000Z");
+  const store = new InMemoryFabricStore();
+  const signer = new CapabilitySigner({ secret: "01234567890123456789012345678901", clock, gatewayBaseUrl: "wss://fabric.test" });
+  const scheduler = new BrowserScheduler({ store, clock, capabilitySigner: signer, ephemeralInputVault: new MemoryEphemeralInputVault(() => clock.now()), allowPlaintextEphemeralInputs: true, ...(options.maxActiveBrowserLeases === undefined ? {} : { maxActiveBrowserLeases: options.maxActiveBrowserLeases }) });
+  const worker = makeWorker({ id: "worker_test" as Worker["id"] });
+  return { scheduler, clock, store, worker };
+}
+
+export async function bootstrapTestScheduler(options: { localWorker?: boolean } = {}) {
+  const context = createTestScheduler();
+  await context.scheduler.bootstrap({ projects: [{ id: TEST_PROJECT, name: "Test" }], principals: [TEST_PRINCIPAL] });
+  const worker = options.localWorker ? makeWorker({ id: "worker_local" as Worker["id"], isLocal: true, capacity: 1, mediaCapacity: 0, volumeNames: ["profile-volume"] }) : context.worker;
+  await context.scheduler.registerWorker(worker);
+  const profile = makeProfile(worker);
+  await context.scheduler.createProfile(profile);
+  return { ...context, worker, profile };
+}

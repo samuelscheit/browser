@@ -1,0 +1,36 @@
+{
+  "name": "browser-fabric",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.1",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "bun --watch apps/api/src/index.ts",
+    "dev:scheduler": "bun --watch apps/scheduler/src/index.ts",
+    "dev:gateway": "bun --watch apps/cdp-gateway/src/index.ts",
+    "dev:worker-manager": "bun --watch apps/worker-manager/src/index.ts",
+    "test": "bun test --timeout 30000",
+    "test:integration": "RUN_BROWSER_INTEGRATION=1 bun test tests/raw-cdp.integration.test.ts --timeout 120000",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun run test && bun run validate:deployment",
+    "validate:deployment": "bun scripts/validate-deployment.ts",
+    "validate:sql": "./scripts/validate-sql.sh",
+    "generate:assignment-keys": "bun scripts/generate-assignment-keys.ts",
+    "generate:worker-input-key": "bun scripts/generate-worker-input-key.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "bun-types": "1.4.0",
+    "playwright-core": "^1.55.0",
+    "puppeteer-core": "^24.16.0",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@types/pg": "8.23.1",
+    "pg": "8.23.0"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@browser-fabric/worker-manager",
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@browser-fabric/contracts": "workspace:*",
+    "@browser-fabric/control-plane": "workspace:*",
+    "@browser-fabric/policy": "workspace:*",
+    "@browser-fabric/worker-runtime": "workspace:*"
+  }
+}

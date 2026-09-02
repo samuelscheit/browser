@@ -1,0 +1,21 @@
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317 }
+      http: { endpoint: 0.0.0.0:4318 }
+processors:
+  batch: {}
+  attributes/redact:
+    actions:
+      - { key: authorization, action: delete }
+      - { key: cookie, action: delete }
+      - { key: proxy.url, action: delete }
+      - { key: otp, action: delete }
+exporters:
+  prometheus: { endpoint: 0.0.0.0:9464 }
+  otlphttp:
+    endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+service:
+  pipelines:
+    traces: { receivers: [otlp], processors: [attributes/redact, batch], exporters: [otlphttp] }
+    metrics: { receivers: [otlp], processors: [attributes/redact, batch], exporters: [prometheus] }

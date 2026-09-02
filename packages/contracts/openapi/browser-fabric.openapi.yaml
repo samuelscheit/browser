@@ -1,0 +1,377 @@
+openapi: 3.1.0
+info:
+  title: Browser Fabric Control Plane
+  version: 0.1.0
+  description: |
+    Private Browser Fabric API. Calls require mTLS at the ingress and a project-scoped principal.
+    Raw CDP endpoints are short-lived signed capabilities scoped to exactly one browser session.
+servers:
+  - url: https://fabric.internal.example/v1
+security:
+  - mutualTLS: []
+paths:
+  /browser-sessions:
+    post:
+      operationId: createBrowserSession
+      summary: Queue a managed raw-CDP browser session.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BrowserSessionCreate' }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/BrowserSession' } } } }
+        '200': { description: Idempotent replay, content: { application/json: { schema: { $ref: '#/components/schemas/BrowserSession' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /browser-sessions/{sessionId}:
+    parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+    get:
+      operationId: getBrowserSession
+      responses:
+        '200': { description: Browser session, content: { application/json: { schema: { $ref: '#/components/schemas/BrowserSession' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /browser-sessions/{sessionId}/heartbeat:
+    parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+    post:
+      operationId: heartbeatBrowserSession
+      responses:
+        '200': { description: Heartbeat accepted, content: { application/json: { schema: { $ref: '#/components/schemas/BrowserSession' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /browser-sessions/{sessionId}/release:
+    parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+    post:
+      operationId: releaseBrowserSession
+      responses:
+        '200': { description: Released, content: { application/json: { schema: { $ref: '#/components/schemas/BrowserSession' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /browser-sessions/{sessionId}/cancel:
+    parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+    post:
+      operationId: cancelBrowserSession
+      responses:
+        '200': { description: Cancelled, content: { application/json: { schema: { $ref: '#/components/schemas/BrowserSession' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /browser-sessions/{sessionId}/events:
+    parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+    get:
+      operationId: listBrowserSessionEvents
+      responses:
+        '200': { description: Ordered events, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Event' } } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /jobs:
+    post:
+      operationId: createJob
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobCreate' }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        '200': { description: Idempotent replay, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /jobs/{jobId}:
+    parameters: [ { $ref: '#/components/parameters/JobId' } ]
+    get:
+      operationId: getJob
+      responses:
+        '200': { description: Job, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /jobs/{jobId}/cancel:
+    parameters: [ { $ref: '#/components/parameters/JobId' } ]
+    post:
+      operationId: cancelJob
+      responses:
+        '200': { description: Cancelled, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /jobs/{jobId}/resume:
+    parameters: [ { $ref: '#/components/parameters/JobId' } ]
+    post:
+      operationId: resumeJob
+      responses:
+        '200': { description: Resumed, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /jobs/{jobId}/events:
+    parameters: [ { $ref: '#/components/parameters/JobId' } ]
+    get:
+      operationId: listJobEvents
+      responses:
+        '200': { description: Ordered events, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Event' } } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /profiles:
+    post:
+      operationId: createProfile
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCreate' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listProfiles
+      parameters: [{ name: project, in: query, required: true, schema: { type: string, pattern: '^project_' } }]
+      responses:
+        '200': { description: Profiles, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Profile' } } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /profiles/{profileRef}:
+    parameters: [{ name: profileRef, in: path, required: true, schema: { type: string, pattern: '^profile_' } }]
+    get:
+      operationId: getProfile
+      responses:
+        '200': { description: Profile, content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /profiles/{profileRef}/grants:
+    parameters: [{ name: profileRef, in: path, required: true, schema: { type: string, pattern: '^profile_' } }]
+    post:
+      operationId: grantProfile
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [project], properties: { project: { type: string, pattern: '^project_' } } } } }
+      responses:
+        '200': { description: Updated profile, content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /profiles/{profileRef}/revoke:
+    parameters: [{ name: profileRef, in: path, required: true, schema: { type: string, pattern: '^profile_' } }]
+    post:
+      operationId: revokeProfile
+      responses:
+        '200': { description: Revoked profile, content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /profiles/{profileRef}/relocate:
+    parameters: [{ name: profileRef, in: path, required: true, schema: { type: string, pattern: '^profile_' } }]
+    post:
+      operationId: relocateProfile
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [targetWorkerId, verifiedChecksum], properties: { targetWorkerId: { type: string, pattern: '^worker_' }, verifiedChecksum: { type: string, pattern: '^sha256:' } } } } }
+      responses:
+        '200': { description: Relocated profile, content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /workers:
+    get:
+      operationId: listWorkers
+      responses:
+        '200': { description: Workers, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Worker' } } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /workers/{workerId}/health:
+    parameters: [{ name: workerId, in: path, required: true, schema: { type: string, pattern: '^worker_' } }]
+    post:
+      operationId: setWorkerHealth
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [health], properties: { health: { type: string, enum: [healthy, degraded, offline, draining] } } } } }
+      responses:
+        '200': { description: Worker, content: { application/json: { schema: { $ref: '#/components/schemas/Worker' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /input-requests/{requestId}/value:
+    parameters: [{ name: requestId, in: path, required: true, schema: { type: string, pattern: '^input-request_' } }]
+    post:
+      operationId: provideEphemeralInputDevelopment
+      description: Development-only plaintext path. Production clients must use the envelope path.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [value], properties: { value: { type: string, minLength: 1, maxLength: 16384, writeOnly: true } } } } }
+      responses:
+        '200': { description: Input accepted, content: { application/json: { schema: { $ref: '#/components/schemas/InputRequest' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /input-requests/{requestId}/envelope:
+    parameters: [{ name: requestId, in: path, required: true, schema: { type: string, pattern: '^input-request_' } }]
+    post:
+      operationId: provideEncryptedEphemeralInput
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/EphemeralInputEnvelope' } } }
+      responses:
+        '200': { description: Ciphertext accepted, content: { application/json: { schema: { $ref: '#/components/schemas/InputRequest' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+components:
+  securitySchemes:
+    mutualTLS: { type: mutualTLS }
+  parameters:
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 255 } }
+    SessionId: { name: sessionId, in: path, required: true, schema: { type: string, pattern: '^browser-session_' } }
+    JobId: { name: jobId, in: path, required: true, schema: { type: string, pattern: '^job_' } }
+  responses:
+    ProfileCreate:
+      type: object
+      required: [ref, ownerProject, workerId, volumeName, profileFamily, grants]
+      properties:
+        ref: { type: string, pattern: '^profile_' }
+        ownerProject: { type: string, pattern: '^project_' }
+        workerId: { type: string, pattern: '^worker_' }
+        volumeName: { type: string, pattern: '^[a-z][a-z0-9_.-]{0,127}$' }
+        profileFamily: { type: string }
+        grants: { type: array, items: { type: string, pattern: '^project_' } }
+        volumeGeneration: { type: integer, minimum: 1 }
+    Profile:
+      allOf:
+        - $ref: '#/components/schemas/ProfileCreate'
+        - type: object
+          required: [status, volumeGeneration]
+          properties:
+            status: { type: string, enum: [active, unhealthy, relocating, revoked] }
+    Worker:
+      type: object
+      required: [id, endpoint, cdpRelayEndpoint, capabilities, capacity, health, isLocal, resourceLimits]
+      properties:
+        id: { type: string, pattern: '^worker_' }
+        endpoint: { type: string, format: uri }
+        cdpRelayEndpoint: { type: string, format: uri }
+        capacity: { type: integer, minimum: 0, maximum: 3 }
+        health: { type: string, enum: [healthy, degraded, offline, draining] }
+        isLocal: { type: boolean }
+        capabilities: { type: object }
+        resourceLimits: { type: object }
+    InputRequest:
+      type: object
+      required: [id, project, leaseId, field, fieldType, status, expiresAt]
+      properties:
+        id: { type: string, pattern: '^input-request_' }
+        project: { type: string, pattern: '^project_' }
+        leaseId: { type: string, pattern: '^browser-lease_' }
+        field: { type: string }
+        fieldType: { type: string, enum: [password, otp, captcha_provider_credential, proxy_credential, form_value] }
+        status: { type: string, enum: [pending, supplied, consumed, expired, cancelled] }
+        expiresAt: { type: string, format: date-time }
+    EphemeralInputEnvelope:
+      type: object
+      required: [version, algorithm, requestId, workerId, expiresAt, wrappedKey, iv, tag, ciphertext]
+      properties:
+        version: { type: integer, const: 1 }
+        algorithm: { type: string, const: rsa-oaep-sha256+a256gcm }
+        requestId: { type: string, pattern: '^input-request_' }
+        workerId: { type: string, pattern: '^worker_' }
+        expiresAt: { type: string, format: date-time }
+        wrappedKey: { type: string, writeOnly: true }
+        iv: { type: string, writeOnly: true }
+        tag: { type: string, writeOnly: true }
+        ciphertext: { type: string, writeOnly: true }
+    Problem:
+      description: RFC 9457 problem response
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+  schemas:
+    BrowserSessionCreate:
+      type: object
+      required: [project, idempotencyKey, runtime, browserRecipeRef, leaseMode, egressPolicyRef, artifactPolicyRef, ttlSeconds]
+      properties:
+        project: { type: string, pattern: '^project_' }
+        idempotencyKey: { type: string }
+        runtime: { type: string, enum: [chromium-cdp, patchright, rebrowser-puppeteer, playwright-social, companion, media-relay] }
+        browserRecipeRef: { type: string, pattern: '^recipe_' }
+        profileRef: { type: string, pattern: '^profile_' }
+        leaseMode: { type: string, enum: [writer, interactive, clone] }
+        egressPolicyRef: { type: string, pattern: '^egress_' }
+        artifactPolicyRef: { type: string, pattern: '^artifact-policy_' }
+        metadata: { type: object, additionalProperties: { type: [string, number, boolean, 'null'] } }
+        ttlSeconds: { type: integer, minimum: 60, maximum: 14400 }
+    BrowserSession:
+      type: object
+      required: [id, status, expiresAt]
+      properties:
+        id: { type: string, pattern: '^browser-session_' }
+        status: { type: string, enum: [queued, allocating, ready, active, releasing, released, cancelled, failed, timed_out] }
+        cdpEndpoint: { type: string, format: uri }
+        expiresAt: { type: string, format: date-time }
+        workerId: { type: string, pattern: '^worker_' }
+        profileLease: { type: object, properties: { id: { type: string, pattern: '^browser-lease_' }, mode: { type: string }, profileRef: { type: string } } }
+    JobCreate:
+      type: object
+      required: [project, idempotencyKey, recipeRef, operation, egressPolicyRef, artifactPolicyRef]
+      properties:
+        project: { type: string, pattern: '^project_' }
+        idempotencyKey: { type: string }
+        recipeRef: { type: string, pattern: '^recipe_' }
+        operation: { type: object }
+        profileRef: { type: string, pattern: '^profile_' }
+        leaseMode: { type: string, enum: [writer, interactive, clone] }
+        egressPolicyRef: { type: string, pattern: '^egress_' }
+        artifactPolicyRef: { type: string, pattern: '^artifact-policy_' }
+        callback: { type: object, properties: { url: { type: string, format: uri }, eventSecretRef: { type: string } }, required: [url] }
+        ttlSeconds: { type: integer, minimum: 60, maximum: 14400 }
+        metadata: { type: object, additionalProperties: { type: [string, number, boolean, 'null'] } }
+    Job:
+      type: object
+      required: [id, status, expiresAt]
+      properties:
+        id: { type: string, pattern: '^job_' }
+        status: { type: string, enum: [queued, running, awaiting_input, awaiting_manual, succeeded, failed, blocked_challenge, auth_required, timed_out, cancelled] }
+        expiresAt: { type: string, format: date-time }
+        workerId: { type: string, pattern: '^worker_' }
+        result: { type: object }
+    Event:
+      type: object
+      required: [id, sequence, type, createdAt]
+      properties:
+        id: { type: string }
+        sequence: { type: integer }
+        type: { type: string }
+        payload: { type: object }
+        createdAt: { type: string, format: date-time }
+    ProfileCreate:
+      type: object
+      required: [ref, ownerProject, workerId, volumeName, profileFamily, grants]
+      properties:
+        ref: { type: string, pattern: '^profile_' }
+        ownerProject: { type: string, pattern: '^project_' }
+        workerId: { type: string, pattern: '^worker_' }
+        volumeName: { type: string, pattern: '^[a-z][a-z0-9_.-]{0,127}$' }
+        profileFamily: { type: string }
+        grants: { type: array, items: { type: string, pattern: '^project_' } }
+        volumeGeneration: { type: integer, minimum: 1 }
+    Profile:
+      allOf:
+        - $ref: '#/components/schemas/ProfileCreate'
+        - type: object
+          required: [status, volumeGeneration]
+          properties:
+            status: { type: string, enum: [active, unhealthy, relocating, revoked] }
+    Worker:
+      type: object
+      required: [id, endpoint, cdpRelayEndpoint, capabilities, capacity, health, isLocal, resourceLimits]
+      properties:
+        id: { type: string, pattern: '^worker_' }
+        endpoint: { type: string, format: uri }
+        cdpRelayEndpoint: { type: string, format: uri }
+        capacity: { type: integer, minimum: 0, maximum: 3 }
+        health: { type: string, enum: [healthy, degraded, offline, draining] }
+        isLocal: { type: boolean }
+        capabilities: { type: object }
+        resourceLimits: { type: object }
+    InputRequest:
+      type: object
+      required: [id, project, leaseId, field, fieldType, status, expiresAt]
+      properties:
+        id: { type: string, pattern: '^input-request_' }
+        project: { type: string, pattern: '^project_' }
+        leaseId: { type: string, pattern: '^browser-lease_' }
+        field: { type: string }
+        fieldType: { type: string, enum: [password, otp, captcha_provider_credential, proxy_credential, form_value] }
+        status: { type: string, enum: [pending, supplied, consumed, expired, cancelled] }
+        expiresAt: { type: string, format: date-time }
+    EphemeralInputEnvelope:
+      type: object
+      required: [version, algorithm, requestId, workerId, expiresAt, wrappedKey, iv, tag, ciphertext]
+      properties:
+        version: { type: integer, const: 1 }
+        algorithm: { type: string, const: rsa-oaep-sha256+a256gcm }
+        requestId: { type: string, pattern: '^input-request_' }
+        workerId: { type: string, pattern: '^worker_' }
+        expiresAt: { type: string, format: date-time }
+        wrappedKey: { type: string, writeOnly: true }
+        iv: { type: string, writeOnly: true }
+        tag: { type: string, writeOnly: true }
+        ciphertext: { type: string, writeOnly: true }
+    Problem:
+      type: object
+      required: [type, title, status, detail, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+        details: { type: object }

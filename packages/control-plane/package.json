@@ -1,0 +1,12 @@
+{
+  "name": "@browser-fabric/control-plane",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@browser-fabric/contracts": "workspace:*",
+    "@browser-fabric/policy": "workspace:*",
+    "@browser-fabric/recipes": "workspace:*",
+    "pg": "^8.23.0"
+  }
+}

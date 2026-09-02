@@ -1,0 +1,55 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": false,
+    "resolveJsonModule": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": [
+      "bun-types"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@browser-fabric/contracts": [
+        "packages/contracts/src/index.ts"
+      ],
+      "@browser-fabric/policy": [
+        "packages/policy/src/index.ts"
+      ],
+      "@browser-fabric/recipes": [
+        "packages/recipes/src/index.ts"
+      ],
+      "@browser-fabric/control-plane": [
+        "packages/control-plane/src/index.ts"
+      ],
+      "@browser-fabric/client": [
+        "packages/client-ts/src/index.ts"
+      ],
+      "@browser-fabric/worker-manager": [
+        "apps/worker-manager/src/index.ts"
+      ],
+      "@browser-fabric/worker-runtime": [
+        "packages/worker-runtime/src/index.ts"
+      ],
+      "@browser-fabric/testkit": [
+        "packages/testkit/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "apps/**/*.ts",
+    "packages/**/*.ts",
+    "tests/**/*.ts",
+    "apps/input-broker/**/*.ts"
+  ]
+}

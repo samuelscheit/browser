@@ -1,0 +1,9 @@
+{
+  "name": "@browser-fabric/scheduler",
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@browser-fabric/control-plane": "workspace:*",
+    "pg": "^8.23.0"
+  }
+}

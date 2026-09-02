@@ -1,0 +1,7 @@
+{
+  "name": "@browser-fabric/policy",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": { "@browser-fabric/contracts": "workspace:*" }
+}

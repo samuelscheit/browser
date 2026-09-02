@@ -1,0 +1,6 @@
+{
+  "name": "@browser-fabric/input-broker",
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": { "@browser-fabric/contracts": "workspace:*", "@browser-fabric/control-plane": "workspace:*" }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@browser-fabric/local-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@browser-fabric/contracts": "workspace:*",
+    "@browser-fabric/control-plane": "workspace:*",
+    "@browser-fabric/worker-manager": "workspace:*",
+    "@browser-fabric/worker-runtime": "workspace:*"
+  }
+}
