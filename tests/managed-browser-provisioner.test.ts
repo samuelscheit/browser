@@ -86,6 +86,8 @@ describe("managed browser guardians", () => {
     expect(command.calls[0]).not.toContain("node.labels.fabric-worker-id==worker_test");
     expect(command.calls[0]).toContain("--cap-drop");
     expect(command.calls[0]).not.toContain("--security-opt");
+    expect(command.calls[0]?.find((argument) => argument.includes("destination=/fabric/profile"))).toContain("destination=/fabric/profile");
+    expect(command.calls[0]?.some((argument) => argument.includes("destination=/fabric/profile,rw"))).toBe(false);
     expect(await executor.isRunning(started.processId)).toBe(true);
 
     guardian.running = false;
