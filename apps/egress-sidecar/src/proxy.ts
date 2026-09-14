@@ -371,6 +371,10 @@ async function connectViaListener(
     if (!permitted) throw failure("egress listener does not permit this target hostname", 403);
   }
   if (listener.mode === "direct") return { socket: await connectDirect(target, listener.allowPrivateTargets === true) };
+  if (endpoints.length === 0) {
+    if (listener.fallbackToDirect) return { socket: await connectDirect(target, listener.allowPrivateTargets === true) };
+    throw failure("egress listener has no configured upstream", 503);
+  }
   let lastError: unknown;
   const start = selection?.index ?? 0;
   for (let offset = 0; offset < endpoints.length; offset += 1) {

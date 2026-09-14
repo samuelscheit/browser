@@ -28,6 +28,13 @@ export interface EgressListenerConfig {
   allowedHostnameSuffixes?: readonly string[];
   /** Permit this reviewed listener to try direct egress only after every upstream proxy fails. */
   fallbackToDirect?: boolean;
+  /**
+   * Allow the listener to start before its workload credential is provisioned.
+   * Requests fail closed (or use the explicit direct fallback) until an
+   * upstream is configured; the whole Fabric sidecar must not be taken down
+   * by an application that has not been cut over yet.
+   */
+  optional?: boolean;
   /** Select one 0-based endpoint from a multi-entry secret such as the Social pool. */
   upstreamIndex?: number;
 }
@@ -103,7 +110,8 @@ function parseListener(value: unknown, index: number): EgressListenerConfig {
     fail(`listeners[${index}].upstreamSecretFile must be a Docker secret path (or an absolute owner-managed local path in FABRIC_EGRESS_LOCAL_MODE=1)`);
   }
   if (mode === "direct" && (upstreamUrls?.length || upstreamSecretFile)) fail(`listeners[${index}] direct mode cannot configure an upstream`);
-  if (mode === "proxy" && !upstreamUrls?.length && !upstreamSecretFile) fail(`listeners[${index}] proxy mode requires an upstream URL or secret`);
+  const optional = raw.optional === true;
+  if (mode === "proxy" && !upstreamUrls?.length && !upstreamSecretFile && !optional) fail(`listeners[${index}] proxy mode requires an upstream URL or secret`);
   if (allowedHostnameSuffixes && mode !== "direct") fail(`listeners[${index}].allowedHostnameSuffixes is supported only for direct listeners`);
   if (raw.fallbackToDirect === true && mode !== "proxy") fail(`listeners[${index}].fallbackToDirect requires proxy mode`);
   if (upstreamIndex !== undefined && (!Number.isInteger(upstreamIndex) || (upstreamIndex as number) < 0 || (upstreamIndex as number) > 63)) fail(`listeners[${index}].upstreamIndex is invalid`);
@@ -117,6 +125,7 @@ function parseListener(value: unknown, index: number): EgressListenerConfig {
     ...(raw.allowPrivateTargets === true ? { allowPrivateTargets: true } : {}),
     ...(allowedHostnameSuffixes === undefined ? {} : { allowedHostnameSuffixes }),
     ...(raw.fallbackToDirect === true ? { fallbackToDirect: true } : {}),
+    ...(optional ? { optional: true } : {}),
     ...(upstreamIndex === undefined ? {} : { upstreamIndex: upstreamIndex as number }),
   };
 }
@@ -198,12 +207,16 @@ export async function loadListenerEndpoints(listener: EgressListenerConfig): Pro
   const urls = [...(listener.upstreamUrls ?? [])];
   if (listener.upstreamSecretFile) {
     let secret: string;
-    try { secret = await readFile(listener.upstreamSecretFile, "utf8"); } catch { fail(`egress credential secret for listener ${listener.id} is unavailable`); }
+    try { secret = await readFile(listener.upstreamSecretFile, "utf8"); } catch {
+      if (listener.optional) return [];
+      fail(`egress credential secret for listener ${listener.id} is unavailable`);
+    }
     for (const line of secret.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith("#")) urls.push(trimmed);
     }
   }
+  if (urls.length === 0 && listener.optional) return [];
   if (urls.length < 1 || urls.length > 64) fail(`listener ${listener.id} has no usable upstreams`);
   const endpoints = urls.map((url) => parseProxyEndpoint(url, true));
   if (listener.upstreamIndex !== undefined) {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createServer as createTcpServer, connect as connectNet, type Server, type Socket } from "node:net";
 import { createServer as createHttpServer } from "node:http";
-import { parseEgressConfig, parseProxyEndpoint } from "../apps/egress-sidecar/src/config";
+import { loadListenerEndpoints, parseEgressConfig, parseProxyEndpoint } from "../apps/egress-sidecar/src/config";
 import { startProxyListener, type ProxyListener } from "../apps/egress-sidecar/src/proxy";
 import { pac } from "../apps/egress-sidecar/src/server";
 import { builtInEgressPolicies, egressSidecarListeners, internalEgressProxyUrl } from "@browser-fabric/policy";
@@ -63,6 +63,22 @@ describe("Fabric egress sidecar", () => {
     expect(script).not.toContain("DIRECT");
     expect(() => parseEgressConfig({ version: 1, listeners: [{ id: "bad", port: 11_000, mode: "direct", upstreamUrls: ["http://proxy.example"] }], policies: [{ ref: "egress_test@1", defaultListenerId: "bad" }] })).toThrow();
     expect(parseProxyEndpoint("socks5h://user:pass@proxy.example:1234", true)).toMatchObject({ protocol: "socks5h", host: "proxy.example", port: 1234, username: "user", password: "pass" });
+  });
+
+  test("allows an optional workload credential to be provisioned after sidecar startup", async () => {
+    const config = parseEgressConfig({
+      version: 1,
+      listeners: [
+        { id: "optional", port: nextPort(), mode: "proxy", upstreamSecretFile: "/run/secrets/not-yet-provisioned", optional: true },
+        { id: "fallback", port: nextPort(), mode: "proxy", fallbackToDirect: true, optional: true },
+      ],
+      policies: [{ ref: "egress_optional@1", defaultListenerId: "optional" }],
+    });
+    expect(config.listeners[0]?.optional).toBe(true);
+    await expect(loadListenerEndpoints(config.listeners[0]!)).resolves.toEqual([]);
+    const fallback = startProxyListener(config.listeners[1]!, []);
+    await fallback.ready();
+    await closeProxy(fallback);
   });
 
   test("deploys a sidecar listener for every reviewed policy route without mounting solver API keys", async () => {
