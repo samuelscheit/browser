@@ -46,6 +46,10 @@ const requirements = await readFile(join(root, "workers/playwright-social/requir
 if (requirements.split(/\r?\n/).some((line) => line.trim() && !line.trim().startsWith("#") && !/^[A-Za-z0-9_.-]+==[^\s]+$/.test(line.trim()))) {
   throw new Error("workers/playwright-social/requirements.txt must contain exact dependency pins");
 }
+const socialServer = await readFile(join(root, "workers/playwright-social/src/server.py"), "utf8");
+if (!socialServer.includes("ssl.create_default_context") || !socialServer.includes("trust_env=False")) {
+  throw new Error("Social worker must use an explicit mTLS SSL context and bypass ambient proxy variables");
+}
 const dockerIgnore = await readFile(join(root, ".dockerignore"), "utf8");
 for (const expected of [".git", ".env", ".env.*", "node_modules", "**/node_modules", "__pycache__"]) {
   if (!dockerIgnore.split(/\r?\n/).includes(expected)) throw new Error(`.dockerignore must exclude ${expected}`);
