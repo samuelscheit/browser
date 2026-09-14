@@ -84,6 +84,8 @@ describe("managed browser guardians", () => {
     expect(command.calls[0]?.slice(0, 2)).toEqual(["service", "create"]);
     expect(command.calls[0]).toContain("node.labels.fabric-worker-worker-test==true");
     expect(command.calls[0]).not.toContain("node.labels.fabric-worker-id==worker_test");
+    expect(command.calls[0]).toContain("--cap-drop");
+    expect(command.calls[0]).not.toContain("--security-opt");
     expect(await executor.isRunning(started.processId)).toBe(true);
 
     guardian.running = false;
