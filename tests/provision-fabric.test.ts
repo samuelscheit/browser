@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { FabricError } from "@browser-fabric/contracts";
 import { createTestScheduler } from "@browser-fabric/testkit";
-import { parseProvisionManifest, provisionManifest, type ProvisionManifest } from "../scripts/provision-fabric";
+import { parseProvisionManifest, provisionManifest, type ProvisionManifest } from "../apps/worker-manager/src/provision-fabric";
 
 const exampleManifestPath = new URL("../deploy/compose/provision-manifest.example.json", import.meta.url);
 

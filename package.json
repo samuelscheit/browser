@@ -23,7 +23,7 @@
     "migration:inventory": "bun scripts/migration-inventory.ts",
     "generate:assignment-keys": "bun scripts/generate-assignment-keys.ts",
     "generate:worker-input-key": "bun scripts/generate-worker-input-key.ts",
-    "provision": "bun scripts/provision-fabric.ts"
+    "provision": "bun apps/worker-manager/src/provision-fabric.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
