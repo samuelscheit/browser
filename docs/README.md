@@ -41,6 +41,7 @@ The default test suite uses an in-memory store and fake clock. PostgreSQL and Mi
 | API | `apps/api/src/server.ts` | mTLS-authenticated control-plane API and authorized media-playback capability issuer |
 | Scheduler | `apps/scheduler/src/index.ts` | FIFO dispatch, recovery, callbacks |
 | CDP gateway | `apps/cdp-gateway/src/server.ts` | per-session browser-level WSS relay |
+| CDP client relay | `apps/cdp-client-relay/src/server.ts` | private application-side mTLS bridge for CDP clients that cannot present a client certificate |
 | Media playback gateway | `apps/media-playback-gateway/src/server.ts` | opaque Ed25519 HLS/direct-MP4 capability relay to private media workers |
 | Worker manager | `apps/worker-manager/src/server.ts` | worker registration, mailbox, assignment claims |
 | Encrypted input broker | `apps/input-broker/src/index.ts` | transient ciphertext-only input handoff |
