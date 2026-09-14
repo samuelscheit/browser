@@ -124,6 +124,8 @@ export interface SqlClient {
   query<T = unknown>(sql: string, parameters?: readonly unknown[]): Promise<{ rows: T[] }>;
   /** Executes `operation` on one database connection inside one SQL transaction when supported. */
   withTransaction?<T>(operation: (transaction: SqlClient) => Promise<T>): Promise<T>;
+  /** Pin a cross-process coordination lock to one database session when supported. */
+  withAdvisoryLock?<T>(key: string, operation: (client: SqlClient) => Promise<T>): Promise<T>;
 }
 
 /**
@@ -134,6 +136,7 @@ export class PostgresFabricStore extends InMemoryFabricStore {
   readonly #client: SqlClient;
   readonly #schemaSql: string;
   #initialized = false;
+  #initializing?: Promise<void>;
   #persistedSequence = -1;
 
   public constructor(client: SqlClient, schemaSql: string) {
@@ -144,14 +147,21 @@ export class PostgresFabricStore extends InMemoryFabricStore {
 
   public async initialize(): Promise<void> {
     if (this.#initialized) return;
-    await this.#client.query(this.#schemaSql);
-    // A Fabric process restart is not a browser-worker crash. API, gateway, scheduler, and
-    // worker-manager replicas all construct this store independently, while the browser process
-    // and its lease heartbeat may still be healthy on another node. Rewriting every active lease
-    // to `lost` here would let an innocent API/gateway restart persist a fake recovery and create
-    // a concurrent writer. Scheduler recovery owns reclamation after the *actual* heartbeat
-    // timeout, so startup must load durable state verbatim.
-    await this.#loadLatestState(this.#client, false);
+    const initializing = this.#initializing ??= this.#initialize();
+    try {
+      await initializing;
+    } finally {
+      if (this.#initializing === initializing) this.#initializing = undefined;
+    }
+  }
+
+  async #initialize(): Promise<void> {
+    const initialize = async (client: SqlClient): Promise<void> => {
+      await client.query(this.#schemaSql);
+      await this.#loadLatestState(client, false);
+    };
+    if (this.#client.withAdvisoryLock) await this.#client.withAdvisoryLock("browser-fabric-schema", initialize);
+    else await initialize(this.#client);
     this.#initialized = true;
   }
 
@@ -166,6 +176,7 @@ export class PostgresFabricStore extends InMemoryFabricStore {
       const previousState = cloneState(this.state);
       const previousPersistedSequence = this.#persistedSequence;
       const run = async (transaction: SqlClient): Promise<T> => {
+        await transaction.query("SELECT pg_advisory_xact_lock(hashtext('browser-fabric-schema'))");
         await transaction.query("SELECT pg_advisory_xact_lock(hashtext('browser-fabric-scheduler'))");
         // Lock in a stable order so concurrent schedulers cannot race worker/profile capacity
         // or deadlock while one replica is dispatching and another is recovering.

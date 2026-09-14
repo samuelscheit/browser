@@ -39,4 +39,19 @@ export class PgSqlClient implements SqlClient {
       client.release();
     }
   }
+  /** Run an operation on one pooled connection while holding a session advisory lock. */
+  public async withAdvisoryLock<T>(key: string, operation: (client: SqlClient) => Promise<T>): Promise<T> {
+    if (!this.pool) return operation(this);
+    const client = await this.pool.connect();
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtext($1))", [key]);
+      try {
+        return await operation(new PgSqlClient(client));
+      } finally {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1))", [key]);
+      }
+    } finally {
+      client.release();
+    }
+  }
 }
