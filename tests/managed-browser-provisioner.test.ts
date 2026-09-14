@@ -82,6 +82,8 @@ describe("managed browser guardians", () => {
     expect(started.cdpBrowserEndpoint).toBeDefined();
     expect(factoryInputs).toEqual([{ endpoint: started.cdpBrowserEndpoint!, enabled: true }]);
     expect(command.calls[0]?.slice(0, 2)).toEqual(["service", "create"]);
+    expect(command.calls[0]).toContain("node.labels.fabric-worker-worker-test==true");
+    expect(command.calls[0]).not.toContain("node.labels.fabric-worker-id==worker_test");
     expect(await executor.isRunning(started.processId)).toBe(true);
 
     guardian.running = false;

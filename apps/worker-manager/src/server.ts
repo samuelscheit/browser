@@ -205,7 +205,6 @@ if (import.meta.main) {
       .filter((entry): entry is [string, string] => Boolean(entry[1])),
   );
   const browserExecutor = new DockerServiceExecutor({
-    workerNodeLabelKey: process.env.FABRIC_WORKER_NODE_LABEL_KEY ?? "fabric-worker-id",
     browserNetworks,
     egressNetwork,
     runtimeImageOverrides,
@@ -218,7 +217,6 @@ if (import.meta.main) {
   // image.  Keep this override explicit so a media job can never accidentally start a browser
   // runtime or inherit a mutable tag.
   const mediaExecutor = new DockerMediaServiceExecutor({
-    workerNodeLabelKey: process.env.FABRIC_WORKER_NODE_LABEL_KEY ?? "fabric-worker-id",
     browserNetworks,
     egressNetwork,
     runtimeImageOverrides,
