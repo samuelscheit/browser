@@ -203,6 +203,12 @@ export class ManagedWorkerController {
         }
       }
     } catch (error) {
+      console.error("[fabric] managed assignment failed", {
+        workerId: worker.id,
+        identity,
+        runtime: assignment.recipe.runtime,
+        error: error instanceof Error ? error.message : String(error),
+      });
       if (startedProcess) await this.#stopProcess({ workerId: worker.id, identity, ...startedProcess }).catch(() => undefined);
       if (claimed?.job?.runtime === "media-relay") {
         const message = error instanceof Error ? error.message : "managed media worker failed to start";

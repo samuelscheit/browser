@@ -13,6 +13,47 @@ function headers(worker: { certificateFingerprint: string }, enrollment?: string
 }
 
 describe("worker-manager control authentication", () => {
+  test("accepts a structurally identical worker registration when object key order changes", async () => {
+    const { scheduler } = createTestScheduler();
+    await scheduler.bootstrap({ projects: [{ id: TEST_PROJECT, name: "Test" }], principals: [TEST_PRINCIPAL] });
+    const enrollment = "worker-registration-ordering-token-at-least-24-bytes";
+    const worker = makeWorker({ id: "worker_registration_order" as never, enrollmentTokenHash: workerEnrollmentTokenHash(enrollment) });
+    await scheduler.registerWorker(worker, TEST_PRINCIPAL);
+
+    const advertised = {
+      id: worker.id,
+      certificateFingerprint: worker.certificateFingerprint,
+      endpoint: worker.endpoint,
+      cdpRelayEndpoint: worker.cdpRelayEndpoint,
+      ...(worker.mediaPlaybackEndpoint === undefined ? {} : { mediaPlaybackEndpoint: worker.mediaPlaybackEndpoint }),
+      capabilities: {
+        supportsCompanionCompanion: worker.capabilities.supportsCompanionCompanion,
+        supportedProfileFamilies: worker.capabilities.supportedProfileFamilies,
+        browserVersions: worker.capabilities.browserVersions,
+        recipeRefs: worker.capabilities.recipeRefs,
+        supportsInteractive: worker.capabilities.supportsInteractive,
+        runtimeFamilies: worker.capabilities.runtimeFamilies,
+      },
+      capacity: worker.capacity,
+      mediaCapacity: worker.mediaCapacity,
+      health: worker.health,
+      isLocal: worker.isLocal,
+      volumeNames: worker.volumeNames,
+      resourceLimits: {
+        temporaryStorageMiB: worker.resourceLimits.temporaryStorageMiB,
+        shmMiB: worker.resourceLimits.shmMiB,
+        pids: worker.resourceLimits.pids,
+        memoryMiB: worker.resourceLimits.memoryMiB,
+        cpuMilli: worker.resourceLimits.cpuMilli,
+        maxBrowserLeases: worker.resourceLimits.maxBrowserLeases,
+      },
+    };
+
+    await expect(
+      scheduler.refreshWorkerRegistration(advertised, worker.certificateFingerprint, enrollment),
+    ).resolves.toMatchObject({ id: worker.id, health: "healthy" });
+  });
+
   test("requires the worker-specific enrollment secret on every control route", async () => {
     const { scheduler } = createTestScheduler();
     await scheduler.bootstrap({ projects: [{ id: TEST_PROJECT, name: "Test" }], principals: [TEST_PRINCIPAL] });

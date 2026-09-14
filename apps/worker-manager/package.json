@@ -2,6 +2,7 @@
   "name": "@browser-fabric/worker-manager",
   "version": "0.1.0",
   "type": "module",
+  "exports": "./src/index.ts",
   "dependencies": {
     "@browser-fabric/contracts": "workspace:*",
     "@browser-fabric/control-plane": "workspace:*",

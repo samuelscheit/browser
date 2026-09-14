@@ -238,6 +238,37 @@ function matchesEnrollmentToken(hash: string | undefined, token: string): boolea
   const received = Buffer.from(computed.slice(7), "hex");
   return expected.length === received.length && timingSafeEqual(expected, received);
 }
+/**
+ * Worker registrations cross a PostgreSQL JSONB boundary. JSONB preserves values but not object
+ * insertion order, so JSON.stringify would reject an otherwise identical worker every time a
+ * nested capability or resource-limits object is rehydrated in a different key order.
+ */
+function matchesProvisionedWorkerRegistration(
+  existing: Worker,
+  worker: Omit<Worker, "activeLeases" | "createdAt" | "updatedAt" | "lastHeartbeatAt" | "enrollmentTokenHash">,
+): boolean {
+  return canonicalJson({
+    capabilities: existing.capabilities,
+    capacity: existing.capacity,
+    mediaCapacity: existing.mediaCapacity,
+    isLocal: existing.isLocal,
+    resourceLimits: existing.resourceLimits,
+    volumeNames: existing.volumeNames,
+    endpoint: existing.endpoint,
+    cdpRelayEndpoint: existing.cdpRelayEndpoint,
+    mediaPlaybackEndpoint: existing.mediaPlaybackEndpoint,
+  }) === canonicalJson({
+    capabilities: worker.capabilities,
+    capacity: worker.capacity,
+    mediaCapacity: worker.mediaCapacity,
+    isLocal: worker.isLocal,
+    resourceLimits: worker.resourceLimits,
+    volumeNames: worker.volumeNames,
+    endpoint: worker.endpoint,
+    cdpRelayEndpoint: worker.cdpRelayEndpoint,
+    mediaPlaybackEndpoint: worker.mediaPlaybackEndpoint,
+  });
+}
 
 function sessionResponse(session: BrowserSession): BrowserSessionResponse {
   return {
@@ -537,7 +568,7 @@ export class BrowserScheduler {
       if (existing.certificateFingerprint !== certificateFingerprint || worker.certificateFingerprint !== certificateFingerprint) throw new FabricError("authorization_denied", "worker certificate does not match its provisioned identity", 403);
       if (!matchesEnrollmentToken(existing.enrollmentTokenHash, enrollmentToken)) throw new FabricError("authentication_required", "worker enrollment token is invalid", 401);
       // A worker cannot use refresh to expand its powers or relocate persistent profile volumes.
-      if (JSON.stringify(existing.capabilities) !== JSON.stringify(worker.capabilities) || existing.capacity !== worker.capacity || existing.mediaCapacity !== worker.mediaCapacity || existing.isLocal !== worker.isLocal || JSON.stringify(existing.resourceLimits) !== JSON.stringify(worker.resourceLimits) || JSON.stringify(existing.volumeNames) !== JSON.stringify(worker.volumeNames) || existing.endpoint !== worker.endpoint || existing.cdpRelayEndpoint !== worker.cdpRelayEndpoint || existing.mediaPlaybackEndpoint !== worker.mediaPlaybackEndpoint) {
+      if (!matchesProvisionedWorkerRegistration(existing, worker)) {
         throw new FabricError("authorization_denied", "worker registration differs from its admin-provisioned configuration", 403);
       }
       if (worker.inputEncryptionPublicKeyPem && existing.inputEncryptionPublicKeyPem && worker.inputEncryptionPublicKeyPem !== existing.inputEncryptionPublicKeyPem) throw new FabricError("authorization_denied", "worker input encryption key differs from the provisioned key", 403);
