@@ -1,5 +1,8 @@
 export * from "./object-store";
+export * from "./object-store-runtime";
 export * from "./artifacts";
+export * from "./artifact-access";
+export * from "./artifact-service";
 export * from "./capability";
 export * from "./clock";
 export * from "./mutex";
@@ -19,3 +22,6 @@ export * from "./scheduler-recovery";
 export * from "./scheduler-admin";
 export * from "./input-broker";
 export * from "./tls";
+export * from "./identity";
+export * from "./media-manifest";
+export * from "./media-playback";

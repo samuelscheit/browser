@@ -1,23 +1,35 @@
 import {
   FabricError,
   parseInputFieldType,
-  parseInputValue,
   parseBrowserSessionCreate,
   parseProfileCreate,
   parseJobCreate,
+  publicArtifact,
+  type Artifact,
   type Principal
 } from "@browser-fabric/contracts";
-import { BrowserScheduler } from "@browser-fabric/control-plane";
+import { ArtifactAccess, ArtifactCollector, ArtifactService, BrowserScheduler, MemoryObjectStore } from "@browser-fabric/control-plane";
 import { parseWorkerRegistration } from "../../worker-manager/src/protocol";
 import type { EncryptedInputBroker } from "@browser-fabric/control-plane";
+import { MediaPlaybackGateway } from "../../media-playback-gateway/src/index";
 
 export interface ApiServerOptions {
   scheduler: BrowserScheduler;
   encryptedInputBroker?: EncryptedInputBroker;
+  /** Required for application artifact uploads and short-lived artifact downloads. */
+  artifactService?: ArtifactService;
+  artifactAccess?: ArtifactAccess;
+  /** Authenticated issuer for active media-playback job URLs. It need not reach media workers. */
+  mediaPlaybackGateway?: MediaPlaybackGateway;
   /** Production deployment should derive this only after Traefik mTLS verification. */
   authenticate(request: Request): Promise<Principal | undefined> | Principal | undefined;
   corsOrigins?: readonly string[];
 }
+
+const MAX_ARTIFACT_UPLOAD_BYTES = 32 * 1024 * 1024;
+const artifactKinds = new Set<Artifact["kind"]>(["screenshot", "mhtml", "trace", "har", "download", "video", "log", "media_manifest"]);
+const mediaManifestContentType = "application/vnd.browser-fabric.media-manifest+json";
+const defaultArtifactPolicyRef = "artifact-policy_standard-30-days@1";
 
 function json(body: unknown, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
@@ -44,6 +56,77 @@ async function requestJson(request: Request): Promise<unknown> {
     if (error instanceof FabricError) throw error;
     throw new FabricError("validation_failed", "request body must be valid JSON", 400);
   }
+}
+
+async function requestBytes(request: Request, limit = MAX_ARTIFACT_UPLOAD_BYTES): Promise<Uint8Array> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > limit)) {
+    throw new FabricError("validation_failed", "artifact upload exceeds the configured limit", 413);
+  }
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > limit) throw new FabricError("validation_failed", "artifact upload exceeds the configured limit", 413);
+      chunks.push(next.value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function artifactUploadHeaders(request: Request): { kind: Artifact["kind"]; contentType: string; label?: string } {
+  const kind = request.headers.get("x-fabric-artifact-kind");
+  if (!kind || !artifactKinds.has(kind as Artifact["kind"])) throw new FabricError("validation_failed", "x-fabric-artifact-kind is invalid", 400);
+  const contentType = request.headers.get("content-type")?.trim();
+  if (!contentType || contentType.length > 255 || /[\0\r\n]/.test(contentType)) throw new FabricError("validation_failed", "artifact content type is invalid", 415);
+  const label = request.headers.get("x-fabric-artifact-label")?.trim();
+  if (label !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(label))) throw new FabricError("validation_failed", "x-fabric-artifact-label is invalid", 400);
+  return { kind: kind as Artifact["kind"], contentType, ...(label === undefined ? {} : { label }) };
+}
+
+function mediaManifestUploadHeaders(request: Request): { kind: "media_manifest"; contentType: string; label?: string; artifactPolicyRef: string } {
+  const parsed = artifactUploadHeaders(request);
+  const baseContentType = parsed.contentType.toLowerCase().split(";", 1)[0]?.trim();
+  if (parsed.kind !== "media_manifest" || baseContentType !== mediaManifestContentType) {
+    throw new FabricError("validation_failed", "project media manifest uploads require media_manifest kind and the Fabric media-manifest content type", 415);
+  }
+  const artifactPolicyRef = request.headers.get("x-fabric-artifact-policy-ref")?.trim() || defaultArtifactPolicyRef;
+  if (!/^artifact-policy_[A-Za-z0-9][A-Za-z0-9_.-]*@\d+$/.test(artifactPolicyRef)) {
+    throw new FabricError("validation_failed", "x-fabric-artifact-policy-ref is invalid", 400);
+  }
+  return { ...parsed, kind: "media_manifest", artifactPolicyRef };
+}
+
+function requireArtifactService(options: ApiServerOptions): ArtifactService {
+  if (!options.artifactService) throw new FabricError("invalid_state", "artifact storage is not configured", 503);
+  return options.artifactService;
+}
+
+function requireArtifactAccess(options: ApiServerOptions): ArtifactAccess {
+  if (!options.artifactAccess) throw new FabricError("invalid_state", "artifact storage is not configured", 503);
+  return options.artifactAccess;
+}
+
+function artifactDownloadTtl(url: URL): number {
+  const raw = url.searchParams.get("ttlSeconds");
+  if (raw === null) return 60;
+  if (!/^\d+$/.test(raw)) throw new FabricError("validation_failed", "ttlSeconds must be an integer from 1 to 900", 400);
+  const ttlSeconds = Number(raw);
+  if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 900) throw new FabricError("validation_failed", "ttlSeconds must be an integer from 1 to 900", 400);
+  return ttlSeconds;
 }
 
 function requireIdempotencyHeader(request: Request, body: { idempotencyKey?: string }): void {
@@ -88,7 +171,7 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
   return async (request: Request): Promise<Response> => {
     const origin = request.headers.get("origin");
     const corsHeaders: Record<string, string> = origin && corsOrigins.has(origin) ? { "access-control-allow-origin": origin, vary: "origin" } : {};
-    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...corsHeaders, "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type,idempotency-key" } });
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...corsHeaders, "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type,idempotency-key,x-fabric-artifact-kind,x-fabric-artifact-label,x-fabric-artifact-policy-ref" } });
     try {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/healthz") return json({ status: "ok" }, 200, corsHeaders);
@@ -108,6 +191,12 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
       if (parts[0] === "browser-sessions" && parts[1]) {
         const sessionId = decodeURIComponent(parts[1]) as never;
         if (parts.length === 2 && request.method === "GET") return json(await options.scheduler.getSession(sessionId, actor), 200, corsHeaders);
+        if (parts[2] === "artifacts" && parts.length === 3 && request.method === "GET") return json((await options.scheduler.listArtifactsForSession(sessionId, actor)).map(publicArtifact), 200, corsHeaders);
+        if (parts[2] === "artifacts" && parts.length === 3 && request.method === "POST") {
+          const headers = artifactUploadHeaders(request);
+          const artifact = await requireArtifactService(options).capture({ sessionId }, { ...headers, bytes: await requestBytes(request) }, actor);
+          return json(publicArtifact(artifact), 201, corsHeaders);
+        }
         if (parts[2] === "heartbeat" && request.method === "POST") return json(await options.scheduler.heartbeatSession(sessionId, actor), 200, corsHeaders);
         if (parts[2] === "release" && request.method === "POST") return json(await options.scheduler.releaseBrowserSession(sessionId, actor), 200, corsHeaders);
         if (parts[2] === "cancel" && request.method === "POST") return json(await options.scheduler.cancelBrowserSession(sessionId, actor), 200, corsHeaders);
@@ -132,6 +221,16 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
       if (parts[0] === "jobs" && parts[1]) {
         const jobId = decodeURIComponent(parts[1]) as never;
         if (parts.length === 2 && request.method === "GET") return json(await options.scheduler.getJob(jobId, actor), 200, corsHeaders);
+        if (parts[2] === "artifacts" && parts.length === 3 && request.method === "GET") return json((await options.scheduler.listArtifactsForJob(jobId, actor)).map(publicArtifact), 200, corsHeaders);
+        if (parts[2] === "artifacts" && parts.length === 3 && request.method === "POST") {
+          const headers = artifactUploadHeaders(request);
+          const artifact = await requireArtifactService(options).capture({ jobId }, { ...headers, bytes: await requestBytes(request) }, actor);
+          return json(publicArtifact(artifact), 201, corsHeaders);
+        }
+        if (parts[2] === "media-playback" && parts.length === 3 && request.method === "POST") {
+          if (!options.mediaPlaybackGateway) throw new FabricError("not_found", "media playback is not configured", 404);
+          return json(await options.mediaPlaybackGateway.issue(jobId, actor), 201, corsHeaders);
+        }
         if (parts[2] === "cancel" && request.method === "POST") return json(await options.scheduler.cancelJob(jobId, actor), 200, corsHeaders);
         if (parts[2] === "resume" && request.method === "POST") return json(await options.scheduler.resumeJob(jobId, actor), 200, corsHeaders);
         if (parts[2] === "events" && request.method === "GET") {
@@ -146,9 +245,20 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
           return json(await options.scheduler.requestEphemeralInput({ jobId, leaseId: input.leaseId as never, field: String(input.field ?? ""), fieldType: parseInputFieldType(input.fieldType) }, actor), 201, corsHeaders);
         }
       }
-      if (parts[0] === "input-requests" && parts[1] && parts[2] === "value" && request.method === "POST") {
-        const input = await requestJson(request) as Record<string, unknown>;
-        return json(await options.scheduler.provideEphemeralInput(decodeURIComponent(parts[1]) as never, parseInputValue(input.value), actor), 200, corsHeaders);
+      if (parts[0] === "projects" && parts[1] && parts[2] === "media-manifests" && parts.length === 3 && request.method === "POST") {
+        const project = decodeURIComponent(parts[1]);
+        if (!/^project_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(project)) throw new FabricError("validation_failed", "project identifier is invalid", 400);
+        const headers = mediaManifestUploadHeaders(request);
+        const artifact = await requireArtifactService(options).captureMediaManifest(project as never, headers.artifactPolicyRef as never, { kind: headers.kind, contentType: headers.contentType, bytes: await requestBytes(request, 64 * 1024), ...(headers.label === undefined ? {} : { label: headers.label }) }, actor);
+        return json(publicArtifact(artifact), 201, corsHeaders);
+      }
+      if (parts[0] === "input-requests" && parts[1] && parts.length === 2 && request.method === "GET") {
+        return json(await options.scheduler.getEphemeralInputRequest(decodeURIComponent(parts[1]) as never, actor), 200, corsHeaders);
+      }
+      if (parts[0] === "artifacts" && parts[1] && parts.length === 2 && request.method === "GET") {
+        const project = url.searchParams.get("project");
+        if (!project || !/^project_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(project)) throw new FabricError("validation_failed", "project query parameter is required", 400);
+        return json(await requireArtifactAccess(options).download(decodeURIComponent(parts[1]) as never, project as never, actor, artifactDownloadTtl(url)), 200, corsHeaders);
       }
       if (parts[0] === "input-requests" && parts[1] && parts[2] === "envelope" && request.method === "POST") {
         const envelope = await requestJson(request) as Record<string, unknown>;
@@ -171,6 +281,12 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
           }
           throw error;
         }
+      }
+      if (parts[0] === "jobs" && parts[1] && parts[2] === "input-requests" && parts.length === 3 && request.method === "GET") {
+        return json(await options.scheduler.listEphemeralInputRequests({ jobId: decodeURIComponent(parts[1]) as never }, actor), 200, corsHeaders);
+      }
+      if (parts[0] === "browser-sessions" && parts[1] && parts[2] === "input-requests" && parts.length === 3 && request.method === "GET") {
+        return json(await options.scheduler.listEphemeralInputRequests({ sessionId: decodeURIComponent(parts[1]) as never }, actor), 200, corsHeaders);
       }
       if (parts.length === 1 && parts[0] === "profiles" && request.method === "POST") {
         return json(await options.scheduler.createProfile(parseProfileCreate(await requestJson(request)), actor), 201, corsHeaders);
@@ -236,7 +352,9 @@ if (import.meta.main) {
     projects: [{ id: "project_demo" as never, name: "Demo" }],
     principals: [{ id: "principal_dev" as never, displayName: "development principal", projectGrants: ["project_demo" as never], roles: ["fabric_admin", "project_admin"], certificateFingerprint: "development", createdAt: new Date().toISOString() }]
   });
+  const objectStore = new MemoryObjectStore();
+  const collector = new ArtifactCollector({ scheduler, objectStore });
   const port = Number(process.env.PORT ?? 8080);
-  Bun.serve({ port, fetch: createApiFetch({ scheduler, authenticate: localPrincipal }) });
+  Bun.serve({ port, fetch: createApiFetch({ scheduler, authenticate: localPrincipal, artifactService: new ArtifactService({ scheduler, collector }), artifactAccess: new ArtifactAccess({ scheduler, objectStore }) }) });
   console.info(`Browser Fabric API listening on :${port}`);
 }

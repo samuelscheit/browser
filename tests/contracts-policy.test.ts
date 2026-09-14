@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { FabricError, parseBrowserSessionCreate, parseJobCreate } from "@browser-fabric/contracts";
+import { FabricError, parseBrowserSessionCreate, parseJobCreate, parseMediaManifest } from "@browser-fabric/contracts";
+import { assertDurablePayload, scalarMetadata } from "@browser-fabric/control-plane";
 import { builtInEgressPolicies, classifyTraffic, compileEgressManifest, decideEgress, parseProxyUrl, planChallenge } from "@browser-fabric/policy";
 import { builtInChallengeSets } from "@browser-fabric/policy";
 import { RecipeRegistry, assertOperationContainsNoSecrets, builtInRecipes, validateTypedOperation } from "@browser-fabric/recipes";
@@ -51,7 +52,52 @@ describe("contracts and immutable policies", () => {
     const recipe = new RecipeRegistry().get("recipe_profile-update-companion@1" as never);
     validateTypedOperation(recipe, { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: "artifact_1", approvedBy: "principal_test" });
     expect(() => validateTypedOperation(recipe, { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: "artifact_1", approvedBy: "principal_test", selector: "//bad" })).toThrow(/not permitted/);
+    expect(() => validateTypedOperation(recipe, { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: "artifact_1", approvedBy: "principal_test", expectedAccount: "caller@example.test" })).toThrow(/not permitted/);
+    expect(() => validateTypedOperation(recipe, { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: "artifact_1", approvedBy: "principal_test", dryRun: true })).toThrow(/not permitted/);
     expect(builtInRecipes.length).toBeGreaterThanOrEqual(12);
+  });
+
+  test("media manifests permit only bounded non-secret playback context", () => {
+    const manifest = parseMediaManifest({
+      version: 1,
+      mode: "relay",
+      provider: "Media",
+      url: "https://media.example/video.mp4",
+      artifactKind: "video",
+      requestHeaders: {
+        accept: "*/*",
+        origin: "https://media.example",
+        referer: "https://media.example/watch",
+        "user-agent": "Fabric fixture",
+      },
+    });
+    expect(manifest.mode).toBe("relay");
+    if (manifest.mode !== "relay") throw new Error("fixture must parse as a relay manifest");
+    expect(manifest.requestHeaders).toEqual({
+      accept: "*/*",
+      origin: "https://media.example",
+      referer: "https://media.example/watch",
+      "user-agent": "Fabric fixture",
+    });
+    expect(() => parseMediaManifest({ ...manifest, requestHeaders: { cookie: "must-not-persist" } })).toThrow(/not permitted/);
+    expect(() => parseMediaManifest({ ...manifest, requestHeaders: { authorization: "Bearer opaque" } })).toThrow(/not permitted/);
+    expect(() => parseMediaManifest({ ...manifest, requestHeaders: { origin: "https://user:pass@media.example" } })).toThrow(/credential-free/);
+  });
+
+  test("rejects credential-bearing URLs and authorization values from durable fields", () => {
+    expect(() => assertDurablePayload({ sourceUrl: "https://user:password@example.test/file" })).toThrow(/URL credentials/);
+    expect(() => assertDurablePayload({ sourceUrl: "https://example.test/file?X-Amz-Signature=opaque" })).toThrow(/query parameter/);
+    expect(() => assertDurablePayload({ description: "Bearer opaque-access-token-value" })).toThrow(/authorization material/);
+    expect(() => scalarMetadata({ callbackUrl: "https://example.test/hook?token=opaque" })).toThrow(/query parameter/);
+    expect(() => parseJobCreate({
+      project: "project_test",
+      idempotencyKey: "callback-secret-url",
+      recipeRef: "recipe_social-insights@1",
+      operation: { operation: "collect_insights", username: "creator" },
+      egressPolicyRef: "egress_social-proxy-fallback@1",
+      artifactPolicyRef: "artifact-policy_standard-30-days@1",
+      callback: { url: "https://app.example/hook?signature=opaque" },
+    })).toThrow(/credential material/);
   });
 });
 
@@ -83,8 +129,9 @@ test("Media provider exceptions and Social proxy fallback order are explicit", a
     proxyTransport: { fetch: async (url) => { mediaCalls.push(`proxy:${url}`); throw new Error("proxy down"); } },
     proxyUrls: ["socks5h://proxy.example:1080"]
   });
-  await mediaFetcher.fetch("https://media.cdn-a/path");
+  await mediaFetcher.fetch("https://cdn-a.example/path");
   expect(mediaCalls[0]).toMatch(/^direct:/);
+  await expect(mediaFetcher.fetch("https://media.cdn-a/path")).rejects.toThrow(/proxy down/);
 
   const social = builtInEgressPolicies.find((candidate) => candidate.family === "social-proxy-fallback")!;
   const attempts: string[] = [];

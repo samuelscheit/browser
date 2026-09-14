@@ -43,9 +43,11 @@ describe("scheduler lifecycle, leases, and recovery", () => {
     const clock = new FakeClock("2026-01-01T00:00:00.000Z");
     const context = await bootstrapTestScheduler();
     // Use a clock shared with the scheduler for deterministic expiry.
-    const { scheduler, profile, store } = context;
+    const { scheduler, profile, store, worker } = context;
     const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "cap", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 60 }, TEST_PRINCIPAL);
-    await scheduler.dispatch();
+    const [assignment] = await scheduler.dispatch();
+    await scheduler.claimAssignment("worker_test" as never, assignment!.lease!.id, undefined, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
+    await scheduler.markLeaseStarted(assignment!.lease!.id, worker.id, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
     const internal = (await store.snapshot()).sessions.get(session.id as BrowserSessionId)!;
     expect(internal.cdpEndpoint).toContain("cap=");
     await scheduler.registerExternalCdpConnection(session.id as BrowserSessionId, new URL(internal.cdpEndpoint!).searchParams.get("cap")!);
@@ -68,13 +70,27 @@ describe("scheduler lifecycle, leases, and recovery", () => {
   });
 
   test("media-only jobs use bounded media capacity without browser leases", async () => {
-    const { scheduler, worker, store } = await bootstrapTestScheduler();
-    const job = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "media", recipeRef: "recipe_media-media@1" as never, operation: { operation: "relay", manifestRef: "artifact-manifest_1" }, egressPolicyRef: "egress_media-proxy-affinity@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never }, TEST_PRINCIPAL);
+    const { scheduler, worker, store, profile, clock } = await bootstrapTestScheduler();
+    const { ArtifactCollector, MemoryObjectStore } = await import("@browser-fabric/control-plane");
+    const manifestSession = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "media-manifest-owner", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const policy = await scheduler.getArtifactPolicy("artifact-policy_standard-30-days@1" as never, TEST_PRINCIPAL);
+    const manifest = await new ArtifactCollector({ scheduler, objectStore: new MemoryObjectStore(undefined, () => clock.now()), clock: () => clock.now() }).capture({
+      project: TEST_PROJECT,
+      sessionId: manifestSession.id,
+      kind: "media_manifest",
+      contentType: "application/vnd.browser-fabric.media-manifest+json",
+      bytes: new TextEncoder().encode(JSON.stringify({ version: 1, mode: "relay", provider: "Media", url: "https://media.example/video.mp4", artifactKind: "video" })),
+      policy,
+      actor: TEST_PRINCIPAL,
+    });
+    await scheduler.releaseBrowserSession(manifestSession.id, TEST_PRINCIPAL);
+    const job = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "media", recipeRef: "recipe_media-media@1" as never, operation: { operation: "relay", manifestRef: manifest.id }, egressPolicyRef: "egress_media-proxy-affinity@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never }, TEST_PRINCIPAL);
     const [assignment] = await scheduler.dispatch();
     expect(assignment?.lease).toBeUndefined();
     expect((await store.snapshot()).activeBrowserLeases).toBe(0);
     expect((await store.snapshot()).workers.get(worker.id)?.activeMediaTasks).toBe(1);
-    await scheduler.completeJob(job.id as JobId, { status: "ok" }, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
+    const attemptId = (await store.snapshot()).jobs.get(job.id)!.mediaAttemptId;
+    await scheduler.failMediaTask(job.id as JobId, worker.id, attemptId, "test media service stopped", { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
     expect((await store.snapshot()).workers.get(worker.id)?.activeMediaTasks).toBe(0);
   });
 
@@ -123,4 +139,23 @@ test("claimed leases expire independently from worker heartbeat", async () => {
   expect(recovery.expiredSessions).toBe(1);
   expect((await scheduler.getSession(session.id as never, TEST_PRINCIPAL)).status).toBe("timed_out");
   expect((await store.snapshot()).activeBrowserLeases).toBe(0);
+});
+
+test("does not issue a CDP capability until the claimed worker proves browser readiness", async () => {
+  const { scheduler, worker, profile, store } = await bootstrapTestScheduler();
+  const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "activation-boundary", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+  const [assignment] = await scheduler.dispatch();
+  expect((await scheduler.getSession(session.id as BrowserSessionId, TEST_PRINCIPAL)).status).toBe("allocating");
+  expect((await store.snapshot()).sessions.get(session.id as BrowserSessionId)?.cdpEndpoint).toBeUndefined();
+  const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
+  await scheduler.claimAssignment(worker.id, assignment!.lease!.id, undefined, workerActor);
+  expect((await scheduler.getSession(session.id as BrowserSessionId, TEST_PRINCIPAL)).status).toBe("allocating");
+  await scheduler.heartbeatLease(assignment!.lease!.id, worker.id, workerActor);
+  const stillAllocating = await store.snapshot();
+  expect(stillAllocating.leases.get(assignment!.lease!.id)?.startedAt).toBeUndefined();
+  expect(stillAllocating.sessions.get(session.id as BrowserSessionId)?.cdpEndpoint).toBeUndefined();
+  await scheduler.markLeaseStarted(assignment!.lease!.id, worker.id, workerActor);
+  const ready = await scheduler.getSession(session.id as BrowserSessionId, TEST_PRINCIPAL);
+  expect(ready.status).toBe("ready");
+  expect(ready.cdpEndpoint).toContain("cap=");
 });

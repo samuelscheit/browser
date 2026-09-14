@@ -1,5 +1,5 @@
 import { createPublicKey } from "node:crypto";
-import { FabricError, type Principal, type Worker, type WorkerCapabilities, type WorkerResourceLimits, runtimeFamilies } from "@browser-fabric/contracts";
+import { FabricError, isSafeDockerVolumeName, type Principal, type Worker, type WorkerCapabilities, type WorkerResourceLimits, runtimeFamilies } from "@browser-fabric/contracts";
 
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length < 1 || value.length > 2048) throw new FabricError("validation_failed", `${field} must be a non-empty string`, 400);
@@ -57,6 +57,18 @@ export function parseWorkerRegistration(value: unknown, certificateFingerprint: 
   const isLocal = input.isLocal === true;
   const capacity = boundedInt(input.capacity, "capacity", 0, isLocal ? 1 : 3);
   if (isLocal && (!capabilities.supportsInteractive || capacity !== 1)) throw new FabricError("validation_failed", "local workers must support interactive mode and have capacity one", 400);
+  // A media task is intentionally outside the browser-lease cap, but it is still a bounded
+  // worker resource. Normalize the default here rather than letting a later registration/replay
+  // invent it, so operator manifests have a stable static identity.
+  const mediaCapacity = input.mediaCapacity === undefined
+    ? (isLocal ? 0 : 8)
+    : boundedInt(input.mediaCapacity, "mediaCapacity", 0, 64);
+  const mediaPlaybackEndpoint = input.mediaPlaybackEndpoint === undefined
+    ? undefined
+    : endpoint(input.mediaPlaybackEndpoint, "mediaPlaybackEndpoint", ["https:", "http:"]);
+  if (runtimeList.includes("media-playback" as never) && !mediaPlaybackEndpoint) {
+    throw new FabricError("validation_failed", "media-playback workers require mediaPlaybackEndpoint", 400);
+  }
   let inputEncryptionPublicKeyPem: string | undefined;
   if (input.inputEncryptionPublicKeyPem !== undefined) {
     if (typeof input.inputEncryptionPublicKeyPem !== "string" || input.inputEncryptionPublicKeyPem.length > 8_192) throw new FabricError("validation_failed", "inputEncryptionPublicKeyPem is invalid", 400);
@@ -73,6 +85,10 @@ export function parseWorkerRegistration(value: unknown, certificateFingerprint: 
     if (typeof input.enrollmentTokenHash !== "string" || !/^sha256:[a-f0-9]{64}$/i.test(input.enrollmentTokenHash)) throw new FabricError("validation_failed", "enrollmentTokenHash must be a SHA-256 digest", 400);
     enrollmentTokenHash = input.enrollmentTokenHash.toLowerCase();
   }
+  const volumeNames = Array.isArray(input.volumeNames) && input.volumeNames.every(isSafeDockerVolumeName)
+    ? [...input.volumeNames]
+    : undefined;
+  if (!volumeNames || new Set(volumeNames).size !== volumeNames.length) throw new FabricError("validation_failed", "volumeNames must be unique safe Docker volume names", 400);
   return {
     id: opaqueWorkerId(input.id),
     certificateFingerprint,
@@ -80,11 +96,13 @@ export function parseWorkerRegistration(value: unknown, certificateFingerprint: 
     ...(enrollmentTokenHash === undefined ? {} : { enrollmentTokenHash }),
     endpoint: endpoint(input.endpoint, "endpoint", ["https:", "http:"]),
     cdpRelayEndpoint: endpoint(input.cdpRelayEndpoint, "cdpRelayEndpoint", ["wss:", "ws:", "https:", "http:"]),
+    ...(mediaPlaybackEndpoint === undefined ? {} : { mediaPlaybackEndpoint }),
     capabilities,
     capacity,
+    mediaCapacity,
     health: "healthy",
     isLocal,
-    volumeNames: Array.isArray(input.volumeNames) && input.volumeNames.every((item) => typeof item === "string") ? input.volumeNames as string[] : [],
+    volumeNames,
     resourceLimits
   };
 }

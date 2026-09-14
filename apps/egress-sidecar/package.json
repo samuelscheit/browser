@@ -1,0 +1,9 @@
+{
+  "name": "@browser-fabric/egress-sidecar",
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@browser-fabric/contracts": "workspace:*",
+    "@browser-fabric/policy": "workspace:*"
+  }
+}

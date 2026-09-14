@@ -2,6 +2,7 @@ import type { EgressPolicy, Principal, Worker, WorkerAssignment } from "@browser
 import { BrowserScheduler } from "@browser-fabric/control-plane";
 import { assertRuntimePolicyCompatibility, compileEgressManifest, type EgressManifest } from "@browser-fabric/policy";
 import { defaultRuntimeRegistry, type BrowserContainerSpec, type BrowserRuntime } from "@browser-fabric/worker-runtime";
+import type { PreparedMediaRelay } from "./media-result";
 
 export interface BrowserProcessSpec {
   assignment: WorkerAssignment;
@@ -21,11 +22,16 @@ export interface BrowserProcessSpec {
 export interface Executor {
   start(spec: BrowserProcessSpec): Promise<{ processId: string; cdpBrowserEndpoint?: string }>;
   stop(processId: string): Promise<void>;
+  /** Optional liveness probe used to detect a crashed browser before heartbeating its lease. */
+  isRunning?(processId: string): Promise<boolean> | boolean;
 }
 
 export interface MediaExecutor {
-  start(input: { assignment: WorkerAssignment; worker: Worker; egressPolicy: EgressPolicy }): Promise<{ processId: string }>;
+  start(input: { assignment: WorkerAssignment; worker: Worker; egressPolicy: EgressPolicy; relay: PreparedMediaRelay }): Promise<{ processId: string }>;
   stop(processId: string): Promise<void>;
+  /** Optional completion stream for one-shot media jobs. */
+  wait?(processId: string, timeoutMs?: number): Promise<{ status: "succeeded" | "failed"; result?: Record<string, unknown>; reason?: string }>;
+  isRunning?(processId: string): Promise<boolean> | boolean;
 }
 
 /** Compile a signed/claimed assignment into the only launch surface executors may receive. */
@@ -60,15 +66,28 @@ export class WorkerManager {
     this.#runtimes = new Map(registry.list().map((family) => [family, registry.get(family)]));
   }
 
-  public async execute(worker: Worker, assignment: WorkerAssignment, actor: Principal, proxyUrls: readonly string[] = []): Promise<{ processId: string; cdpBrowserEndpoint?: string }> {
-    const claimed = await this.scheduler.claimAssignment(worker.id, assignment.lease?.id, assignment.job?.id, actor);
+  public async claim(worker: Worker, assignment: WorkerAssignment, actor: Principal): Promise<WorkerAssignment> {
+    return this.scheduler.claimAssignment(worker.id, assignment.lease?.id, assignment.job?.id, actor);
+  }
+
+  /** Start an already claimed assignment. Media work requires a manager-issued artifact handoff. */
+  public async startClaimed(worker: Worker, claimed: WorkerAssignment, proxyUrls: readonly string[] = [], relay?: PreparedMediaRelay): Promise<{ processId: string; cdpBrowserEndpoint?: string }> {
     if (claimed.recipe.runtime === "media-relay") {
       if (!this.mediaExecutor || !claimed.job) throw new Error("media assignment requires a media executor and job");
-      return this.mediaExecutor.start({ assignment: claimed, worker, egressPolicy: claimed.egressPolicy });
+      if (!relay) throw new Error("media assignment requires a manager-issued artifact handoff");
+      return this.mediaExecutor.start({ assignment: claimed, worker, egressPolicy: claimed.egressPolicy, relay });
     }
     const spec = buildBrowserProcessSpec(worker, claimed, proxyUrls, this.#runtimes);
     return this.executor.start(spec);
   }
+
+  /** Convenience for browser assignments. Media callers must claim then prepare a handoff first. */
+  public async execute(worker: Worker, assignment: WorkerAssignment, actor: Principal, proxyUrls: readonly string[] = []): Promise<{ processId: string; cdpBrowserEndpoint?: string }> {
+    const claimed = await this.claim(worker, assignment, actor);
+    return this.startClaimed(worker, claimed, proxyUrls);
+  }
 }
 export * from "./docker-executor";
 export * from "./controller";
+export * from "./media-result";
+export * from "./media-playback";

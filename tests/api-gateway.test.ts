@@ -29,6 +29,18 @@ describe("private API and CDP gateway boundary", () => {
     expect((await missingHeader.json()).code).toBe("validation_failed");
   });
 
+  test("does not retain the legacy plaintext input endpoint", async () => {
+    const context = await bootstrapTestScheduler();
+    const fetchApi = createApiFetch({ scheduler: context.scheduler, authenticate: () => TEST_PRINCIPAL });
+    const response = await fetchApi(new Request("https://fabric.test/v1/input-requests/input-request_legacy/value", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "must-not-enter-control-plane" }),
+    }));
+    expect(response.status).toBe(404);
+    expect((await response.json()).code).toBe("not_found");
+  });
+
   test("serves /v1 routes and RFC problem responses", async () => {
     const context = await bootstrapTestScheduler();
     const fetchApi = createApiFetch({ scheduler: context.scheduler, authenticate: () => TEST_PRINCIPAL });
@@ -61,11 +73,74 @@ describe("private API and CDP gateway boundary", () => {
     expect(bad.status).toBe(404);
 
     const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
-    await context.scheduler.dispatch();
+    const [assignment] = await context.scheduler.dispatch();
+    const worker = (await context.store.snapshot()).workers.get("worker_test" as never)!;
+    const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
+    await context.scheduler.claimAssignment(worker.id, assignment!.lease!.id, undefined, workerActor);
+    await context.scheduler.markLeaseStarted(assignment!.lease!.id, worker.id, workerActor);
     const internal = (await context.store.snapshot()).sessions.get(session.id as BrowserSessionId)!;
     const token = new URL(internal.cdpEndpoint!).searchParams.get("cap")!;
     const rejected = await gateway.fetch(new Request(`https://fabric.test/v1/cdp/${session.id}?cap=${encodeURIComponent(token)}`, { headers: { upgrade: "websocket" } }));
     // Non-Bun fetch adapter deliberately returns a 426 rather than pretending to upgrade.
     expect(rejected.status).toBe(426);
+  });
+
+  test("CDP gateway sends the assigned project to ingress authorization", async () => {
+    const context = await bootstrapTestScheduler();
+    const signer = new CapabilitySigner({ secret: "01234567890123456789012345678901", clock: context.clock, gatewayBaseUrl: "wss://fabric.test" });
+    const seen: Array<{ kind: string; project?: string }> = [];
+    const gateway = new CdpGateway({
+      scheduler: context.scheduler,
+      capabilitySigner: signer,
+      upstream: { connect: async () => { throw new Error("not reached"); } },
+      authenticate: (_request, scope) => { seen.push(scope); return false; },
+    });
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway-project-auth", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const [assignment] = await context.scheduler.dispatch();
+    const worker = (await context.store.snapshot()).workers.get("worker_test" as never)!;
+    const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
+    await context.scheduler.claimAssignment(worker.id, assignment!.lease!.id, undefined, workerActor);
+    await context.scheduler.markLeaseStarted(assignment!.lease!.id, worker.id, workerActor);
+    const internal = (await context.store.snapshot()).sessions.get(session.id as BrowserSessionId)!;
+    const token = new URL(internal.cdpEndpoint!).searchParams.get("cap")!;
+    const response = await gateway.fetch(new Request(`https://fabric.test/v1/cdp/${session.id}?cap=${encodeURIComponent(token)}`, { headers: { upgrade: "websocket" } }));
+    expect(response.status).toBe(403);
+    expect(seen).toEqual([{ kind: "cdp", project: TEST_PROJECT }]);
+  });
+
+  test("federated relay authorization binds the active local lease to its worker certificate", async () => {
+    const context = await bootstrapTestScheduler({ localWorker: true });
+    const profile = await context.scheduler.createProfile({
+      ...context.profile,
+      ref: "profile_gateway_local" as never,
+      profileFamily: "interactive",
+      volumeName: "profile-volume",
+    }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({
+      project: TEST_PROJECT,
+      idempotencyKey: "gateway-local-relay",
+      runtime: "chromium-cdp",
+      browserRecipeRef: "recipe_interactive-chromium@1" as never,
+      profileRef: profile.ref,
+      leaseMode: "interactive",
+      egressPolicyRef: "egress_direct-egress@1" as never,
+      artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
+      ttlSeconds: 600,
+    }, TEST_PRINCIPAL);
+    const [assignment] = await context.scheduler.dispatch();
+    const gateway = new CdpGateway({
+      scheduler: context.scheduler,
+      capabilitySigner: new CapabilitySigner({ secret: "01234567890123456789012345678901", clock: context.clock, gatewayBaseUrl: "wss://fabric.test" }),
+      upstream: { connect: async () => { throw new Error("not reached"); } },
+      authenticate: () => true,
+    });
+    const worker = (await context.store.snapshot()).workers.get(context.worker.id)!;
+    const route = `/v1/worker-relay/${worker.id}/${assignment!.lease!.id}`;
+    const accepted = await gateway.authorizeReverseRelay(new Request(`https://fabric.test${route}`, {
+      headers: { upgrade: "websocket", "x-fabric-worker-cert-fingerprint": worker.certificateFingerprint },
+    }));
+    expect(accepted).toEqual({ workerId: worker.id, leaseId: assignment!.lease!.id });
+    await expect(gateway.authorizeReverseRelay(new Request(`https://fabric.test${route}`, { headers: { upgrade: "websocket" } }))).rejects.toMatchObject({ code: "authorization_denied" });
+    await context.scheduler.cancelBrowserSession(session.id, TEST_PRINCIPAL);
   });
 });

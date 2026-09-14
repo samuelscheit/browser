@@ -34,6 +34,14 @@
         "pg": "^8.23.0",
       },
     },
+    "apps/egress-sidecar": {
+      "name": "@browser-fabric/egress-sidecar",
+      "version": "0.1.0",
+      "dependencies": {
+        "@browser-fabric/contracts": "workspace:*",
+        "@browser-fabric/policy": "workspace:*",
+      },
+    },
     "apps/input-broker": {
       "name": "@browser-fabric/input-broker",
       "version": "0.1.0",
@@ -50,6 +58,14 @@
         "@browser-fabric/control-plane": "workspace:*",
         "@browser-fabric/worker-manager": "workspace:*",
         "@browser-fabric/worker-runtime": "workspace:*",
+      },
+    },
+    "apps/media-playback-gateway": {
+      "name": "@browser-fabric/media-playback-gateway",
+      "version": "0.1.0",
+      "dependencies": {
+        "@browser-fabric/contracts": "workspace:*",
+        "@browser-fabric/control-plane": "workspace:*",
       },
     },
     "apps/scheduler": {
@@ -128,6 +144,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@browser-fabric/contracts": "workspace:*",
+        "@browser-fabric/policy": "workspace:*",
       },
     },
   },
@@ -142,9 +159,13 @@
 
     "@browser-fabric/control-plane": ["@browser-fabric/control-plane@workspace:packages/control-plane"],
 
+    "@browser-fabric/egress-sidecar": ["@browser-fabric/egress-sidecar@workspace:apps/egress-sidecar"],
+
     "@browser-fabric/input-broker": ["@browser-fabric/input-broker@workspace:apps/input-broker"],
 
     "@browser-fabric/local-agent": ["@browser-fabric/local-agent@workspace:apps/local-agent"],
+
+    "@browser-fabric/media-playback-gateway": ["@browser-fabric/media-playback-gateway@workspace:apps/media-playback-gateway"],
 
     "@browser-fabric/policy": ["@browser-fabric/policy@workspace:packages/policy"],
 

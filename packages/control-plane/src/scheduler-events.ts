@@ -24,7 +24,14 @@ export async function getJob(context: SchedulerEventsContext, jobId: JobId, acto
   return context.store.read((state) => {
     const job = context.kernel.job(state, jobId);
     context.kernel.authorizeProject(state, actor, job.project, "read_job", jobId);
-    return { id: job.id, status: job.status, expiresAt: job.expiresAt, ...(job.workerId === undefined ? {} : { workerId: job.workerId }), ...(job.result === undefined ? {} : { result: structuredClone(job.result) }) };
+    return {
+      id: job.id,
+      status: job.status,
+      expiresAt: job.expiresAt,
+      ...(job.workerId === undefined ? {} : { workerId: job.workerId }),
+      ...(job.result === undefined ? {} : { result: structuredClone(job.result) }),
+      ...(job.failureReason === undefined ? {} : { failureReason: job.failureReason }),
+    };
   });
 }
 

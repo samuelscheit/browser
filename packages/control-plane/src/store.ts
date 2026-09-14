@@ -1,23 +1,24 @@
-import type {
-  Artifact,
-  ArtifactPolicy,
-  AuditEvent,
-  BrowserLease,
-  BrowserRecipe,
-  BrowserSession,
-  ChallengeHandlerSet,
-  EgressPolicy,
-  EphemeralInputRequest,
-  FabricEvent,
-  IdempotencyRecord,
-  Job,
-  JobAttempt,
-  Principal,
-  Profile,
-  ProfileClone,
-  Project,
-  VolumeGeneration,
-  Worker
+import {
+  isMediaRuntime,
+  type Artifact,
+  type ArtifactPolicy,
+  type AuditEvent,
+  type BrowserLease,
+  type BrowserRecipe,
+  type BrowserSession,
+  type ChallengeHandlerSet,
+  type EgressPolicy,
+  type EphemeralInputRequest,
+  type FabricEvent,
+  type IdempotencyRecord,
+  type Job,
+  type JobAttempt,
+  type Principal,
+  type Profile,
+  type ProfileClone,
+  type Project,
+  type VolumeGeneration,
+  type Worker
 } from "@browser-fabric/contracts";
 import { Mutex } from "./mutex";
 
@@ -144,7 +145,13 @@ export class PostgresFabricStore extends InMemoryFabricStore {
   public async initialize(): Promise<void> {
     if (this.#initialized) return;
     await this.#client.query(this.#schemaSql);
-    await this.#loadLatestState(this.#client, true);
+    // A Fabric process restart is not a browser-worker crash. API, gateway, scheduler, and
+    // worker-manager replicas all construct this store independently, while the browser process
+    // and its lease heartbeat may still be healthy on another node. Rewriting every active lease
+    // to `lost` here would let an innocent API/gateway restart persist a fake recovery and create
+    // a concurrent writer. Scheduler recovery owns reclamation after the *actual* heartbeat
+    // timeout, so startup must load durable state verbatim.
+    await this.#loadLatestState(this.#client, false);
     this.#initialized = true;
   }
 
@@ -225,16 +232,36 @@ export class PostgresFabricStore extends InMemoryFabricStore {
       for (const [id, session] of loaded.sessions) {
         const previous = this.state.sessions.get(id);
         if (!previous) continue;
-        session.cdpEndpoint = previous.cdpEndpoint;
-        session.cdpInternalEndpoint = previous.cdpInternalEndpoint;
-        session.cdpCapabilityExpiresAt = previous.cdpCapabilityExpiresAt;
-        session.externalConnectionCount = previous.externalConnectionCount;
+        // Volatile capability material may be carried across a sibling revision only while the
+        // same live lease remains started. If the durable state moved back to allocation or
+        // terminal cleanup, retaining the old URL would resurrect a revoked browser endpoint.
+        const preserveCapability =
+          (session.status === "ready" || session.status === "active") &&
+          (previous.status === "ready" || previous.status === "active") &&
+          session.leaseId !== undefined &&
+          session.leaseId === previous.leaseId;
+        if (preserveCapability) {
+          session.cdpEndpoint = previous.cdpEndpoint;
+          session.cdpInternalEndpoint = previous.cdpInternalEndpoint;
+          session.cdpCapabilityExpiresAt = previous.cdpCapabilityExpiresAt;
+          session.externalConnectionCount = previous.externalConnectionCount;
+        } else {
+          session.cdpEndpoint = undefined;
+          session.cdpInternalEndpoint = undefined;
+          session.cdpCapabilityExpiresAt = undefined;
+          session.externalConnectionCount = 0;
+          session.reconnectGraceUntil = undefined;
+        }
         loaded.sessions.set(id, session);
       }
       for (const [id, lease] of loaded.leases) {
         const previous = this.state.leases.get(id);
         if (!previous) continue;
-        lease.internalCdpEndpoint = previous.internalCdpEndpoint;
+        if (lease.status === "active" && previous.status === "active" && lease.workerId === previous.workerId) {
+          lease.internalCdpEndpoint = previous.internalCdpEndpoint;
+        } else {
+          lease.internalCdpEndpoint = undefined;
+        }
         loaded.leases.set(id, lease);
       }
     }
@@ -261,7 +288,7 @@ export class PostgresFabricStore extends InMemoryFabricStore {
       for (const projectId of principal.projectGrants) await client.query("INSERT INTO fabric_principal_projects(principal_id,project_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", [principal.id, projectId]);
     }
     for (const worker of draft.workers.values()) {
-      await client.query("INSERT INTO fabric_workers(id,certificate_fingerprint,enrollment_token_hash,input_encryption_public_key_pem,endpoint,cdp_relay_endpoint,runtime_families,recipe_refs,browser_versions,supported_profile_families,supports_interactive,supports_companion_companion,capacity,active_leases,media_capacity,active_media_tasks,is_local,volume_names,cpu_milli,memory_mib,pids,shm_mib,temporary_storage_mib,health,last_heartbeat_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27) ON CONFLICT (id) DO UPDATE SET certificate_fingerprint=EXCLUDED.certificate_fingerprint,enrollment_token_hash=EXCLUDED.enrollment_token_hash,input_encryption_public_key_pem=EXCLUDED.input_encryption_public_key_pem,endpoint=EXCLUDED.endpoint,cdp_relay_endpoint=EXCLUDED.cdp_relay_endpoint,runtime_families=EXCLUDED.runtime_families,recipe_refs=EXCLUDED.recipe_refs,browser_versions=EXCLUDED.browser_versions,supported_profile_families=EXCLUDED.supported_profile_families,supports_interactive=EXCLUDED.supports_interactive,supports_companion_companion=EXCLUDED.supports_companion_companion,capacity=EXCLUDED.capacity,active_leases=EXCLUDED.active_leases,media_capacity=EXCLUDED.media_capacity,active_media_tasks=EXCLUDED.active_media_tasks,is_local=EXCLUDED.is_local,volume_names=EXCLUDED.volume_names,cpu_milli=EXCLUDED.cpu_milli,memory_mib=EXCLUDED.memory_mib,pids=EXCLUDED.pids,shm_mib=EXCLUDED.shm_mib,temporary_storage_mib=EXCLUDED.temporary_storage_mib,health=EXCLUDED.health,last_heartbeat_at=EXCLUDED.last_heartbeat_at,updated_at=EXCLUDED.updated_at", [worker.id, worker.certificateFingerprint, worker.enrollmentTokenHash ?? null, worker.inputEncryptionPublicKeyPem ?? null, worker.endpoint, worker.cdpRelayEndpoint, worker.capabilities.runtimeFamilies, worker.capabilities.recipeRefs, JSON.stringify(worker.capabilities.browserVersions), worker.capabilities.supportedProfileFamilies, worker.capabilities.supportsInteractive, worker.capabilities.supportsCompanionCompanion, worker.capacity, worker.activeLeases, worker.mediaCapacity ?? 0, worker.activeMediaTasks ?? 0, worker.isLocal, worker.volumeNames, worker.resourceLimits.cpuMilli, worker.resourceLimits.memoryMiB, worker.resourceLimits.pids, worker.resourceLimits.shmMiB, worker.resourceLimits.temporaryStorageMiB, worker.health, worker.lastHeartbeatAt, worker.createdAt, worker.updatedAt]);
+      await client.query("INSERT INTO fabric_workers(id,certificate_fingerprint,enrollment_token_hash,input_encryption_public_key_pem,endpoint,cdp_relay_endpoint,media_playback_endpoint,runtime_families,recipe_refs,browser_versions,supported_profile_families,supports_interactive,supports_companion_companion,capacity,active_leases,media_capacity,active_media_tasks,is_local,volume_names,cpu_milli,memory_mib,pids,shm_mib,temporary_storage_mib,health,last_heartbeat_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28) ON CONFLICT (id) DO UPDATE SET certificate_fingerprint=EXCLUDED.certificate_fingerprint,enrollment_token_hash=EXCLUDED.enrollment_token_hash,input_encryption_public_key_pem=EXCLUDED.input_encryption_public_key_pem,endpoint=EXCLUDED.endpoint,cdp_relay_endpoint=EXCLUDED.cdp_relay_endpoint,media_playback_endpoint=EXCLUDED.media_playback_endpoint,runtime_families=EXCLUDED.runtime_families,recipe_refs=EXCLUDED.recipe_refs,browser_versions=EXCLUDED.browser_versions,supported_profile_families=EXCLUDED.supported_profile_families,supports_interactive=EXCLUDED.supports_interactive,supports_companion_companion=EXCLUDED.supports_companion_companion,capacity=EXCLUDED.capacity,active_leases=EXCLUDED.active_leases,media_capacity=EXCLUDED.media_capacity,active_media_tasks=EXCLUDED.active_media_tasks,is_local=EXCLUDED.is_local,volume_names=EXCLUDED.volume_names,cpu_milli=EXCLUDED.cpu_milli,memory_mib=EXCLUDED.memory_mib,pids=EXCLUDED.pids,shm_mib=EXCLUDED.shm_mib,temporary_storage_mib=EXCLUDED.temporary_storage_mib,health=EXCLUDED.health,last_heartbeat_at=EXCLUDED.last_heartbeat_at,updated_at=EXCLUDED.updated_at", [worker.id, worker.certificateFingerprint, worker.enrollmentTokenHash ?? null, worker.inputEncryptionPublicKeyPem ?? null, worker.endpoint, worker.cdpRelayEndpoint, worker.mediaPlaybackEndpoint ?? null, worker.capabilities.runtimeFamilies, worker.capabilities.recipeRefs, JSON.stringify(worker.capabilities.browserVersions), worker.capabilities.supportedProfileFamilies, worker.capabilities.supportsInteractive, worker.capabilities.supportsCompanionCompanion, worker.capacity, worker.activeLeases, worker.mediaCapacity ?? 0, worker.activeMediaTasks ?? 0, worker.isLocal, worker.volumeNames, worker.resourceLimits.cpuMilli, worker.resourceLimits.memoryMiB, worker.resourceLimits.pids, worker.resourceLimits.shmMiB, worker.resourceLimits.temporaryStorageMiB, worker.health, worker.lastHeartbeatAt, worker.createdAt, worker.updatedAt]);
     }
     for (const recipe of draft.recipes.values()) await client.query("INSERT INTO fabric_recipes(ref,family,version,immutable_hash,runtime,definition,created_at) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7) ON CONFLICT (ref) DO UPDATE SET definition=EXCLUDED.definition", [recipe.ref, recipe.family, recipe.version, recipe.immutableHash, recipe.runtime, JSON.stringify(recipe), recipe.createdAt]);
     for (const policy of draft.egressPolicies.values()) await client.query("INSERT INTO fabric_egress_policies(ref,family,version,immutable_hash,definition,created_at) VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (ref) DO UPDATE SET definition=EXCLUDED.definition", [policy.ref, policy.family, policy.version, policy.immutableHash, JSON.stringify(policy), policy.createdAt]);
@@ -274,13 +301,13 @@ export class PostgresFabricStore extends InMemoryFabricStore {
     }
     for (const generation of draft.volumeGenerations.values()) await client.query("INSERT INTO fabric_volume_generations(id,profile_ref,generation,worker_id,volume_name,status,checksum,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,checksum=EXCLUDED.checksum", [generation.id, generation.profileRef, generation.generation, generation.workerId, generation.volumeName, generation.status, generation.checksum ?? null, generation.createdAt]);
     for (const session of draft.sessions.values()) await client.query("INSERT INTO fabric_browser_sessions(id,project_id,idempotency_key,runtime,browser_recipe_ref,profile_ref,lease_mode,egress_policy_ref,artifact_policy_ref,metadata,status,queue_sequence,worker_id,lease_id,cdp_endpoint,cdp_capability_expires_at,external_connection_count,reconnect_grace_until,expires_at,last_heartbeat_at,created_at,updated_at,released_at,failure_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,NULL,NULL,$15,$16,$17,$18,$19,$20,$21,$22) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,queue_sequence=EXCLUDED.queue_sequence,worker_id=EXCLUDED.worker_id,lease_id=EXCLUDED.lease_id,metadata=EXCLUDED.metadata,external_connection_count=EXCLUDED.external_connection_count,reconnect_grace_until=EXCLUDED.reconnect_grace_until,expires_at=EXCLUDED.expires_at,last_heartbeat_at=EXCLUDED.last_heartbeat_at,updated_at=EXCLUDED.updated_at,released_at=EXCLUDED.released_at,failure_reason=EXCLUDED.failure_reason", [session.id, session.project, session.idempotencyKey, session.runtime, session.browserRecipeRef, session.profileRef ?? null, session.leaseMode, session.egressPolicyRef, session.artifactPolicyRef, JSON.stringify(session.metadata), session.status, session.queueSequence ?? 0, session.workerId ?? null, session.leaseId ?? null, session.externalConnectionCount, session.reconnectGraceUntil ?? null, session.expiresAt, session.lastHeartbeatAt, session.createdAt, session.updatedAt, session.releasedAt ?? null, session.failureReason ?? null]);
-    for (const job of draft.jobs.values()) await client.query("INSERT INTO fabric_jobs(id,project_id,idempotency_key,recipe_ref,runtime,operation,profile_ref,lease_mode,egress_policy_ref,artifact_policy_ref,callback_url,callback_secret_ref,metadata,status,queue_sequence,worker_id,lease_id,result,failure_reason,assignment_claimed_at,expires_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18::jsonb,$19,$20,$21,$22,$23) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,queue_sequence=EXCLUDED.queue_sequence,worker_id=EXCLUDED.worker_id,lease_id=EXCLUDED.lease_id,result=EXCLUDED.result,failure_reason=EXCLUDED.failure_reason,assignment_claimed_at=EXCLUDED.assignment_claimed_at,updated_at=EXCLUDED.updated_at", [job.id, job.project, job.idempotencyKey, job.recipeRef, job.runtime, JSON.stringify(job.operation), job.profileRef ?? null, job.leaseMode, job.egressPolicyRef, job.artifactPolicyRef, job.callback?.url ?? null, job.callback?.eventSecretRef ?? null, JSON.stringify(job.metadata), job.status, job.queueSequence ?? 0, job.workerId ?? null, job.leaseId ?? null, job.result === undefined ? null : JSON.stringify(job.result), job.failureReason ?? null, job.assignmentClaimedAt ?? null, job.expiresAt, job.createdAt, job.updatedAt]);
+    for (const job of draft.jobs.values()) await client.query("INSERT INTO fabric_jobs(id,project_id,idempotency_key,recipe_ref,runtime,operation,profile_ref,lease_mode,egress_policy_ref,artifact_policy_ref,callback_url,callback_secret_ref,metadata,status,queue_sequence,worker_id,lease_id,result,failure_reason,assignment_claimed_at,companion_run_id,media_artifact_expires_at,media_attempt_id,media_playback_source_request_id,media_playback_ready_at,expires_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23,$24,$25,$26,$27,$28) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,queue_sequence=EXCLUDED.queue_sequence,worker_id=EXCLUDED.worker_id,lease_id=EXCLUDED.lease_id,result=EXCLUDED.result,failure_reason=EXCLUDED.failure_reason,assignment_claimed_at=EXCLUDED.assignment_claimed_at,companion_run_id=EXCLUDED.companion_run_id,media_artifact_expires_at=EXCLUDED.media_artifact_expires_at,media_attempt_id=EXCLUDED.media_attempt_id,media_playback_source_request_id=EXCLUDED.media_playback_source_request_id,media_playback_ready_at=EXCLUDED.media_playback_ready_at,updated_at=EXCLUDED.updated_at", [job.id, job.project, job.idempotencyKey, job.recipeRef, job.runtime, JSON.stringify(job.operation), job.profileRef ?? null, job.leaseMode, job.egressPolicyRef, job.artifactPolicyRef, job.callback?.url ?? null, job.callback?.eventSecretRef ?? null, JSON.stringify(job.metadata), job.status, job.queueSequence ?? 0, job.workerId ?? null, job.leaseId ?? null, job.result === undefined ? null : JSON.stringify(job.result), job.failureReason ?? null, job.assignmentClaimedAt ?? null, job.companionRunId ?? null, job.mediaArtifactExpiresAt ?? null, job.mediaAttemptId ?? null, job.mediaPlaybackSourceRequestId ?? null, job.mediaPlaybackReadyAt ?? null, job.expiresAt, job.createdAt, job.updatedAt]);
     for (const lease of draft.leases.values()) await client.query("INSERT INTO fabric_browser_leases(id,session_id,job_id,project_id,profile_ref,worker_id,mode,clone_id,status,expires_at,last_heartbeat_at,assignment_claimed_at,started_at,created_at,released_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,last_heartbeat_at=EXCLUDED.last_heartbeat_at,assignment_claimed_at=EXCLUDED.assignment_claimed_at,started_at=EXCLUDED.started_at,released_at=EXCLUDED.released_at", [lease.id, lease.sessionId ?? null, lease.jobId ?? null, lease.project, lease.profileRef ?? null, lease.workerId, lease.mode, lease.cloneId ?? null, lease.status, lease.expiresAt, lease.lastHeartbeatAt, lease.assignmentClaimedAt ?? null, lease.startedAt ?? null, lease.createdAt, lease.releasedAt ?? null]);
     for (const clone of draft.clones.values()) await client.query("INSERT INTO fabric_profile_clones(id,source_profile_ref,worker_id,volume_name,created_for_lease,status,created_at,deleted_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,deleted_at=EXCLUDED.deleted_at", [clone.id, clone.sourceProfileRef, clone.workerId, clone.volumeName, clone.createdForLease, clone.status, clone.createdAt, clone.deletedAt ?? null]);
     for (const attempt of draft.attempts.values()) await client.query("INSERT INTO fabric_job_attempts(id,job_id,attempt_number,worker_id,lease_id,status,created_at,completed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,completed_at=EXCLUDED.completed_at", [attempt.id, attempt.jobId, attempt.number, attempt.workerId ?? null, attempt.leaseId ?? null, attempt.status, attempt.createdAt, attempt.completedAt ?? null]);
     for (const event of draft.events.values()) await client.query("INSERT INTO fabric_events(id,sequence,project_id,subject_kind,subject_id,type,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8) ON CONFLICT (id) DO NOTHING", [event.id, event.sequence, event.project ?? null, event.subject.kind, event.subject.id, event.type, JSON.stringify(event.payload), event.createdAt]);
     for (const artifact of draft.artifacts.values()) await client.query("INSERT INTO fabric_artifacts(id,project_id,session_id,job_id,profile_ref,kind,object_key,sha256,mime_type,size_bytes,created_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (id) DO UPDATE SET expires_at=EXCLUDED.expires_at", [artifact.id, artifact.project, artifact.sessionId ?? null, artifact.jobId ?? null, artifact.profileRef ?? null, artifact.kind, artifact.objectKey, artifact.sha256, artifact.mimeType, artifact.sizeBytes, artifact.createdAt, artifact.expiresAt]);
-    for (const request of draft.inputRequests.values()) await client.query("INSERT INTO fabric_ephemeral_input_requests(id,project_id,session_id,job_id,lease_id,worker_id,worker_input_encryption_public_key_pem,field,field_type,status,expires_at,created_at,resolved_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,resolved_at=EXCLUDED.resolved_at", [request.id, request.project, request.sessionId ?? null, request.jobId ?? null, request.leaseId, request.workerId ?? null, request.workerInputEncryptionPublicKeyPem ?? null, request.field, request.fieldType, request.status, request.expiresAt, request.createdAt, request.resolvedAt ?? null]);
+    for (const request of draft.inputRequests.values()) await client.query("INSERT INTO fabric_ephemeral_input_requests(id,project_id,session_id,job_id,lease_id,media_attempt_id,worker_id,worker_input_encryption_public_key_pem,field,field_type,status,expires_at,created_at,resolved_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,resolved_at=EXCLUDED.resolved_at", [request.id, request.project, request.sessionId ?? null, request.jobId ?? null, request.leaseId ?? null, request.mediaAttemptId ?? null, request.workerId ?? null, request.workerInputEncryptionPublicKeyPem ?? null, request.field, request.fieldType, request.status, request.expiresAt, request.createdAt, request.resolvedAt ?? null]);
     for (const record of draft.idempotency.values()) await client.query("INSERT INTO fabric_idempotency(id,project_id,scope,key,request_hash,response_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (project_id,scope,key) DO UPDATE SET request_hash=EXCLUDED.request_hash,response_id=EXCLUDED.response_id", [record.id, record.project, record.scope, record.key, record.requestHash, record.responseId, record.createdAt]);
     for (const audit of draft.audits.values()) await client.query("INSERT INTO fabric_audit_events(id,actor_id,project_id,action,target_kind,target_id,outcome,metadata,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (id) DO NOTHING", [audit.id, audit.actor, audit.project ?? null, audit.action, audit.target.kind, audit.target.id, audit.outcome, JSON.stringify(audit.metadata), audit.createdAt]);
     await client.query("INSERT INTO fabric_capacity(id,active_browser_leases,updated_at) VALUES (1,$1,now()) ON CONFLICT (id) DO UPDATE SET active_browser_leases=EXCLUDED.active_browser_leases,updated_at=now()", [draft.activeBrowserLeases]);
@@ -331,6 +358,30 @@ export function serializeState(state: FabricState): Record<string, unknown> {
   };
 }
 
+/**
+ * Media capacity is derived from the authoritative assignment binding, not trusted from the
+ * denormalized worker counter persisted beside it. A transaction updates both records together,
+ * but reconstructing the counter on load keeps a stale/older snapshot from permanently
+ * consuming—or freeing—capacity after a restart.
+ */
+function rebuildMediaTaskCounters(state: FabricState): void {
+  const activeByWorker = new Map<string, number>();
+  for (const job of state.jobs.values()) {
+    const workerId = job.workerId;
+    if (
+      !isMediaRuntime(job.runtime) ||
+      workerId === undefined ||
+      job.mediaAttemptId === undefined ||
+      (job.status !== "running" && (job.runtime !== "media-playback" || job.status !== "awaiting_input"))
+    ) continue;
+    activeByWorker.set(workerId, (activeByWorker.get(workerId) ?? 0) + 1);
+  }
+  for (const worker of state.workers.values()) {
+    worker.activeMediaTasks = activeByWorker.get(worker.id) ?? 0;
+    state.workers.set(worker.id, worker);
+  }
+}
+
 export function deserializeState(raw: Record<string, unknown>, options: { recoverProcessState?: boolean } = {}): FabricState {
   const state = emptyFabricState();
   const map = <T>(key: string, keyOf: (item: T) => string): Map<string, T> => new Map(((raw[key] as T[] | undefined) ?? []).map((item) => [keyOf(item), item]));
@@ -356,9 +407,7 @@ export function deserializeState(raw: Record<string, unknown>, options: { recove
   state.eventSequence = Number(raw.eventSequence ?? 0);
   state.queueSequence = Number(raw.queueSequence ?? 0);
   state.activeBrowserLeases = Number(raw.activeBrowserLeases ?? 0);
-  for (const job of state.jobs.values()) {
-    if (job.runtime === "media-relay" && job.status === "running") job.mediaTaskActive = true;
-  }
+  rebuildMediaTaskCounters(state);
   if (options.recoverProcessState === false) return state;
   // Browser processes are not durable. Any non-terminal allocation from a prior process is
   // made queueable; the scheduler will allocate a fresh worker process and capability.
@@ -381,7 +430,13 @@ export function deserializeState(raw: Record<string, unknown>, options: { recove
       job.workerId = undefined;
       job.leaseId = undefined;
       job.assignmentClaimedAt = undefined;
-      job.mediaTaskActive = false;
+      // A companion process (such as Companion) is bound to the old browser lease
+      // and must not be attached to a newly allocated browser after a Fabric
+      // process restart. The adapter will create a fresh run on the new lease.
+      job.companionRunId = undefined;
+      job.mediaAttemptId = undefined;
+      job.mediaPlaybackReadyAt = undefined;
+      job.mediaPlaybackSourceRequestId = undefined;
       state.jobs.set(job.id, job);
     }
   }

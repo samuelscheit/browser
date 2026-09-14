@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.4.1",
+  "packageManager": "bun@1.4.0",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -16,11 +16,14 @@
     "test": "bun test --timeout 30000",
     "test:integration": "RUN_BROWSER_INTEGRATION=1 bun test tests/raw-cdp.integration.test.ts --timeout 120000",
     "typecheck": "tsc --noEmit",
-    "check": "bun run typecheck && bun run test && bun run validate:deployment",
+    "check": "bun run typecheck && bun run test && bun run validate:docker && bun run validate:deployment",
+    "validate:docker": "bun scripts/validate-dockerfiles.ts",
     "validate:deployment": "bun scripts/validate-deployment.ts",
     "validate:sql": "./scripts/validate-sql.sh",
+    "migration:inventory": "bun scripts/migration-inventory.ts",
     "generate:assignment-keys": "bun scripts/generate-assignment-keys.ts",
-    "generate:worker-input-key": "bun scripts/generate-worker-input-key.ts"
+    "generate:worker-input-key": "bun scripts/generate-worker-input-key.ts",
+    "provision": "bun scripts/provision-fabric.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

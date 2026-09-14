@@ -9,4 +9,5 @@ Expose two integration layers: a managed browser-level CDP WebSocket for trusted
 - Existing Puppeteer, Rebrowser, Playwright connectOverCDP, Companion cdp-connect, and direct DevTools clients remain usable.
 - Raw CDP is intentionally treated as full profile authority; origin-restriction claims would be misleading.
 - Workers—not clients—choose executable, launch flags, placement, networking, and resource limits.
-- WebKit/SocialApi remains a native worker and is not forced through CDP.
+- SocialApi remains a native Python application client, while its only supported engine is a
+  Fabric-managed Chromium process reached through its private CDP endpoint.

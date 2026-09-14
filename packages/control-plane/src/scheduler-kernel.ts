@@ -1,4 +1,4 @@
-import { createId, FabricError, type Artifact, type ArtifactPolicy, type AuditEvent, type BrowserLease, type BrowserRecipe, type BrowserSession, type BrowserSessionCreateInput, type BrowserSessionId, type BrowserSessionResponse, type EgressPolicy, type EphemeralInputRequest, type FabricEvent, type Job, type JobId, type JobResponse, type JobStatus, type LeaseMode, type Principal, type Profile, type ProfileClone, type ProjectId, type Worker, type WorkerAssignment } from "@browser-fabric/contracts";
+import { createId, FabricError, isMediaRuntime, type Artifact, type ArtifactPolicy, type AuditEvent, type BrowserLease, type BrowserRecipe, type BrowserSession, type BrowserSessionCreateInput, type BrowserSessionId, type BrowserSessionResponse, type EgressPolicy, type EphemeralInputRequest, type FabricEvent, type Job, type JobId, type JobResponse, type JobStatus, type LeaseMode, type Principal, type Profile, type ProfileClone, type ProjectId, type Worker, type WorkerAssignment } from "@browser-fabric/contracts";
 import { assertRuntimePolicyCompatibility } from "@browser-fabric/policy";
 import { RecipeRegistry, type RecipeDefinition } from "@browser-fabric/recipes";
 import { CapabilitySigner } from "./capability";
@@ -81,11 +81,14 @@ export class SchedulerKernel {
       if (profile.status !== "active") throw new FabricError("conflict", `profile is ${profile.status}`, 409);
       if (profile.profileFamily !== recipe.profileFamily) throw new FabricError("validation_failed", "profile family is incompatible with browser recipe", 400);
     }
+    if (recipe.runtime === "playwright-social" && !profileRef) {
+      throw new FabricError("validation_failed", "Social jobs require a persistent Chromium profile", 400);
+    }
     // `profileRef` is optional by contract. Without one, writer/interactive work receives a
     // disposable worker-local volume (represented on the lease) rather than silently sharing a
     // global profile. A clone request without a profile simply gets a fresh disposable volume.
     if (leaseMode === "interactive" && recipe.mode !== "interactive") throw new FabricError("validation_failed", "interactive lease requires an interactive recipe", 400);
-    if (recipe.runtime === "media-relay" && leaseMode !== "clone") throw new FabricError("validation_failed", "media-only work does not use profile writer leases", 400);
+    if (isMediaRuntime(recipe.runtime) && leaseMode !== "clone") throw new FabricError("validation_failed", "media-only work does not use profile writer leases", 400);
   }
 
   public assignSession(state: FabricState, session: BrowserSession, onlyWorkerId?: Worker["id"]): WorkerAssignment | undefined {
@@ -101,35 +104,41 @@ export class SchedulerKernel {
       mode: session.leaseMode,
       expiresAt: session.expiresAt
     });
-    const capability = this.#capabilitySigner.issue({ sessionId: session.id, project: session.project, ...(session.profileRef === undefined ? {} : { profileRef: session.profileRef }), workerId: worker.id, ttlSeconds: Math.min(3_600, Math.max(1, Math.floor((asDate(session.expiresAt) - this.#clock.now().getTime()) / 1_000))) });
-    session.status = "ready";
+    // Allocation is deliberately not readiness.  A capability issued before Chromium has
+    // started races the gateway against a non-existent CDP endpoint and makes a queued browser
+    // look usable.  The worker/controller calls markLeaseStarted only after it has verified
+    // browser-level `/json/version`; that transition materializes the capability.
+    session.status = "allocating";
     session.workerId = worker.id;
     session.leaseId = lease.id;
-    session.cdpEndpoint = capability.endpoint;
-    session.cdpInternalEndpoint = lease.internalCdpEndpoint;
-    session.cdpCapabilityExpiresAt = capability.expiresAt;
+    session.cdpEndpoint = undefined;
+    session.cdpInternalEndpoint = undefined;
+    session.cdpCapabilityExpiresAt = undefined;
     session.updatedAt = now(this.#clock);
     state.sessions.set(session.id, session);
-    this.event(state, session.project, { kind: "browser_session", id: session.id }, "browser_session.ready", { workerId: worker.id, leaseId: lease.id });
+    this.event(state, session.project, { kind: "browser_session", id: session.id }, "browser_session.allocating", { workerId: worker.id, leaseId: lease.id });
     return this.assignmentForLease(state, lease);
   }
 
   public assignJob(state: FabricState, job: Job, onlyWorkerId?: Worker["id"]): WorkerAssignment | undefined {
     const recipe = this.recipe(state, job.recipeRef);
-    if (job.runtime === "media-relay") {
+    if (isMediaRuntime(job.runtime)) {
       const worker = [...state.workers.values()]
-        .filter((candidate) => candidate.health === "healthy" && candidate.capabilities.runtimeFamilies.includes("media-relay") && (candidate.activeMediaTasks ?? 0) < (candidate.mediaCapacity ?? 0) && (onlyWorkerId === undefined || candidate.id === onlyWorkerId))
+        .filter((candidate) => !candidate.isLocal && candidate.health === "healthy" && candidate.capabilities.runtimeFamilies.includes(job.runtime) && (candidate.activeMediaTasks ?? 0) < (candidate.mediaCapacity ?? 0) && (onlyWorkerId === undefined || candidate.id === onlyWorkerId))
         .sort((a, b) => a.id.localeCompare(b.id))[0];
       if (!worker) return undefined;
       job.status = "running";
       job.workerId = worker.id;
-      job.mediaTaskActive = true;
+      job.mediaPlaybackReadyAt = undefined;
+      job.mediaPlaybackSourceRequestId = undefined;
       worker.activeMediaTasks = (worker.activeMediaTasks ?? 0) + 1;
       worker.updatedAt = now(this.#clock);
       state.workers.set(worker.id, worker);
       job.updatedAt = now(this.#clock);
+      // A media result capability is bound to this exact durable attempt. Reusing only job and
+      // worker identity would let a delayed result from a prior retry reach a newly assigned task.
+      job.mediaAttemptId = this.startAttempt(state, job, worker.id, undefined).id;
       state.jobs.set(job.id, job);
-      this.startAttempt(state, job, worker.id, undefined);
       this.event(state, job.project, { kind: "job", id: job.id }, "job.running", { workerId: worker.id, mediaOnly: true });
       return this.assignmentForMediaJob(state, job);
     }
@@ -168,7 +177,7 @@ export class SchedulerKernel {
         return undefined;
       }
     }
-    if (recipe.runtime !== "media-relay" && state.activeBrowserLeases >= this.#maxActiveBrowserLeases) return undefined;
+    if (!isMediaRuntime(recipe.runtime) && state.activeBrowserLeases >= this.#maxActiveBrowserLeases) return undefined;
     const activeLeases = [...state.leases.values()].filter((lease) => lease.status === "active");
     const activeManagedLeases = activeLeases.filter((lease) => !state.workers.get(lease.workerId)?.isLocal).length;
     const activeLocalLeases = activeLeases.length - activeManagedLeases;
@@ -189,9 +198,16 @@ export class SchedulerKernel {
 
   public createLease(state: FabricState, input: { sessionId?: BrowserSessionId; jobId?: JobId; project: ProjectId; profile?: Profile; worker: Worker; mode: LeaseMode; expiresAt: string }): BrowserLease {
     const leaseId = createId("browser-lease");
-    const relayTemplate = input.worker.cdpRelayEndpoint.replace(/\/$/, "");
     const endpointIdentity = leaseId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-    const relayBase = relayTemplate.includes("{leaseId}") ? relayTemplate.replaceAll("{leaseId}", endpointIdentity) : `${relayTemplate}/leases/${endpointIdentity}`;
+    // A local federated worker cannot accept an inbound connection from the gateway. Its agent
+    // opens an outbound reverse relay keyed by this opaque lease instead of advertising a
+    // loopback/private-overlay address. Managed workers use their constrained service template.
+    const relayBase = input.worker.isLocal
+      ? `reverse://${input.worker.id}/${leaseId}`
+      : (() => {
+          const relayTemplate = input.worker.cdpRelayEndpoint.replace(/\/$/, "");
+          return relayTemplate.includes("{leaseId}") ? relayTemplate.replaceAll("{leaseId}", endpointIdentity) : `${relayTemplate}/leases/${endpointIdentity}`;
+        })();
     const lease: BrowserLease = {
       id: leaseId,
       ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
@@ -272,17 +288,23 @@ export class SchedulerKernel {
   }
 
   public releaseMediaTask(state: FabricState, job: Job): void {
-    if (job.runtime !== "media-relay" || !job.workerId || !job.mediaTaskActive) return;
-    const worker = state.workers.get(job.workerId);
-    if (!worker) return;
-    job.mediaTaskActive = false;
+    // The exact active attempt is the sole media-capacity ownership marker. Keeping a second
+    // boolean made snapshot recovery vulnerable to stale derived state and duplicated the
+    // attempt-binding authority used by worker/result verification.
+    if (!isMediaRuntime(job.runtime) || job.mediaAttemptId === undefined) return;
+    const worker = job.workerId ? state.workers.get(job.workerId) : undefined;
+    // Invalidate any manager-issued result capability before a retry can become eligible.
+    job.mediaAttemptId = undefined;
+    job.mediaPlaybackReadyAt = undefined;
+    job.mediaPlaybackSourceRequestId = undefined;
     state.jobs.set(job.id, job);
+    if (!worker) return;
     worker.activeMediaTasks = Math.max(0, (worker.activeMediaTasks ?? 0) - 1);
     worker.updatedAt = now(this.#clock);
     state.workers.set(worker.id, worker);
   }
 
-  public startAttempt(state: FabricState, job: Job, workerId: Worker["id"], leaseId: BrowserLease["id"] | undefined): void {
+  public startAttempt(state: FabricState, job: Job, workerId: Worker["id"], leaseId: BrowserLease["id"] | undefined): import("@browser-fabric/contracts").JobAttempt {
     const previous = [...state.attempts.values()].filter((attempt) => attempt.jobId === job.id).sort((a, b) => b.number - a.number)[0];
     const attempt: import("@browser-fabric/contracts").JobAttempt = {
       id: createId("attempt"),
@@ -294,6 +316,7 @@ export class SchedulerKernel {
       createdAt: now(this.#clock)
     };
     state.attempts.set(attempt.id, attempt);
+    return attempt;
   }
 
   public finishAttempt(state: FabricState, job: Job, status: "succeeded" | "failed" | "cancelled"): void {
@@ -325,19 +348,24 @@ export class SchedulerKernel {
   public materializeLeaseEndpoint(state: FabricState, lease: BrowserLease): void {
     if (lease.internalCdpEndpoint) return;
     const worker = this.worker(state, lease.workerId);
-    const template = worker.cdpRelayEndpoint.replace(/\/$/, "");
     const endpointIdentity = lease.id.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-    lease.internalCdpEndpoint = template.includes("{leaseId}") ? template.replaceAll("{leaseId}", endpointIdentity) : `${template}/leases/${endpointIdentity}`;
+    lease.internalCdpEndpoint = worker.isLocal
+      ? `reverse://${worker.id}/${lease.id}`
+      : (() => {
+          const template = worker.cdpRelayEndpoint.replace(/\/$/, "");
+          return template.includes("{leaseId}") ? template.replaceAll("{leaseId}", endpointIdentity) : `${template}/leases/${endpointIdentity}`;
+        })();
     state.leases.set(lease.id, lease);
   }
 
   /** Re-issue volatile capability material after a process/replca restart without persisting it. */
   public materializeSessionCapability(state: FabricState, session: BrowserSession): void {
     if (!session.workerId || !session.leaseId || terminalSession(session.status)) return;
+    if (session.status !== "ready" && session.status !== "active") return;
     if (asDate(session.expiresAt) <= this.#clock.now().getTime()) return;
     const worker = this.worker(state, session.workerId);
     const lease = this.lease(state, session.leaseId);
-    if (lease.status !== "active") return;
+    if (lease.status !== "active" || !lease.startedAt) return;
     this.materializeLeaseEndpoint(state, lease);
     const capability = this.#capabilitySigner.issue({
       sessionId: session.id,
@@ -383,7 +411,9 @@ export class SchedulerKernel {
     state.inputRequests.set(request.id, request);
     if (request.jobId) {
       const job = this.job(state, request.jobId);
-      const pendingForJob = [...state.inputRequests.values()].some((candidate) => candidate.jobId === job.id && candidate.status === "pending");
+      const pendingForJob = [...state.inputRequests.values()].some(
+        (candidate) => candidate.jobId === job.id && candidate.status === "pending" && asDate(candidate.expiresAt) > this.#clock.now().getTime(),
+      );
       if (job.status === "awaiting_input" && !pendingForJob) {
         job.status = "running";
         job.updatedAt = now(this.#clock);

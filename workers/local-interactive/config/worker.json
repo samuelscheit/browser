@@ -1,0 +1,41 @@
+{
+  "id": "worker_local_interactive",
+  "certificateFingerprint": "configure-local-worker-certificate-fingerprint",
+  "endpoint": "https://fabric.internal.example",
+  "cdpRelayEndpoint": "ws://127.0.0.1:9222",
+  "capabilities": {
+    "runtimeFamilies": ["chromium-cdp", "patchright"],
+    "recipeRefs": [
+      "recipe_interactive-chromium@1",
+      "recipe_chat-browser-controller@1",
+      "recipe_account-signup@1",
+      "recipe_interactive-patchright@1"
+    ],
+    "browserVersions": { "chromium": "operator-configured" },
+    "supportsInteractive": true,
+    "supportsCompanionCompanion": true,
+    "supportedProfileFamilies": ["interactive", "chat", "account-signup"]
+  },
+  "capacity": 1,
+  "activeLeases": 0,
+  "mediaCapacity": 0,
+  "activeMediaTasks": 0,
+  "health": "healthy",
+  "isLocal": true,
+  "volumeNames": [
+    "profile_interactive",
+    "profile_chat",
+    "profile_account_signup"
+  ],
+  "resourceLimits": {
+    "maxBrowserLeases": 1,
+    "cpuMilli": 2000,
+    "memoryMiB": 4096,
+    "pids": 512,
+    "shmMiB": 1024,
+    "temporaryStorageMiB": 4096
+  },
+  "lastHeartbeatAt": "1970-01-01T00:00:00.000Z",
+  "createdAt": "1970-01-01T00:00:00.000Z",
+  "updatedAt": "1970-01-01T00:00:00.000Z"
+}

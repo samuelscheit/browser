@@ -128,19 +128,33 @@ test("encrypted input broker is transient, authenticated, idempotent, and one-sh
 
 test("Companion adapter cancels nonterminal runs and completes jobs as the assigned worker", async () => {
   const { CompanionAdapter } = await import("../apps/companion-adapter/src/index");
+  const { parseCompanionManifestCatalog, StaticCompanionManifestResolver } = await import("../apps/companion-adapter/src/manifest");
+  const { ArtifactCollector, MemoryObjectStore } = await import("@browser-fabric/control-plane");
   const context = await bootstrapTestScheduler();
   const profile = await context.scheduler.createProfile({ ...context.profile, ref: "profile_pfp" as never, profileFamily: "avatar-account" }, TEST_PRINCIPAL);
-  const job = await context.scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "companion-job", recipeRef: "recipe_profile-update-companion@1" as never, operation: { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: "artifact_1", approvedBy: "principal_test" }, profileRef: profile.ref, egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never }, TEST_PRINCIPAL);
+  const collector = new ArtifactCollector({ scheduler: context.scheduler, objectStore: new MemoryObjectStore(undefined, () => context.clock.now()), clock: () => context.clock.now() });
+  // Artifact inputs are normally produced by a prior browser session; create a session-owned
+  // fixture here so the typed avatar path exercises the same project/digest boundary.
+  const inputSession = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "companion-avatar-input", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+  const inputArtifact = await collector.capture({ project: TEST_PROJECT, sessionId: inputSession.id as never, kind: "screenshot", contentType: "image/png", bytes: new Uint8Array([137, 80, 78, 71]), policy: { ref: "artifact-policy_standard-30-days@1" as never, retentionDays: 30, allowedKinds: ["screenshot"], createdAt: new Date().toISOString() } });
+  await context.scheduler.releaseBrowserSession(inputSession.id as never, TEST_PRINCIPAL);
+  const job = await context.scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "companion-job", recipeRef: "recipe_profile-update-companion@1" as never, operation: { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: inputArtifact.id, approvedBy: "principal_test" }, profileRef: profile.ref, egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never }, TEST_PRINCIPAL);
   const [assignment] = await context.scheduler.dispatch();
+  const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: context.worker.certificateFingerprint };
+  await context.scheduler.claimAssignment(context.worker.id, assignment!.lease!.id, undefined, workerActor);
+  await context.scheduler.markLeaseStarted(assignment!.lease!.id, context.worker.id, workerActor);
   const states: string[] = [];
   let polls = 0;
-  const adapter = new CompanionAdapter(context.scheduler, {
-    createRun: async (input) => { expect(input.cdpEndpoint).toContain("worker.internal"); return { id: "run_1", status: "running" }; },
-    pollRun: async () => { polls += 1; states.push("poll"); return polls === 1 ? { id: "run_1", status: "succeeded", output: { verified: true } } : { id: "run_1", status: "succeeded" }; },
-    cancelRun: async () => { states.push("cancel"); }
-  });
-  await adapter.execute(job.id as never, TEST_PRINCIPAL);
-  expect(states).toEqual(["poll", "poll"]); // finalizer polls once more, sees terminal, and does not cancel
+  const adapterClocked = new CompanionAdapter(context.scheduler, {
+    runTask: async (input) => { expect(input.browserAddress).toContain("worker.internal"); expect(input.url).toBe("https://avatar.example/update"); expect(input.prompt).toContain("account@example.test"); expect(input.prompt).toContain("Fabric account-safety requirement"); return { id: "run_1", status: "running" }; },
+    pollRun: async () => { polls += 1; states.push("poll"); return { id: "run_1", status: "completed", output: { identity: "account@example.test" } }; },
+    cancelRun: async () => { states.push("cancel"); },
+    listRunArtifacts: async () => [],
+    downloadArtifact: async () => { throw new Error("no artifact expected"); },
+    uploadFile: async () => ({ fileId: "file_1" }),
+  }, collector, new StaticCompanionManifestResolver(parseCompanionManifestCatalog({ version: 1, manifests: [{ ref: "manifest_1", url: "https://avatar.example/update", prompt: "Update the avatar", maxSteps: 10, runWith: "agent", expectedAccount: "account@example.test" }] })), () => context.clock.now());
+  await adapterClocked.execute(job.id as never, TEST_PRINCIPAL);
+  expect(states).toEqual(["poll"]);
   expect((await context.scheduler.getJob(job.id as never, TEST_PRINCIPAL)).status).toBe("succeeded");
   expect(assignment?.lease).toBeDefined();
 });

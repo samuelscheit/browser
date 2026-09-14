@@ -121,7 +121,10 @@ export const builtInEgressPolicies: readonly EgressPolicy[] = [
       direct_exception: direct(false)
     },
     { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: true },
-    { directExceptionHostnames: ["cdn-a", "cdn-b"], affinityKey: "media-provider-session" }
+    // These are exact reviewed provider suffixes, not loose labels. `cdn-a` and `cdn-b`
+    // alone do not match the production hosts and would silently route the documented exception
+    // through the affinity proxy instead of direct egress.
+    { directExceptionHostnames: ["cdn-a.example", "cdn-b.example"], affinityKey: "media-provider-session" }
   ),
   makePolicy(
     "social-proxy-fallback",
@@ -186,14 +189,6 @@ export const builtInChallengeSets: readonly ChallengeHandlerSet[] = [
     version: 1,
     immutableHash: "challenge-news-v1",
     handlers: [{ id: "news-anticaptcha", kind: "anticaptcha", mode: "automatic", configuration: { provider: "anticaptcha" } }],
-    createdAt: now()
-  },
-  {
-    ref: "challenge_media@1" as ChallengeHandlerSet["ref"],
-    family: "media",
-    version: 1,
-    immutableHash: "challenge-media-v1",
-    handlers: [{ id: "turnstile-click-loop", kind: "turnstile-click-loop", mode: "automatic", configuration: { boundedAttempts: 5 } }],
     createdAt: now()
   },
   {
@@ -312,8 +307,8 @@ export function planChallenge(set: ChallengeHandlerSet, kind: ChallengeHandler["
 }
 
 export function assertRuntimePolicyCompatibility(runtime: RuntimeFamily, policy: EgressPolicy): void {
-  if (runtime === "media-relay" && !policy.constraints.allowDirectMediaRelay) {
-    throw new Error(`media-relay cannot use ${policy.family}: direct media relay is disabled`);
+  if ((runtime === "media-relay" || runtime === "media-playback") && !policy.constraints.allowDirectMediaRelay) {
+    throw new Error(`${runtime} cannot use ${policy.family}: direct media relay is disabled`);
   }
 }
 
@@ -378,3 +373,4 @@ export class ChallengeCoordinator {
   }
 }
 export * from "./enforced-fetch";
+export * from "./sidecar";

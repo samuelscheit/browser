@@ -17,10 +17,13 @@ export function makeWorker(overrides: Partial<Worker> = {}): Worker {
   return {
     id: (overrides.id ?? createId("worker")) as Worker["id"],
     certificateFingerprint: overrides.certificateFingerprint ?? `cert-${crypto.randomUUID()}`,
+    ...(overrides.enrollmentTokenHash === undefined ? {} : { enrollmentTokenHash: overrides.enrollmentTokenHash }),
+    ...(overrides.inputEncryptionPublicKeyPem === undefined ? {} : { inputEncryptionPublicKeyPem: overrides.inputEncryptionPublicKeyPem }),
     endpoint: overrides.endpoint ?? "https://worker.internal",
     cdpRelayEndpoint: overrides.cdpRelayEndpoint ?? "wss://worker.internal/cdp",
+    ...(overrides.mediaPlaybackEndpoint === undefined ? { mediaPlaybackEndpoint: "http://media-worker.internal:8084" } : { mediaPlaybackEndpoint: overrides.mediaPlaybackEndpoint }),
     capabilities: overrides.capabilities ?? {
-      runtimeFamilies: ["chromium-cdp", "patchright", "rebrowser-puppeteer", "playwright-social", "companion", "media-relay"],
+      runtimeFamilies: ["chromium-cdp", "patchright", "rebrowser-puppeteer", "playwright-social", "companion", "media-relay", "media-playback"],
       recipeRefs: builtInRecipes.map((recipe) => recipe.ref),
       browserVersions: { chromium: "stable" },
       supportsInteractive: overrides.isLocal ?? false,

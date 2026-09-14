@@ -1,0 +1,84 @@
+/** Shared contracts for the process-level Cloudflare Turnstile guardian. */
+
+export const DEFAULT_TURNSTILE_POLL_INTERVAL_MS = 1_000;
+export const DEFAULT_TURNSTILE_CHALLENGE_TIMEOUT_MS = 12_000;
+export const DEFAULT_TURNSTILE_MAX_CLICK_ATTEMPTS = 5;
+export const DEFAULT_TURNSTILE_CONNECT_TIMEOUT_MS = 10_000;
+
+export interface TurnstileGuardianSpec {
+  /** Fabric-owned Chromium processes always set this to true. */
+  enabled: boolean;
+  /** How often each attached page is inspected. */
+  pollIntervalMs: number;
+  /** Maximum time spent clicking one challenge before entering cooldown. */
+  challengeTimeoutMs: number;
+  /** Maximum click gestures issued for one challenge instance. */
+  maxClickAttempts: number;
+}
+
+export type TurnstileGuardianLogger = (event: string, details?: Record<string, unknown>) => void;
+/** Minimal fetch surface required for deterministic CDP discovery tests. */
+export type TurnstileGuardianFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+/** Small WebSocket surface shared by native and deterministic test transports. */
+export interface CdpTransport {
+  readonly readyState?: number;
+  send(message: string): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(type: "open" | "message" | "close" | "error", listener: (event: any) => void, options?: { once?: boolean }): void;
+  removeEventListener?(type: "open" | "message" | "close" | "error", listener: (event: any) => void): void;
+}
+
+export interface TurnstileGuardianOptions extends Partial<Omit<TurnstileGuardianSpec, "enabled">> {
+  /** Browser websocket endpoint, or an HTTP(S) /json/version endpoint. */
+  endpoint: string;
+  connectTimeoutMs?: number;
+  /** Test/in-process hook. Production uses the native WebSocket implementation. */
+  transportFactory?: (webSocketUrl: string, timeoutMs: number) => Promise<CdpTransport>;
+  /** Test hook for resolving HTTP /json/version endpoints. */
+  fetcher?: TurnstileGuardianFetcher;
+  logger?: TurnstileGuardianLogger;
+}
+
+/** A visible Turnstile iframe rectangle in top-level page coordinates. */
+export interface TurnstileChallengeBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Internal only; telemetry sanitizes this to origin before logging. */
+  frameUrl: string;
+  /** Internal CDP/DOM identity used only for bounded local accounting. */
+  instanceId?: string;
+}
+
+export interface TurnstilePageObservation {
+  url: string;
+  title: string;
+  signals: string[];
+  challenge: boolean;
+  solved: boolean;
+  boxes: TurnstileChallengeBox[];
+}
+
+export interface TurnstileGuardianSnapshot {
+  running: boolean;
+  attachedPages: number;
+  checks: number;
+  clickAttempts: number;
+  lastError?: string;
+}
+
+/** Common lifecycle boundary for local and managed guardian owners. */
+export interface TurnstileGuardianHandle {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  readonly snapshot: TurnstileGuardianSnapshot;
+}
+
+export interface TurnstileGuardianFactoryInput {
+  endpoint: string;
+  spec: TurnstileGuardianSpec;
+}
+
+export type TurnstileGuardianFactory = (input: TurnstileGuardianFactoryInput) => TurnstileGuardianHandle;

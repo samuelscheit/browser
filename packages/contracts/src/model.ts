@@ -26,9 +26,17 @@ export const runtimeFamilies = [
   "rebrowser-puppeteer",
   "playwright-social",
   "companion",
-  "media-relay"
+  "media-relay",
+  /** Persistent, capability-gated HLS/MP4 playback relay. It never creates a browser lease. */
+  "media-playback"
 ] as const;
 export type RuntimeFamily = (typeof runtimeFamilies)[number];
+export type MediaRuntimeFamily = "media-relay" | "media-playback";
+
+/** Media workers consume bounded media capacity independently from browser leases. */
+export function isMediaRuntime(value: string): value is MediaRuntimeFamily {
+  return value === "media-relay" || value === "media-playback";
+}
 
 export const leaseModes = ["writer", "interactive", "clone"] as const;
 export type LeaseMode = (typeof leaseModes)[number];
@@ -77,7 +85,7 @@ export type WorkerHealthState = (typeof workerHealthStates)[number];
 export const profileStatuses = ["active", "unhealthy", "relocating", "revoked"] as const;
 export type ProfileStatus = (typeof profileStatuses)[number];
 
-export const inputFieldTypes = ["password", "otp", "captcha_provider_credential", "proxy_credential", "form_value"] as const;
+export const inputFieldTypes = ["password", "otp", "captcha_provider_credential", "proxy_credential", "form_value", "media_playback_source"] as const;
 export type InputFieldType = (typeof inputFieldTypes)[number];
 
 export const trafficClasses = [
@@ -145,6 +153,8 @@ export interface Worker {
   inputEncryptionPublicKeyPem?: string;
   endpoint: string;
   cdpRelayEndpoint: string;
+  /** Private HTTP origin of a persistent capability-gated media playback worker, when supported. */
+  mediaPlaybackEndpoint?: string;
   capabilities: WorkerCapabilities;
   capacity: number;
   activeLeases: number;
@@ -229,7 +239,7 @@ export interface ChallengeHandlerSet {
 
 export interface ChallengeHandler {
   id: string;
-  kind: "cloudflare" | "dbc" | "anticaptcha" | "turnstile-click-loop" | "interactive-turnstile" | "manual-handoff" | "social-fallback";
+  kind: "cloudflare" | "dbc" | "anticaptcha" | "interactive-turnstile" | "manual-handoff" | "social-fallback";
   mode: "automatic" | "manual" | "fallback";
   configuration: Readonly<Record<string, string | number | boolean>>;
 }
@@ -237,7 +247,7 @@ export interface ChallengeHandler {
 export interface ArtifactPolicy {
   ref: ArtifactPolicyRef;
   retentionDays: number;
-  allowedKinds: readonly ("screenshot" | "mhtml" | "trace" | "har" | "download" | "video" | "log")[];
+  allowedKinds: readonly ("screenshot" | "mhtml" | "trace" | "har" | "download" | "video" | "log" | "media_manifest")[];
   createdAt: string;
 }
 
@@ -386,7 +396,23 @@ export interface Job {
   updatedAt: string;
   expiresAt: string;
   assignmentClaimedAt?: string;
-  mediaTaskActive?: boolean;
+  /** Non-secret companion execution id (for example Companion's run id). */
+  companionRunId?: string;
+  /** Reserved once for a one-shot media output so immutable retries keep the same object metadata. */
+  mediaArtifactExpiresAt?: string;
+  /** Active media-only attempt that authorizes exactly one result capability. */
+  mediaAttemptId?: AttemptId;
+  /**
+   * Non-secret identity of the exact encrypted source request that the active playback relay must
+   * consume before it can be marked ready. This prevents an older consumed source from satisfying
+   * a later provider-refresh request on the same attempt.
+   */
+  mediaPlaybackSourceRequestId?: InputRequestId;
+  /**
+   * Set only after an assigned encrypted playback-source worker has bound its private relay.
+   * The provider URL, cookies, and public playback capability deliberately never enter this row.
+   */
+  mediaPlaybackReadyAt?: string;
 }
 
 export interface JobAttempt {
@@ -404,7 +430,7 @@ export interface FabricEvent {
   id: EventId;
   sequence: number;
   project?: ProjectId;
-  subject: { kind: "browser_session" | "job" | "profile" | "worker"; id: string };
+  subject: { kind: "browser_session" | "job" | "profile" | "worker" | "artifact"; id: string };
   type: string;
   payload: Record<string, string | number | boolean | null>;
   createdAt: string;
@@ -413,10 +439,12 @@ export interface FabricEvent {
 export interface Artifact {
   id: ArtifactId;
   project: ProjectId;
+  /** Browser/job outputs have exactly one owner. A media_manifest is intentionally project-scoped
+   * so an application can submit it before the media job that will consume it exists. */
   sessionId?: BrowserSessionId;
   jobId?: JobId;
   profileRef?: ProfileRef;
-  kind: "screenshot" | "mhtml" | "trace" | "har" | "download" | "video" | "log";
+  kind: "screenshot" | "mhtml" | "trace" | "har" | "download" | "video" | "log" | "media_manifest";
   objectKey: string;
   sha256: string;
   mimeType: string;
@@ -425,12 +453,48 @@ export interface Artifact {
   expiresAt: string;
 }
 
+/**
+ * Artifact data that may cross the public API boundary. Object keys are internal storage routing
+ * details: applications receive a bounded signed read URL through ArtifactAccess instead.
+ */
+export interface ArtifactResponse {
+  id: ArtifactId;
+  project: ProjectId;
+  sessionId?: BrowserSessionId;
+  jobId?: JobId;
+  profileRef?: ProfileRef;
+  kind: Artifact["kind"];
+  sha256: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export function publicArtifact(artifact: Artifact): ArtifactResponse {
+  return {
+    id: artifact.id,
+    project: artifact.project,
+    ...(artifact.sessionId === undefined ? {} : { sessionId: artifact.sessionId }),
+    ...(artifact.jobId === undefined ? {} : { jobId: artifact.jobId }),
+    ...(artifact.profileRef === undefined ? {} : { profileRef: artifact.profileRef }),
+    kind: artifact.kind,
+    sha256: artifact.sha256,
+    mimeType: artifact.mimeType,
+    sizeBytes: artifact.sizeBytes,
+    createdAt: artifact.createdAt,
+    expiresAt: artifact.expiresAt,
+  };
+}
+
 export interface EphemeralInputRequest {
   id: InputRequestId;
   project: ProjectId;
   sessionId?: BrowserSessionId;
   jobId?: JobId;
-  leaseId: BrowserLeaseId;
+  /** Browser/session work uses a lease; media playback source handoffs bind to an attempt instead. */
+  leaseId?: BrowserLeaseId;
+  mediaAttemptId?: AttemptId;
   workerId?: WorkerId;
   /** Public key is safe to return to the application; the corresponding private key stays on the worker. */
   workerInputEncryptionPublicKeyPem?: string;
@@ -470,6 +534,7 @@ export interface BrowserSessionResponse {
   expiresAt: string;
   workerId?: WorkerId;
   profileLease?: { id: BrowserLeaseId; mode: LeaseMode; profileRef?: ProfileRef };
+  failureReason?: string;
 }
 
 export interface JobResponse {
@@ -478,6 +543,13 @@ export interface JobResponse {
   expiresAt: string;
   workerId?: WorkerId;
   result?: Record<string, unknown>;
+  failureReason?: string;
+}
+
+/** A short-lived bearer endpoint for an active Fabric-owned media playback relay. */
+export interface MediaPlaybackEndpoint {
+  endpoint: string;
+  expiresAt: string;
 }
 
 export interface CdpCapabilityClaims {

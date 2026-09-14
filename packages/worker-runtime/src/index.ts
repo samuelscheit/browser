@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { NativeSocialRuntime } from "./social";
+import { turnstileGuardianSpecFromEnvironment, type TurnstileGuardianSpec } from "./turnstile-guardian";
 import type { BrowserRecipe, EgressPolicy, Worker, WorkerAssignment } from "@browser-fabric/contracts";
 import { FabricError } from "@browser-fabric/contracts";
+import { internalEgressPacUrl } from "@browser-fabric/policy";
 
 export interface ContainerSecurity {
   dockerSocketMounted: false;
@@ -24,6 +25,13 @@ export interface BrowserContainerSpec {
   limits: Worker["resourceLimits"];
   security: ContainerSecurity;
   cdpBind: { host: "127.0.0.1" | "private-overlay"; port: number };
+  /**
+   * A browser-level, Fabric-owned companion that observes Cloudflare
+   * Turnstile widgets and performs the bounded Media-style checkbox click.
+   * It is deliberately part of the worker spec, not an opt-in application
+   * client feature, so all ordinary CDP browser sessions receive it.
+   */
+  turnstileGuardian?: TurnstileGuardianSpec;
 }
 
 export interface BrowserRuntime {
@@ -32,6 +40,7 @@ export interface BrowserRuntime {
 }
 
 const forbiddenEnv = /(PASSWORD|SECRET|TOKEN|COOKIE|CREDENTIAL|AUTHORIZATION|OTP|MS_TOKEN)/i;
+const forbiddenRecipeLaunchFlag = /^(--(?:no-proxy-server|proxy-(?:server|pac-url|bypass-list|auto-detect)|host-resolver-rules|remote-debugging-(?:address|port)|user-data-dir)(?:=|$)|--disable-quic(?:=|$)|--force-webrtc-ip-handling-policy(?:=|$))/i;
 
 function assertNoSecretEnvironment(environment: Record<string, string>): void {
   for (const key of Object.keys(environment)) {
@@ -40,10 +49,20 @@ function assertNoSecretEnvironment(environment: Record<string, string>): void {
 }
 
 function runtimeNetworks(policy: EgressPolicy): string[] {
-  // Workers can reach only control, worker, and the policy-selected egress sidecar.
-  const networks = ["fabric-control", "fabric-workers"];
-  if (Object.values(policy.routes).some((route) => route?.kind === "proxy" || route?.kind === "tor")) networks.push("fabric-egress");
-  return networks;
+  // Ephemeral browser processes can speak CDP to the gateway on the worker overlay, but must not
+  // share the control overlay with API, scheduler, or input-broker services. Every browser joins
+  // the internal egress overlay, including `direct-egress`: direct traffic is still forwarded by
+  // the policy sidecar and therefore cannot escape through a second Docker network.
+  void policy;
+  return ["fabric-workers", "fabric-egress"];
+}
+
+function assertRecipeEgressFlags(recipe: BrowserRecipe): void {
+  for (const flag of recipe.launch.launchFlags) {
+    if (forbiddenRecipeLaunchFlag.test(flag)) {
+      throw new FabricError("validation_failed", `recipe ${recipe.ref} may not override Fabric egress enforcement`, 400);
+    }
+  }
 }
 
 export class GenericBrowserRuntime implements BrowserRuntime {
@@ -55,6 +74,7 @@ export class GenericBrowserRuntime implements BrowserRuntime {
     const session = assignment.session;
     const job = assignment.job;
     if (recipe.runtime !== this.family) throw new FabricError("validation_failed", `runtime ${this.family} cannot execute ${recipe.runtime}`, 400);
+    assertRecipeEgressFlags(recipe);
     if (recipe.mode === "interactive" && !worker.isLocal) throw new FabricError("worker_unavailable", "interactive recipes require the federated local worker", 409);
     if (lease && lease.workerId !== worker.id) throw new FabricError("authorization_denied", "assignment worker mismatch", 403);
     const profileVolume = assignment.clone?.volumeName ?? assignment.profile?.volumeName ?? assignment.lease?.ephemeralVolumeName;
@@ -80,21 +100,28 @@ export class GenericBrowserRuntime implements BrowserRuntime {
       browserVersion: recipe.browserVersion,
       command: [
         "/usr/bin/chromium",
-        // Managed browser containers bind only to the private overlay; the local federated
-        // worker keeps loopback binding because its supervisor connects locally.
-        `--remote-debugging-address=${worker.isLocal ? "127.0.0.1" : "0.0.0.0"}`,
-        `--remote-debugging-port=${cdpPort}`,
         ...(recipe.mode === "headless" ? ["--headless=new"] : []),
         ...(recipe.mode === "interactive" ? ["--start-maximized"] : []),
         ...(recipe.launch.disableServiceWorkers ? ["--disable-service-worker"] : []),
-        ...recipe.launch.launchFlags
+        ...recipe.launch.launchFlags,
+        // These flags are appended after immutable recipe flags so no recipe can override the
+        // browser ownership, debugging boundary, or routing policy.
+        `--remote-debugging-address=${worker.isLocal ? "127.0.0.1" : "0.0.0.0"}`,
+        `--remote-debugging-port=${cdpPort}`,
+        `--user-data-dir=${profileVolume ? "/fabric/profile/chromium" : "/tmp/fabric-browser-profile"}`,
+        `--proxy-pac-url=${internalEgressPacUrl(policy, { baseUrl: process.env.FABRIC_EGRESS_PAC_BASE_URL, localWorker: worker.isLocal })}`,
+        "--proxy-auto-detect=false",
+        "--proxy-bypass-list=<-loopback>",
+        "--disable-quic",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
       ],
       environment,
       volumes,
       networks: runtimeNetworks(policy),
       limits: worker.resourceLimits,
       security: { dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false },
-      cdpBind: { host: worker.isLocal ? "127.0.0.1" : "private-overlay", port: cdpPort }
+      cdpBind: { host: worker.isLocal ? "127.0.0.1" : "private-overlay", port: cdpPort },
+      turnstileGuardian: turnstileGuardianSpecFromEnvironment()
     };
   }
 }
@@ -109,12 +136,12 @@ export class MediaRelayRuntime implements BrowserRuntime {
     return {
       workerId: worker.id,
       jobId: assignment.job.id,
-      image: "ghcr.io/browser-fabric/media-relay:1",
+      image: assignment.recipe.browserImage,
       browserVersion: "none",
       command: ["/usr/local/bin/fabric-media-relay"],
       environment: { FABRIC_WORKER_ID: worker.id, FABRIC_JOB_ID: assignment.job.id, FABRIC_EGRESS_POLICY_REF: policy.ref },
       volumes: [],
-      networks: ["fabric-control", "fabric-workers", "fabric-egress"],
+      networks: ["fabric-workers", "fabric-egress"],
       limits: worker.resourceLimits,
       security: { dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false },
       cdpBind: { host: "private-overlay", port: 0 }
@@ -144,7 +171,9 @@ export class WorkerRuntimeRegistry {
 export function defaultRuntimeRegistry(): WorkerRuntimeRegistry {
   const registry = new WorkerRuntimeRegistry();
   for (const family of ["chromium-cdp", "patchright", "rebrowser-puppeteer", "companion"]) registry.register(new GenericBrowserRuntime(family));
-  registry.register(new NativeSocialRuntime());
+  // Social's Python worker is an application client. Its Chromium process is built and owned by
+  // the same generic Fabric browser lifecycle as every other CDP runtime.
+  registry.register(new GenericBrowserRuntime("playwright-social"));
   registry.register(new MediaRelayRuntime());
   return registry;
 }
@@ -153,4 +182,4 @@ export function artifactChecksum(bytes: Uint8Array): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 export * from "./chromium";
-export * from "./social";
+export * from "./turnstile-guardian";

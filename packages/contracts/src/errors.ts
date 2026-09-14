@@ -11,6 +11,7 @@ export type ProblemCode =
   | "capability_expired"
   | "secret_rejected"
   | "worker_unavailable"
+  | "deadline_exceeded"
   | "internal_error";
 
 export class FabricError extends Error {

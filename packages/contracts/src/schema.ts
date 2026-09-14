@@ -65,6 +65,32 @@ function positiveInt(value: unknown, name: string, min: number, max: number): nu
   return value;
 }
 
+/** Docker volume identifiers are data-plane capabilities, never arbitrary mount strings. */
+export function isSafeDockerVolumeName(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z][a-z0-9_.-]{0,127}$/.test(value);
+}
+
+function secureHttpsUrl(value: unknown, name: string): string {
+  const parsed = string(value, name, 2048);
+  let url: URL;
+  try {
+    url = new URL(parsed);
+  } catch {
+    throw new FabricError("validation_failed", `${name} must use HTTPS`, 400);
+  }
+  if (url.protocol !== "https:" || url.username || url.password) {
+    throw new FabricError("validation_failed", `${name} must use credential-free HTTPS`, 400);
+  }
+  // Callback authorization belongs in an explicit secret reference/header, never in a URL query
+  // that would be copied into durable job records, events, and retry payloads.
+  for (const key of url.searchParams.keys()) {
+    if (/(password|passphrase|secret|token|cookie|credential|authorization|proxy|otp|api[_-]?key|signature|sig|code|state)/i.test(key)) {
+      throw new FabricError("secret_rejected", `${name} must not embed credential material in its query string`, 400);
+    }
+  }
+  return parsed;
+}
+
 export function parseBrowserSessionCreate(value: unknown): BrowserSessionCreateInput {
   const input = object(value, "request");
   const metadata = optionalObject(input.metadata, "metadata");
@@ -89,8 +115,7 @@ export function parseJobCreate(value: unknown): JobCreateInput {
   let callback: JobCreateInput["callback"];
   if (callbackValue !== undefined) {
     const rawCallback = object(callbackValue, "callback");
-    const url = string(rawCallback.url, "callback.url", 2048);
-    if (!/^https:\/\//.test(url)) throw new FabricError("validation_failed", "callback.url must use HTTPS", 400);
+    const url = secureHttpsUrl(rawCallback.url, "callback.url");
     callback = {
       url,
       ...(rawCallback.eventSecretRef === undefined ? {} : { eventSecretRef: string(rawCallback.eventSecretRef, "callback.eventSecretRef", 255) })
@@ -123,19 +148,16 @@ export function parseProfileCreate(value: unknown): Omit<Profile, "createdAt" | 
     ref: id<ProfileRef>(input.ref, "ref", "profile"),
     ownerProject: id<ProjectId>(input.ownerProject, "ownerProject", "project"),
     workerId: id<WorkerId>(input.workerId, "workerId", "worker"),
-    volumeName: string(input.volumeName, "volumeName", 128),
+    volumeName: (() => {
+      const volumeName = string(input.volumeName, "volumeName", 128);
+      if (!isSafeDockerVolumeName(volumeName)) throw new FabricError("validation_failed", "volumeName is not a safe Docker volume name", 400);
+      return volumeName;
+    })(),
     profileFamily: string(input.profileFamily, "profileFamily", 128),
     grants: grantsValue.map((grant) => id<ProjectId>(grant, "grants[]", "project")),
     volumeGeneration: input.volumeGeneration === undefined ? 1 : positiveInt(input.volumeGeneration, "volumeGeneration", 1, 1_000_000),
     status: profileStatus
   };
-}
-
-export function parseInputValue(value: unknown): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 16_384) {
-    throw new FabricError("validation_failed", "input value must be a non-empty string up to 16384 bytes", 400);
-  }
-  return value;
 }
 
 export function parseInputFieldType(value: unknown) {

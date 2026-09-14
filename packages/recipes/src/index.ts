@@ -45,8 +45,10 @@ function makeRecipe(
     version: 1,
     runtime,
     immutableHash: `sha256:${createHash("sha256").update(canonicalJson(base)).digest("hex")}`,
-    browserImage: runtime === "playwright-social" ? "ghcr.io/browser-fabric/playwright-social:1" : `ghcr.io/browser-fabric/${runtime}:1`,
-    browserVersion: runtime === "playwright-social" ? "playwright-pinned" : "chromium-pinned",
+    // Every browser recipe describes the separately managed Chromium process. The Python Social
+    // worker is an application client and is deployed independently from this browser image.
+    browserImage: `ghcr.io/browser-fabric/${runtime === "playwright-social" ? "chromium-cdp" : runtime}:1`,
+    browserVersion: "chromium-pinned",
     mode,
     profileFamily,
     requiredCapabilities: [runtime, profileFamily, ...(mode === "interactive" ? ["interactive-ui"] : [])],
@@ -74,7 +76,10 @@ function makeRecipe(
 const pfpOperation: TypedOperationSpec = {
   name: "update_avatar",
   requiredFields: ["manifestRef", "avatarArtifactRef", "approvedBy"],
-  allowedFields: ["manifestRef", "avatarArtifactRef", "approvedBy", "expectedAccount", "dryRun"],
+  // The target identity, URL, and mutation instructions belong to the immutable Companion manifest.
+  // Do not expose caller-controlled expectedAccount/dryRun fields: the former could approve a
+  // different account and the latter previously looked safe while still starting a real task.
+  allowedFields: ["manifestRef", "avatarArtifactRef", "approvedBy"],
   secretInputFields: ["password", "otp"]
 };
 
@@ -93,12 +98,10 @@ export const builtInRecipes: readonly RecipeDefinition[] = [
   makeRecipe("patchright-news", "patchright", "news-browser", "headless", "raw_cdp", {
     challengeHandlerSetRef: "challenge_news@1"
   }),
-  makeRecipe("patchright-media", "patchright", "media", "headless", "raw_cdp", {
-    challengeHandlerSetRef: "challenge_media@1"
-  }),
+  makeRecipe("patchright-media", "patchright", "media", "headless", "raw_cdp"),
   makeRecipe("playwright-social", "playwright-social", "social", "headless", "typed_job", {
     challengeHandlerSetRef: "challenge-social-fallback@1",
-    typedOperations: [{ name: "collect_insights", requiredFields: ["username"], allowedFields: ["username", "includeVideos", "cookieStateRef"], secretInputFields: ["msToken", "cookie"] }],
+    typedOperations: [{ name: "collect_insights", requiredFields: ["username"], allowedFields: ["username", "includeVideos", "cookieStateRef", "authStateRef", "maxVideos"], secretInputFields: ["msToken", "cookie"] }],
     maxAttempts: 3
   }),
   makeRecipe("companion-cdp", "companion", "avatar-account", "headful", "typed_job", {
@@ -116,6 +119,12 @@ export const builtInRecipes: readonly RecipeDefinition[] = [
     typedOperations: [signupOperation],
     maxAttempts: 2
   }),
+  // The Signup/Account adapter uses this raw-CDP variant when it needs to keep its existing
+  // Patchright page-level workflow. The typed signup recipe remains the preferred path for
+  // centrally orchestrated retries and manual handoff.
+  makeRecipe("interactive-patchright", "patchright", "account-signup", "interactive", "raw_cdp", {
+    challengeHandlerSetRef: "challenge-signup-manual@1"
+  }),
   makeRecipe("reporting-reporting", "rebrowser-puppeteer", "reporting-reporting", "headless", "typed_job", {
     challengeHandlerSetRef: "challenge_reporting@1",
     typedOperations: [{ name: "submit_report", requiredFields: ["provider", "evidenceArtifactRefs"], allowedFields: ["provider", "evidenceArtifactRefs", "reportRef"], secretInputFields: ["providerCredential", "captchaCredential"] }],
@@ -129,7 +138,7 @@ export const builtInRecipes: readonly RecipeDefinition[] = [
   }),
   makeRecipe("social-insights", "playwright-social", "social", "headless", "typed_job", {
     challengeHandlerSetRef: "challenge-social-fallback@1",
-    typedOperations: [{ name: "collect_insights", requiredFields: ["username"], allowedFields: ["username", "includeVideos", "authStateRef"], secretInputFields: ["msToken", "cookie"] }],
+    typedOperations: [{ name: "collect_insights", requiredFields: ["username"], allowedFields: ["username", "includeVideos", "authStateRef", "maxVideos"], secretInputFields: ["msToken", "cookie"] }],
     maxAttempts: 3
   }),
   makeRecipe("profile-update-companion", "companion", "avatar-account", "headful", "typed_job", {
@@ -139,13 +148,21 @@ export const builtInRecipes: readonly RecipeDefinition[] = [
     allowedCompanionConnections: ["companion", "file-input-bridge"]
   }),
   makeRecipe("media-resolution", "patchright", "media", "headless", "typed_job", {
-    challengeHandlerSetRef: "challenge_media@1",
     typedOperations: [{ name: "resolve", requiredFields: ["url"], allowedFields: ["url", "providerHint"], secretInputFields: [] }],
     maxAttempts: 2
   }),
   makeRecipe("media-media", "media-relay", "media", "headless", "typed_job", {
     typedOperations: [{ name: "relay", requiredFields: ["manifestRef"], allowedFields: ["manifestRef", "range"], secretInputFields: [] }],
-    maxAttempts: 1
+    // The artifact handoff is immutable/idempotent, so one infrastructure retry is safe after a
+    // manager/worker failure without creating a second playback object.
+    maxAttempts: 2
+  }),
+  // Streaming playback is deliberately separate from the bounded immutable artifact relay. A
+  // Media provider's signed URL/cookie bundle arrives only through an encrypted one-shot input
+  // request after this media attempt has been assigned; it is never accepted in the durable job.
+  makeRecipe("media-playback", "media-playback", "media", "headless", "typed_job", {
+    typedOperations: [{ name: "playback", requiredFields: ["manifestRef"], allowedFields: ["manifestRef"], secretInputFields: ["media_source"] }],
+    maxAttempts: 2
   })
 ];
 
@@ -153,7 +170,7 @@ export const standardArtifactPolicies: readonly ArtifactPolicy[] = [
   {
     ref: "artifact-policy_standard-30-days@1" as ArtifactPolicy["ref"],
     retentionDays: 30,
-    allowedKinds: ["screenshot", "mhtml", "trace", "har", "download", "video", "log"],
+    allowedKinds: ["screenshot", "mhtml", "trace", "har", "download", "video", "log", "media_manifest"],
     createdAt
   }
 ];

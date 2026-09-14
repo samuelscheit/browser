@@ -4,6 +4,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@browser-fabric/contracts": "workspace:*"
+    "@browser-fabric/contracts": "workspace:*",
+    "@browser-fabric/policy": "workspace:*"
   }
 }

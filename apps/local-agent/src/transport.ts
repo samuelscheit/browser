@@ -1,6 +1,7 @@
 import type { Worker, WorkerAssignment, WorkerId } from "@browser-fabric/contracts";
 import { AssignmentVerifier } from "@browser-fabric/control-plane";
-import type { LocalAgentTransport } from "./index";
+import type { CdpRelayHandle, LocalAgentTransport } from "./index";
+import { OutboundCdpRelay, localCdpRelayOptionsFromEnvironment } from "./cdp-relay";
 
 export interface LocalAgentHttpTransportOptions {
   baseUrl: string;
@@ -76,6 +77,25 @@ export class LocalAgentHttpTransport implements LocalAgentTransport {
   public async heartbeatLease(workerId: WorkerId, leaseId: string): Promise<void> {
     this.#assertWorker(workerId);
     await this.#request(`/v1/workers/${encodeURIComponent(workerId)}/leases/${encodeURIComponent(leaseId)}/heartbeat`, { method: "POST" });
+  }
+
+  public async markLeaseStarted(workerId: WorkerId, leaseId: string): Promise<void> {
+    this.#assertWorker(workerId);
+    await this.#request(`/v1/workers/${encodeURIComponent(workerId)}/leases/${encodeURIComponent(leaseId)}/started`, { method: "POST" });
+  }
+
+  public async failLease(workerId: WorkerId, leaseId: string, reason: string): Promise<void> {
+    this.#assertWorker(workerId);
+    await this.#request(`/v1/workers/${encodeURIComponent(workerId)}/leases/${encodeURIComponent(leaseId)}/failed`, { method: "POST", body: { reason } });
+  }
+
+  public async openCdpRelay(workerId: WorkerId, leaseId: string, browserEndpoint: string): Promise<CdpRelayHandle | undefined> {
+    this.#assertWorker(workerId);
+    const options = localCdpRelayOptionsFromEnvironment({ workerId, leaseId, browserEndpoint });
+    if (!options) return undefined;
+    const relay = new OutboundCdpRelay(options);
+    await relay.start();
+    return { stop: () => relay.stop(), get connected() { return relay.connected; } };
   }
 
   async #request(path: string, init: { method?: string; body?: unknown } = {}): Promise<unknown> {
