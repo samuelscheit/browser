@@ -6,6 +6,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const MAX_CONNECTIONS = 16;
 const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 const MAX_BUFFERED_MESSAGES = 64;
+const DEFAULT_READY_TIMEOUT_MS = 120_000;
 
 export type CdpRelayConfig = {
   apiBaseUrl: string;
@@ -14,6 +15,7 @@ export type CdpRelayConfig = {
   ca: Buffer;
   headers: Readonly<Record<string, string>>;
   maxConnections: number;
+  readyTimeoutMs: number;
 };
 
 export type ParsedCdpSessionRoute = {
@@ -106,6 +108,7 @@ export function relayConfigFromEnvironment(environment: Record<string, string | 
       "x-fabric-cert-fingerprint": fingerprint,
     },
     maxConnections: boundedInteger(environment.FABRIC_CDP_RELAY_MAX_CONNECTIONS, "FABRIC_CDP_RELAY_MAX_CONNECTIONS", 4, 1, MAX_CONNECTIONS),
+    readyTimeoutMs: boundedInteger(environment.FABRIC_CDP_RELAY_READY_TIMEOUT_MS, "FABRIC_CDP_RELAY_READY_TIMEOUT_MS", DEFAULT_READY_TIMEOUT_MS, 1_000, 300_000),
   };
 }
 
@@ -134,7 +137,7 @@ function validCdpEndpoint(value: unknown): value is string {
   }
 }
 
-async function resolveFabricCdpEndpoint(config: CdpRelayConfig, route: ParsedCdpSessionRoute): Promise<string> {
+async function fabricSession(config: CdpRelayConfig, route: ParsedCdpSessionRoute): Promise<{ status?: unknown; cdpEndpoint?: unknown }> {
   let response: Response;
   try {
     response = await globalThis.fetch(fabricSessionUrl(config, route), {
@@ -146,10 +149,36 @@ async function resolveFabricCdpEndpoint(config: CdpRelayConfig, route: ParsedCdp
   }
   if (!response.ok) throw new Error(`Fabric API session lookup returned HTTP ${response.status}`);
   const session = await response.json().catch(() => undefined) as { status?: unknown; cdpEndpoint?: unknown } | undefined;
-  if (!session || (session.status !== "ready" && session.status !== "active") || !validCdpEndpoint(session.cdpEndpoint)) {
-    throw new Error("Fabric session is not ready for relay connection");
+  if (!session || typeof session !== "object") throw new Error("Fabric API session lookup returned an invalid response");
+  return session;
+}
+
+/**
+ * Resolve only an endpoint that Fabric has made ready. Applications may open
+ * their opaque local relay connection as soon as they create a session; this
+ * bounded poll keeps the Fabric capability entirely inside relay memory.
+ */
+export async function resolveFabricCdpEndpoint(
+  config: CdpRelayConfig,
+  route: ParsedCdpSessionRoute,
+  options: { now?: () => number; wait?: (ms: number) => Promise<void> } = {},
+): Promise<string> {
+  const now = options.now ?? Date.now;
+  const wait = options.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = now() + config.readyTimeoutMs;
+  let delayMs = 100;
+  while (true) {
+    const session = await fabricSession(config, route);
+    if ((session.status === "ready" || session.status === "active") && validCdpEndpoint(session.cdpEndpoint)) {
+      return session.cdpEndpoint;
+    }
+    if (["released", "cancelled", "failed", "timed_out"].includes(String(session.status))) {
+      throw new Error(`Fabric session ended in ${String(session.status)}`);
+    }
+    if (now() >= deadline) throw new Error("Fabric session did not become ready before the relay deadline");
+    await wait(Math.min(delayMs, Math.max(1, deadline - now())));
+    delayMs = Math.min(2_000, Math.ceil(delayMs * 1.5));
   }
-  return session.cdpEndpoint;
 }
 
 async function relayConnection(client: WebSocket, config: CdpRelayConfig, route: ParsedCdpSessionRoute): Promise<void> {
