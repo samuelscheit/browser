@@ -4,6 +4,7 @@ COPY package.json bun.lock ./
 COPY apps ./apps
 COPY packages ./packages
 COPY deploy ./deploy
+COPY scripts ./scripts
 RUN bun install --frozen-lockfile
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin fabric-api \
     && chown -R fabric-api:fabric-api /app
