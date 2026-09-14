@@ -176,7 +176,7 @@ export class FabricWorkerAgent {
 
 /**
  * Managed workers are intentionally only heartbeats/registration agents. The controller that has
- * the narrowly scoped Swarm socket creates browser services; these agents never receive Docker
+ * the narrowly scoped Docker socket creates browser containers; these agents never receive Docker
  * access and therefore cannot turn an assignment into arbitrary host work.
  */
 export class WorkerHeartbeatAgent {

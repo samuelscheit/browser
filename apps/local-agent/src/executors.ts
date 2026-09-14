@@ -1,7 +1,7 @@
 import { ChromiumProcessSupervisor } from "@browser-fabric/worker-runtime";
 import type { BrowserProcessSpec, Executor } from "@browser-fabric/worker-manager";
 
-/** In-process executor for a local interactive worker. Managed nodes use DockerServiceExecutor. */
+/** In-process executor for a local interactive worker. Managed nodes use DockerContainerExecutor. */
 export class ChromiumSupervisorExecutor implements Executor {
   readonly #supervisor: ChromiumProcessSupervisor;
   public constructor(supervisor = new ChromiumProcessSupervisor({

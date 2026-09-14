@@ -38,22 +38,21 @@ export async function createProductionApi(): Promise<ApiRuntime> {
 }
 
 async function principalFromHeaders(request: Request, scheduler: PostgresSchedulerRuntime["scheduler"]): Promise<Principal | undefined> {
-  // These headers are accepted only after the private ingress has verified the client
-  // certificate and forwarded the verification result. Direct callers cannot self-assert them.
+  // The edge verifies an outer client certificate and forwards its DER value only over origin
+  // mTLS. Do not trust caller-supplied principal/project labels: a registered certificate is the
+  // sole identity, and the scheduler evaluates its grants for every requested project.
   if (request.headers.get("x-fabric-mtls-verified") !== "true") return undefined;
-  const id = request.headers.get("x-fabric-principal");
-  const project = request.headers.get("x-fabric-project");
   const claimedFingerprint = request.headers.get("x-fabric-cert-fingerprint");
   const certificateFingerprint = certificateFingerprintFromForwardedHeader(forwardedClientCertificate(request));
   const fingerprint = certificateFingerprint ?? claimedFingerprint;
-  if (!id || !project || !fingerprint) return undefined;
+  if (!fingerprint) return undefined;
   if (process.env.NODE_ENV === "production" && !certificateFingerprint) return undefined;
   if (claimedFingerprint && certificateFingerprint && !certificateFingerprintsEqual(claimedFingerprint, certificateFingerprint)) return undefined;
   const snapshot = await scheduler.store.snapshot();
-  const registered = snapshot.principals.get(id as Principal["id"]);
-  if (!registered || !certificateFingerprintsEqual(registered.certificateFingerprint, fingerprint)) return undefined;
-  if (!registered.roles.includes("fabric_admin") && !registered.projectGrants.includes(project as Principal["projectGrants"][number])) return undefined;
-  return structuredClone(registered);
+  const principals = [...snapshot.principals.values()].filter((principal) => certificateFingerprintsEqual(principal.certificateFingerprint, fingerprint));
+  // Provisioning rejects duplicate certificate fingerprints. Retain this defensive ambiguity
+  // check so a corrupted store cannot turn one certificate into multiple principals.
+  return principals.length === 1 ? structuredClone(principals[0]!) : undefined;
 }
 
 if (import.meta.main) {

@@ -87,7 +87,7 @@ export class WorkerManager {
     return this.startClaimed(worker, claimed, proxyUrls);
   }
 }
-export * from "./docker-executor";
+export * from "./docker-container-executor";
 export * from "./controller";
 export * from "./media-result";
 export * from "./media-playback";

@@ -68,7 +68,7 @@ function isLoopbackHost(host: string): boolean {
 
 /**
  * Return the per-policy PAC URL that Chromium is allowed to use. Managed workers use the private
- * Swarm DNS name; federated local workers must use a loopback sidecar so a host browser cannot
+ * Compose DNS name; federated local workers must use a loopback sidecar so a host browser cannot
  * fail open to the host's default route.
  */
 export function internalEgressPacUrl(

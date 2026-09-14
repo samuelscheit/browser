@@ -6,7 +6,7 @@ import type { MediaResultGateway } from "./media-result";
 
 export interface ManagedWorkerControllerOptions {
   scheduler: BrowserScheduler;
-  /** The production implementation is DockerServiceExecutor; the controller itself only needs
+  /** The production implementation is DockerContainerExecutor; the controller itself only needs
    * the narrow executor contract, which keeps liveness/recovery independently testable. */
   browserExecutor: Executor;
   mediaExecutor?: MediaExecutor;
@@ -30,8 +30,8 @@ interface ActiveProcess {
 
 /**
  * Controller-side loop for managed fabric-host workers. It is the only component with Docker access;
- * browser worker containers themselves have no socket. Each assignment is claimed before service
- * creation, and services are removed as soon as the durable lease/job disappears.
+ * browser worker containers themselves have no socket. Each assignment is claimed before container
+ * creation, and containers are removed as soon as the durable lease/job disappears.
  */
 export class ManagedWorkerController {
   readonly #scheduler: BrowserScheduler;
@@ -123,7 +123,7 @@ export class ManagedWorkerController {
   public activeProcesses(): readonly ActiveProcess[] { return [...this.#active.values()].map((process) => ({ ...process })); }
 
   /**
-   * Called only after DockerServiceExecutor removes browser services from an earlier manager
+   * Called only after DockerContainerExecutor removes browser containers from an earlier manager
    * process. A fresh controller has no guardian/liveness ownership for those leases, so release
    * them promptly instead of waiting for the heartbeat timeout.
    */
@@ -150,7 +150,7 @@ export class ManagedWorkerController {
 
   /**
    * The manager owns media service completion. On restart its in-memory watcher is gone, so every
-   * still-running media assignment must be reclaimed after Docker has stopped inherited services.
+   * still-running media assignment must be reclaimed after Docker has stopped inherited containers.
    */
   public async failUntrackedMediaTasks(): Promise<number> {
     let released = 0;

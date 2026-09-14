@@ -112,7 +112,7 @@ export class ChromiumProcessSupervisor {
     const profileVolume = spec.volumes.find((volume) => volume.target === "/fabric/profile")?.source;
     const profilePath = profileVolume && this.#profileRoot ? join(this.#profileRoot, basename(profileVolume)) : profileVolume;
     if (profilePath && this.#profileRoot) mkdirSync(profilePath, { recursive: true });
-    // A host-local browser has a host default route, unlike an internal Swarm browser service.
+    // A host-local browser has a host default route, unlike an internal Compose browser container.
     // Refuse to launch it until its loopback Fabric PAC is available and fail-closed; otherwise a
     // transient sidecar outage could make Chromium silently use direct host egress.
     const pacArgument = spec.command.find((argument) => argument.startsWith("--proxy-pac-url="));

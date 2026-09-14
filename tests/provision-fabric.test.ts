@@ -4,7 +4,7 @@ import { FabricError } from "@browser-fabric/contracts";
 import { createTestScheduler } from "@browser-fabric/testkit";
 import { parseProvisionManifest, provisionManifest, type ProvisionManifest } from "../scripts/provision-fabric";
 
-const exampleManifestPath = new URL("../deploy/swarm/provision-manifest.example.json", import.meta.url);
+const exampleManifestPath = new URL("../deploy/compose/provision-manifest.example.json", import.meta.url);
 
 async function exampleManifest(): Promise<ProvisionManifest> {
   return parseProvisionManifest(JSON.parse(await readFile(exampleManifestPath, "utf8")));

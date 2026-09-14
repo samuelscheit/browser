@@ -872,7 +872,7 @@ export class BrowserScheduler {
         if (lease.workerId !== workerId || lease.status !== "active") throw new FabricError("authorization_denied", "assignment is not allocated to this worker", 403);
         const timestamp = now(this.#clock);
         lease.assignmentClaimedAt = timestamp;
-        // A controller can spend several seconds creating a constrained Swarm service.  Treat a
+        // A controller can spend several seconds creating a constrained Docker container. Treat a
         // successful claim as a liveness signal while it performs that bounded startup work;
         // markLeaseStarted records actual browser readiness separately.
         lease.lastHeartbeatAt = timestamp;

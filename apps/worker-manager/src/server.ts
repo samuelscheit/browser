@@ -2,7 +2,7 @@ import { FabricError, type AttemptId, type Worker } from "@browser-fabric/contra
 import { ArtifactCollector, ArtifactMediaManifestResolver, AssignmentSigner, bunMtlsServerTls, createBunMtlsFetch, createPostgresScheduler, createProductionObjectStore, HttpEncryptedInputBroker, mtlsFilesFromEnv, type BrowserScheduler, type EncryptedInputBroker, type PostgresSchedulerRuntime } from "@browser-fabric/control-plane";
 import { parseWorkerRegistration, workerPrincipal } from "./protocol";
 import { ManagedWorkerController } from "./controller";
-import { DockerMediaServiceExecutor, DockerServiceExecutor } from "./docker-executor";
+import { DockerContainerExecutor, DockerMediaContainerExecutor } from "./docker-container-executor";
 import { LeasedBrowserProvisioner } from "./leased-browser-provisioner";
 import { MediaResultCapabilitySigner, MediaResultGateway } from "./media-result";
 import { MediaPlaybackControl } from "./media-playback";
@@ -184,12 +184,12 @@ export async function createProductionWorkerManager(): Promise<PostgresScheduler
 if (import.meta.main) {
   const runtime = await createProductionWorkerManager();
   const assignmentSigner = new AssignmentSigner(await loadSecret("FABRIC_ASSIGNMENT_PRIVATE_KEY"));
-  const network = (name: string, fallback: string) => process.env[`FABRIC_SWARM_NETWORK_${name}`] ?? fallback;
-  // Ephemeral browser services need only the CDP/worker overlay (and optional egress). Keeping
+  const network = (name: string, fallback: string) => process.env[`FABRIC_DOCKER_NETWORK_${name}`] ?? fallback;
+  // Ephemeral browser containers need only the CDP/worker network (and optional egress). Keeping
   // them off the control network prevents arbitrary page JavaScript from reaching API, scheduler,
   // or broker service addresses.
-  const browserNetworks = [network("WORKERS", "fabric-workers")];
-  const egressNetwork = network("EGRESS", "fabric-egress");
+  const browserNetworks = [network("WORKERS", "browser-fabric-workers")];
+  const egressNetwork = network("EGRESS", "browser-fabric-egress");
   const runtimeImageOverrides = Object.fromEntries(
     ([
       ["chromium-cdp", "FABRIC_CHROMIUM_WORKER_IMAGE"],
@@ -204,23 +204,31 @@ if (import.meta.main) {
       .map(([runtime, variable]) => [runtime, process.env[variable]?.trim()])
       .filter((entry): entry is [string, string] => Boolean(entry[1])),
   );
-  const browserExecutor = new DockerServiceExecutor({
+  const production = process.env.NODE_ENV === "production";
+  const browserExecutor = new DockerContainerExecutor({
     browserNetworks,
     egressNetwork,
     runtimeImageOverrides,
-    requireImmutableImages: process.env.NODE_ENV === "production",
-    verifyEgressReady: process.env.NODE_ENV === "production",
+    // Compose builds the reviewed Fabric source images locally on fabric-host. The manager accepts
+    // only those controller-owned tags (or immutable registry digests), never the image reference
+    // carried by an assignment recipe.
+    requireImmutableImages: production,
+    allowLocalBuildImages: production,
+    requireRuntimeImageOverrides: production,
+    verifyEgressReady: production,
     volumeHelperImage: process.env.FABRIC_VOLUME_HELPER_IMAGE,
   });
-  // Media tasks use the same hardened Swarm service path as browser leases, but must receive the
+  // Media tasks use the same hardened Docker-container path as browser leases, but must receive the
   // dedicated immutable media image (and helper image policy) rather than the placeholder recipe
   // image.  Keep this override explicit so a media job can never accidentally start a browser
   // runtime or inherit a mutable tag.
-  const mediaExecutor = new DockerMediaServiceExecutor({
+  const mediaExecutor = new DockerMediaContainerExecutor({
     browserNetworks,
     egressNetwork,
     runtimeImageOverrides,
-    requireImmutableImages: process.env.NODE_ENV === "production",
+    requireImmutableImages: production,
+    allowLocalBuildImages: production,
+    requireRuntimeImageOverrides: production,
     volumeHelperImage: process.env.FABRIC_VOLUME_HELPER_IMAGE,
   });
   // Only the manager has object-store credentials. The one-shot media service receives a signed
@@ -240,14 +248,14 @@ if (import.meta.main) {
   });
   const leasedBrowsers = new LeasedBrowserProvisioner({ scheduler: runtime.scheduler, executor: browserExecutor });
   const controller = new ManagedWorkerController({ scheduler: runtime.scheduler, browserExecutor, mediaExecutor, mediaResultGateway });
-  const stoppedOrphans = await browserExecutor.stopUntrackedBrowserServices();
-  const stoppedMediaServices = await mediaExecutor.stopUntrackedMediaServices();
+  const stoppedOrphans = await browserExecutor.stopUntrackedBrowserContainers();
+  const stoppedMediaContainers = await mediaExecutor.stopUntrackedMediaContainers();
   const releasedControllerLeases = await controller.failUntrackedBrowserLeases();
   const releasedMediaTasks = await controller.failUntrackedMediaTasks();
   const releasedSocialLeases = await leasedBrowsers.failUntrackedLeases();
   await leasedBrowsers.reconcile();
-  if (stoppedOrphans.length > 0 || stoppedMediaServices.length > 0 || releasedControllerLeases > 0 || releasedMediaTasks > 0 || releasedSocialLeases > 0) {
-    console.warn(`Removed ${stoppedOrphans.length} untracked browser service(s), stopped ${stoppedMediaServices.length} untracked media service(s), and reclaimed ${releasedControllerLeases + releasedMediaTasks + releasedSocialLeases} assignment(s) after worker-manager restart`);
+  if (stoppedOrphans.length > 0 || stoppedMediaContainers.length > 0 || releasedControllerLeases > 0 || releasedMediaTasks > 0 || releasedSocialLeases > 0) {
+    console.warn(`Removed ${stoppedOrphans.length} untracked browser container(s), stopped ${stoppedMediaContainers.length} untracked media container(s), and reclaimed ${releasedControllerLeases + releasedMediaTasks + releasedSocialLeases} assignment(s) after worker-manager restart`);
   }
   const brokerUrl = process.env.FABRIC_INPUT_BROKER_URL;
   const encryptedInputBroker = brokerUrl ? new HttpEncryptedInputBroker({ baseUrl: brokerUrl, serviceName: "fabric-worker-manager", fetch: optionalBrokerFetch(), headers: { "x-fabric-mtls-verified": "true" } }) : undefined;

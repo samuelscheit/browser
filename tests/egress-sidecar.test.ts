@@ -82,7 +82,7 @@ describe("Fabric egress sidecar", () => {
   });
 
   test("deploys a sidecar listener for every reviewed policy route without mounting solver API keys", async () => {
-    const config = parseEgressConfig(await Bun.file(new URL("../deploy/swarm/egress-sidecar.json", import.meta.url)).json());
+    const config = parseEgressConfig(await Bun.file(new URL("../deploy/compose/egress-sidecar.json", import.meta.url)).json());
     const listenerIds = new Set(config.listeners.map((listener) => listener.id));
     for (const policy of builtInEgressPolicies) {
       const url = new URL(internalEgressProxyUrl(policy, { trafficClass: policy.family === "reporting-residential" ? "captcha_solver" : undefined }));
@@ -95,7 +95,7 @@ describe("Fabric egress sidecar", () => {
     const media = config.policies.find((policy) => policy.ref === "egress_media-proxy-affinity@1")!;
     expect(media.rules?.[0]?.listenerId).toBe("media-direct");
     expect(config.listeners.find((listener) => listener.id === "media-direct")?.allowedHostnameSuffixes).toEqual(["cdn-a.example", "cdn-b.example"]);
-    const stack = await Bun.file(new URL("../deploy/swarm/stack.yml", import.meta.url)).text();
+    const stack = await Bun.file(new URL("../deploy/compose/browser-fabric.compose.yml", import.meta.url)).text();
     const egressBlock = stack.slice(stack.indexOf("  fabric-egress-sidecar:"), stack.indexOf("\n  fabric-tor:"));
     expect(egressBlock).not.toContain("reporting_solver_credential");
   });

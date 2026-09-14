@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BrowserProcessSpec, Executor } from "../apps/worker-manager/src";
-import { DockerServiceExecutor, type DockerCommand } from "../apps/worker-manager/src/docker-executor";
+import { DockerContainerExecutor, type DockerCommand } from "../apps/worker-manager/src/docker-container-executor";
 import { LeasedBrowserProvisioner } from "../apps/worker-manager/src/leased-browser-provisioner";
 import { buildBrowserProcessSpec } from "../apps/worker-manager/src";
 import { createWorkerManagerFetch } from "../apps/worker-manager/src/server";
@@ -14,7 +14,7 @@ class RecordingDockerCommand implements DockerCommand {
 
   public async run(args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     this.calls.push([...args]);
-    if (args[0] === "service" && args[1] === "ps") return { exitCode: 0, stdout: "Running 1 second\n", stderr: "" };
+    if (args[0] === "container" && args[1] === "inspect") return { exitCode: 0, stdout: "true\n", stderr: "" };
     return { exitCode: 0, stdout: "", stderr: "" };
   }
 }
@@ -65,7 +65,7 @@ describe("managed browser guardians", () => {
       factoryInputs.push({ endpoint, enabled: spec.enabled });
       return guardian;
     };
-    const executor = new DockerServiceExecutor({
+    const executor = new DockerContainerExecutor({
       command,
       fetch: async (input) => {
         expect(String(input)).toContain("/json/version");
@@ -81,11 +81,12 @@ describe("managed browser guardians", () => {
     expect(guardian.starts).toBe(1);
     expect(started.cdpBrowserEndpoint).toBeDefined();
     expect(factoryInputs).toEqual([{ endpoint: started.cdpBrowserEndpoint!, enabled: true }]);
-    expect(command.calls[0]?.slice(0, 2)).toEqual(["service", "create"]);
-    expect(command.calls[0]).toContain("node.labels.fabric-worker-worker-test==true");
-    expect(command.calls[0]).not.toContain("node.labels.fabric-worker-id==worker_test");
+    expect(command.calls[0]?.slice(0, 2)).toEqual(["container", "create"]);
+    expect(command.calls[0]).toContain("--network");
+    expect(command.calls[0]).toContain("browser-fabric-workers");
+    expect(command.calls[0]).not.toContain("--publish");
     expect(command.calls[0]).toContain("--cap-drop");
-    expect(command.calls[0]).not.toContain("--security-opt");
+    expect(command.calls[0]).toContain("--security-opt");
     expect(command.calls[0]?.find((argument) => argument.includes("destination=/fabric/profile"))).toContain("destination=/fabric/profile");
     expect(command.calls[0]?.some((argument) => argument.includes("destination=/fabric/profile,rw"))).toBe(false);
     expect(await executor.isRunning(started.processId)).toBe(true);
@@ -95,10 +96,10 @@ describe("managed browser guardians", () => {
 
     await executor.stop(started.processId);
     expect(guardian.stops).toBe(1);
-    expect(command.calls.some((args) => args[0] === "service" && args[1] === "rm" && args[2] === started.processId)).toBe(true);
+    expect(command.calls.some((args) => args[0] === "container" && args[1] === "rm" && args.includes(started.processId))).toBe(true);
   });
 
-  test("removes a newly created service when its mandatory guardian cannot start", async () => {
+  test("removes a newly created container when its mandatory guardian cannot start", async () => {
     const { worker, assignment } = await claimedSocialAssignment();
     const command = new RecordingDockerCommand();
     const guardianFactory: TurnstileGuardianFactory = () => ({
@@ -106,7 +107,7 @@ describe("managed browser guardians", () => {
       start: async () => { throw new Error("guardian CDP connection failed"); },
       stop: async () => undefined,
     });
-    const executor = new DockerServiceExecutor({
+    const executor = new DockerContainerExecutor({
       command,
       fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" })),
       turnstileGuardianFactory: guardianFactory,
@@ -115,37 +116,37 @@ describe("managed browser guardians", () => {
 
     await expect(executor.start(buildBrowserProcessSpec(worker, assignment))).rejects.toThrow("guardian CDP connection failed");
 
-    const create = command.calls.find((args) => args[0] === "service" && args[1] === "create")!;
-    const serviceName = create[create.indexOf("--name") + 1]!;
-    expect(command.calls.some((args) => args[0] === "service" && args[1] === "rm" && args[2] === serviceName)).toBe(true);
+    const create = command.calls.find((args) => args[0] === "container" && args[1] === "create")!;
+    const containerName = create[create.indexOf("--name") + 1]!;
+    expect(command.calls.some((args) => args[0] === "container" && args[1] === "rm" && args.includes(containerName))).toBe(true);
   });
 
-  test("removes browser services left by a manager process that did not own their guardian", async () => {
+  test("removes browser containers left by a manager process that did not own their guardian", async () => {
     const command = new RecordingDockerCommand();
     const originalRun = command.run.bind(command);
     command.run = async (args) => {
-      if (args[0] === "service" && args[1] === "ls") {
+      if (args[0] === "container" && args[1] === "ls") {
         command.calls.push([...args]);
         return { exitCode: 0, stdout: "fabric-browser-old-lease\n", stderr: "" };
       }
-      if (args[0] === "service" && args[1] === "inspect") {
+      if (args[0] === "container" && args[1] === "inspect" && args.includes("{{ index .Config.Labels \"com.browser-fabric.worker-id\" }}|{{ index .Config.Labels \"com.browser-fabric.temporary-volumes\" }}")) {
         command.calls.push([...args]);
         return { exitCode: 0, stdout: "worker_test|temporary-profile\n", stderr: "" };
       }
-      if (args[0] === "service" && args[1] === "ps") {
+      if (args[0] === "container" && args[1] === "inspect" && args.includes("{{.State.Status}}|{{.State.ExitCode}}")) {
         command.calls.push([...args]);
-        return { exitCode: 0, stdout: "Complete 1 second\n", stderr: "" };
+        return { exitCode: 0, stdout: "exited|0\n", stderr: "" };
       }
       return originalRun(args);
     };
-    const executor = new DockerServiceExecutor({ command, requireImmutableImages: false });
+    const executor = new DockerContainerExecutor({ command, requireImmutableImages: false });
 
-    await expect(executor.stopUntrackedBrowserServices()).resolves.toEqual(["fabric-browser-old-lease"]);
+    await expect(executor.stopUntrackedBrowserContainers()).resolves.toEqual(["fabric-browser-old-lease"]);
 
-    expect(command.calls[0]).toEqual(["service", "ls", "--filter", "label=com.browser-fabric.lease-id", "--format", "{{.Name}}"]);
-    expect(command.calls.some((args) => args[0] === "service" && args[1] === "rm" && args[2] === "fabric-browser-old-lease")).toBe(true);
-    expect(command.calls.some((args) => args[0] === "service" && args[1] === "inspect")).toBe(true);
-    expect(command.calls.some((args) => args[0] === "service" && args[1] === "create" && args.some((arg) => arg.includes("temporary-profile")))).toBe(true);
+    expect(command.calls[0]).toEqual(["container", "ls", "--all", "--filter", "label=com.browser-fabric.lease-id", "--format", "{{.Names}}"]);
+    expect(command.calls.some((args) => args[0] === "container" && args[1] === "rm" && args.includes("fabric-browser-old-lease"))).toBe(true);
+    expect(command.calls.some((args) => args[0] === "container" && args[1] === "inspect")).toBe(true);
+    expect(command.calls.some((args) => args[0] === "container" && args[1] === "create" && args.some((arg) => arg.includes("temporary-profile")))).toBe(true);
   });
 });
 

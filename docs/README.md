@@ -5,7 +5,7 @@ Browser Fabric is the shared browser control plane described in [`/PLAN.md`](../
 ## Global Cloudflare Turnstile guardian
 
 Every Fabric-owned **Chromium** process starts a process-level Turnstile guardian before its lease
-is marked ready (managed Swarm browsers, federated local browsers, and the manager-owned Chromium
+is marked ready (managed Docker Compose browsers, federated local browsers, and the manager-owned Chromium
 used by the Social client). The guardian uses a second browser-level CDP connection, watches every
 page/tab—including dynamically created tabs and Turnstile frames hidden in closed shadow roots—and
 performs the same bounded, jittered trusted mouse gesture used by the former Media flow. It is
