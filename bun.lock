@@ -149,6 +149,14 @@
         "@browser-fabric/policy": "workspace:*",
       },
     },
+    "workers/media-relay": {
+      "name": "@browser-fabric/media-relay",
+      "version": "0.1.0",
+      "dependencies": {
+        "@browser-fabric/contracts": "workspace:*",
+        "@browser-fabric/control-plane": "workspace:*",
+      },
+    },
   },
   "packages": {
     "@browser-fabric/api": ["@browser-fabric/api@workspace:apps/api"],
@@ -168,6 +176,8 @@
     "@browser-fabric/local-agent": ["@browser-fabric/local-agent@workspace:apps/local-agent"],
 
     "@browser-fabric/media-playback-gateway": ["@browser-fabric/media-playback-gateway@workspace:apps/media-playback-gateway"],
+
+    "@browser-fabric/media-relay": ["@browser-fabric/media-relay@workspace:workers/media-relay"],
 
     "@browser-fabric/policy": ["@browser-fabric/policy@workspace:packages/policy"],
 
