@@ -583,6 +583,32 @@ export class BrowserScheduler {
   }
 
   /**
+   * Migrate an idle managed worker from Chromium's legacy direct DevTools port
+   * to Fabric's fixed private bridge. This deliberately permits one exact
+   * endpoint transition only; generic worker endpoint changes remain immutable.
+   */
+  public async migrateManagedWorkerCdpBridgeEndpoint(workerId: Worker["id"], actor?: Principal): Promise<Worker> {
+    return this.#store.transact((state) => {
+      this.#kernel.authorizeFabricAdmin(state, actor, "migrate_managed_worker_cdp_bridge", workerId);
+      const worker = this.#kernel.worker(state, workerId);
+      if (worker.isLocal) throw new FabricError("validation_failed", "the federated local worker does not use the managed CDP bridge", 400);
+      if (worker.cdpRelayEndpoint === "http://fabric-browser-{leaseId}:9223") return structuredClone(worker);
+      if (worker.cdpRelayEndpoint !== "http://fabric-browser-{leaseId}:9222") {
+        throw new FabricError("conflict", "managed worker does not have the reviewed legacy CDP endpoint", 409);
+      }
+      if ([...state.leases.values()].some((lease) => lease.workerId === worker.id && lease.status === "active")) {
+        throw new FabricError("conflict", "cannot migrate the managed CDP bridge while the worker has an active lease", 409);
+      }
+      worker.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9223";
+      worker.updatedAt = now(this.#clock);
+      state.workers.set(worker.id, worker);
+      this.#kernel.event(state, undefined, { kind: "worker", id: worker.id }, "worker.cdp_bridge_migrated", {});
+      this.#kernel.audit(state, actor, undefined, "worker.cdp_bridge_migrated", { kind: "worker", id: worker.id }, "succeeded", {});
+      return structuredClone(worker);
+    });
+  }
+
+  /**
    * Worker-side registration refresh. The worker must already be provisioned by a Fabric admin
    * and prove possession of its per-worker enrollment token on every control-channel request.
    */

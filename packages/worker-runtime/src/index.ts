@@ -82,7 +82,15 @@ export class GenericBrowserRuntime implements BrowserRuntime {
     const profileVolume = assignment.clone?.volumeName ?? assignment.profile?.volumeName ?? assignment.lease?.ephemeralVolumeName;
     const volumes = profileVolume ? [{ source: profileVolume, target: "/fabric/profile", readOnly: false }] : [];
     if (!profileVolume && recipe.mode !== "headless") throw new FabricError("validation_failed", "interactive/headful browser requires a profile volume", 400);
-    const cdpPort = 9222;
+    // Current Chromium deliberately keeps DevTools on loopback even when a
+    // remote-debugging address flag asks for a wider bind. Managed containers
+    // therefore expose a Fabric-owned TCP bridge on their private worker
+    // network while Chromium itself remains loopback-only on 9222. Federated
+    // local workers retain their direct loopback CDP endpoint.
+    const chromiumDebugPort = 9222;
+    const managedCdpBridgePort = 9223;
+    const managedBrowser = !worker.isLocal;
+    const cdpPort = managedBrowser ? managedCdpBridgePort : chromiumDebugPort;
     const environment: Record<string, string> = {
       FABRIC_WORKER_ID: worker.id,
       FABRIC_RUNTIME: recipe.runtime,
@@ -93,7 +101,6 @@ export class GenericBrowserRuntime implements BrowserRuntime {
       ...(job ? { FABRIC_JOB_ID: job.id } : {})
     };
     assertNoSecretEnvironment(environment);
-    const managedInteractive = recipe.mode === "interactive" && !worker.isLocal;
     return {
       workerId: worker.id,
       ...(lease ? { leaseId: lease.id } : {}),
@@ -102,10 +109,10 @@ export class GenericBrowserRuntime implements BrowserRuntime {
       image: recipe.browserImage,
       browserVersion: recipe.browserVersion,
       command: [
-        // Managed interactive workers run a private X server inside the
-        // lease-scoped container. Federated local workers retain their native
-        // desktop session and launch Chromium directly.
-        ...(managedInteractive
+        // Managed workers use the Fabric-owned launcher for both headless and
+        // interactive leases so their private CDP bridge is always present.
+        // Federated local workers retain their native desktop session.
+        ...(managedBrowser
           ? ["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]
           : ["/usr/bin/chromium"]),
         ...(recipe.mode === "headless" ? ["--headless=new"] : []),
@@ -114,8 +121,10 @@ export class GenericBrowserRuntime implements BrowserRuntime {
         ...recipe.launch.launchFlags,
         // These flags are appended after immutable recipe flags so no recipe can override the
         // browser ownership, debugging boundary, or routing policy.
-        `--remote-debugging-address=${worker.isLocal ? "127.0.0.1" : "0.0.0.0"}`,
-        `--remote-debugging-port=${cdpPort}`,
+        // The managed launcher's bridge is the only private-overlay listener.
+        // Chromium's own DevTools server is intentionally loopback-only.
+        "--remote-debugging-address=127.0.0.1",
+        `--remote-debugging-port=${chromiumDebugPort}`,
         `--user-data-dir=${profileVolume ? "/fabric/profile/chromium" : "/tmp/fabric-browser-profile"}`,
         // Docker's no-new-privileges setting deliberately disables Debian's
         // setuid sandbox. Managed browser containers use Chromium's user

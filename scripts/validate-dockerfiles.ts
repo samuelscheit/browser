@@ -42,7 +42,13 @@ for (const file of dockerfiles.sort()) {
     if (!/\bxvfb\b/.test(text) || !/\bxauth\b/.test(text) || !/\bchromium-sandbox\b/.test(text) || !text.includes("deploy/compose/chromium-launch.sh")) {
       throw new Error("managed Chromium image must include the private Xvfb, Chromium sandbox, and reviewed launcher runtimes for interactive leases");
     }
+    if (/\bsocat\b/.test(text)) throw new Error("managed Chromium image must use the reviewed Fabric CDP bridge, not a generic socket forwarder");
   }
+}
+
+const privateCdpBridge = await readFile(join(root, "apps/cdp-private-bridge/src/index.ts"), "utf8");
+for (const required of ["127.0.0.1", 'headers: { host: "localhost" }', "server.listen(normalized.listenPort, normalized.bindAddress)"]) {
+  if (!privateCdpBridge.includes(required)) throw new Error("private CDP bridge must keep Chromium loopback-only and bind only its reviewed private address");
 }
 
 const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { packageManager?: unknown };

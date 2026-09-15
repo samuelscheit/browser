@@ -61,6 +61,10 @@ describe("artifacts and worker isolation", () => {
     expect(spec.security).toEqual({ dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false });
     expect(spec.volumes[0]?.target).toBe("/fabric/profile");
     expect(spec.command.some((arg) => arg.includes("remote-debugging-port"))).toBe(true);
+    expect(spec.command.slice(0, 2)).toEqual(["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]);
+    expect(spec.command).toContain("--remote-debugging-address=127.0.0.1");
+    expect(spec.command).toContain("--remote-debugging-port=9222");
+    expect(spec.cdpBind).toEqual({ host: "private-overlay", port: 9223 });
     expect(spec.turnstileGuardian).toMatchObject({
       enabled: true,
       pollIntervalMs: 1_000,
@@ -76,10 +80,10 @@ describe("artifacts and worker isolation", () => {
     const job = await context.scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "social-native", recipeRef: "recipe_social-insights@1" as never, operation: { operation: "collect_insights", username: "creator" }, profileRef: profile.ref, egressPolicyRef: "egress_social-proxy-fallback@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never }, TEST_PRINCIPAL);
     const [assignment] = await context.scheduler.dispatch();
     const spec = defaultRuntimeRegistry().get("playwright-social").buildSpec(assignment!, context.worker, builtInEgressPolicies.find((policy) => policy.family === "social-proxy-fallback")!);
-    expect(spec.command[0]).toBe("/usr/bin/chromium");
+    expect(spec.command.slice(0, 2)).toEqual(["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]);
     expect(spec.command).toContain("--remote-debugging-port=9222");
     expect(spec.command).toContain("--user-data-dir=/fabric/profile/chromium");
-    expect(spec.cdpBind.port).toBe(9222);
+    expect(spec.cdpBind.port).toBe(9223);
     expect(spec.turnstileGuardian?.enabled).toBe(true);
     expect(job.status).toBe("queued");
   });
@@ -130,7 +134,7 @@ describe("artifacts and worker isolation", () => {
     expect(spec.command).toContain("--start-maximized");
     expect(spec.command).toContain("--disable-setuid-sandbox");
     expect(spec.command).not.toContain("--no-sandbox");
-    expect(spec.cdpBind).toEqual({ host: "private-overlay", port: 9222 });
+    expect(spec.cdpBind).toEqual({ host: "private-overlay", port: 9223 });
   });
 
   test("media relay validates immutable-source ranges, public URLs, and content types", async () => {

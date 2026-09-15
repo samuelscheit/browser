@@ -44,7 +44,7 @@ test("managed controller revokes a ready CDP capability and releases the lease w
   const executor: Executor = {
     start: async (spec) => {
       started.push(spec);
-      return { processId: "managed-browser", cdpBrowserEndpoint: "http://managed-browser:9222" };
+      return { processId: "managed-browser", cdpBrowserEndpoint: "http://managed-browser:9223" };
     },
     stop: async (processId) => { stopped.push(processId); },
     isRunning: () => running,

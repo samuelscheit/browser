@@ -82,6 +82,7 @@ describe("managed browser guardians", () => {
 
     expect(guardian.starts).toBe(1);
     expect(started.cdpBrowserEndpoint).toBeDefined();
+    expect(started.cdpBrowserEndpoint).toContain(":9223");
     expect(factoryInputs).toEqual([{ endpoint: started.cdpBrowserEndpoint!, enabled: true }]);
     expect(command.calls[0]?.slice(0, 2)).toEqual(["container", "create"]);
     expect(command.calls[0]).toContain("--network");
@@ -92,6 +93,8 @@ describe("managed browser guardians", () => {
     expect(command.calls[0]).toContain("seccomp=/etc/compose/browser-fabric-seccomp/chromium-userns.json");
     expect(command.calls[0]).toContain("/tmp:rw,noexec,nosuid,nodev,size=1073741824,mode=1777");
     expect(command.calls[0]).toContain("/tmp/.X11-unix:rw,nosuid,nodev,size=1048576,mode=1777");
+    expect(command.calls[0]).toContain("--remote-debugging-address=127.0.0.1");
+    expect(command.calls[0]).toContain("--remote-debugging-port=9222");
     expect(command.calls[0]?.find((argument) => argument.includes("destination=/fabric/profile"))).toContain("destination=/fabric/profile");
     expect(command.calls[0]?.some((argument) => argument.includes("destination=/fabric/profile,rw"))).toBe(false);
     expect(await executor.isRunning(started.processId)).toBe(true);
@@ -175,9 +178,9 @@ test("the Social worker receives one manager-owned Chromium endpoint and reconci
     start: async (spec: BrowserProcessSpec) => {
       starts += 1;
       expect(spec.assignment.recipe.runtime).toBe("playwright-social");
-      expect(spec.container.command[0]).toBe("/usr/bin/chromium");
+      expect(spec.container.command.slice(0, 2)).toEqual(["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]);
       expect(spec.container.turnstileGuardian?.enabled).toBe(true);
-      return { processId: "fabric-browser-social", cdpBrowserEndpoint: "http://fabric-browser-social:9222" };
+      return { processId: "fabric-browser-social", cdpBrowserEndpoint: "http://fabric-browser-social:9223" };
     },
     stop: async (processId) => { stopped.push(processId); },
     isRunning: () => running,
@@ -188,7 +191,7 @@ test("the Social worker receives one manager-owned Chromium endpoint and reconci
     executor,
     resolveBrowserEndpoint: async (endpoint) => {
       endpointResolutions.push(endpoint);
-      return "ws://fabric-browser-social:9222/devtools/browser/opaque";
+      return "ws://fabric-browser-social:9223/devtools/browser/opaque";
     },
   });
 
@@ -196,8 +199,8 @@ test("the Social worker receives one manager-owned Chromium endpoint and reconci
   const second = await provisioner.start(worker.id, assignment.lease!.id, actor);
 
   expect(first).toEqual(second);
-  expect(first.cdpBrowserEndpoint).toBe("ws://fabric-browser-social:9222/devtools/browser/opaque");
-  expect(endpointResolutions).toEqual(["http://fabric-browser-social:9222"]);
+  expect(first.cdpBrowserEndpoint).toBe("ws://fabric-browser-social:9223/devtools/browser/opaque");
+  expect(endpointResolutions).toEqual(["http://fabric-browser-social:9223"]);
   expect(starts).toBe(1);
   expect((await scheduler.store.snapshot()).leases.get(assignment.lease!.id)?.startedAt).toBeDefined();
 
@@ -245,7 +248,7 @@ test("only the claimed Social worker with its enrollment proof can provision or 
   const executor: Executor = {
     start: async () => {
       starts += 1;
-      return { processId: "fabric-browser-route", cdpBrowserEndpoint: "ws://fabric-browser-route:9222/devtools/browser/opaque" };
+      return { processId: "fabric-browser-route", cdpBrowserEndpoint: "ws://fabric-browser-route:9223/devtools/browser/opaque" };
     },
     stop: async () => undefined,
   };
@@ -266,7 +269,7 @@ test("only the claimed Social worker with its enrollment proof can provision or 
     headers: { ...baseHeaders, "x-fabric-worker-enrollment": enrollment },
   }));
   expect(created.status).toBe(201);
-  expect(await created.json()).toEqual({ processId: "fabric-browser-route", cdpBrowserEndpoint: "ws://fabric-browser-route:9222/devtools/browser/opaque" });
+  expect(await created.json()).toEqual({ processId: "fabric-browser-route", cdpBrowserEndpoint: "ws://fabric-browser-route:9223/devtools/browser/opaque" });
   expect(starts).toBe(1);
 
   const released = await fetchManager(new Request(browserPath, {
@@ -373,7 +376,7 @@ test("an in-flight Social browser provision is not mistaken for an unguarded orp
     start: async () => {
       enteredStart();
       await startGate;
-      return { processId: "fabric-browser-in-flight", cdpBrowserEndpoint: "ws://fabric-browser-in-flight:9222/devtools/browser/opaque" };
+      return { processId: "fabric-browser-in-flight", cdpBrowserEndpoint: "ws://fabric-browser-in-flight:9223/devtools/browser/opaque" };
     },
     stop: async (processId) => { stopped.push(processId); },
   };
