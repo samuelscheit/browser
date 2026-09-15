@@ -14,6 +14,9 @@ class RecordingDockerCommand implements DockerCommand {
 
   public async run(args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     this.calls.push([...args]);
+    if (args[0] === "container" && args[1] === "inspect" && args.includes("{{json .NetworkSettings.Networks}}")) {
+      return { exitCode: 0, stdout: "{\"browser-fabric-workers\":{\"IPAddress\":\"172.30.0.44\"}}\n", stderr: "" };
+    }
     if (args[0] === "container" && args[1] === "inspect") return { exitCode: 0, stdout: "true\n", stderr: "" };
     return { exitCode: 0, stdout: "", stderr: "" };
   }
@@ -68,7 +71,7 @@ describe("managed browser guardians", () => {
     const executor = new DockerContainerExecutor({
       command,
       fetch: async (input) => {
-        expect(String(input)).toContain("/json/version");
+        expect(String(input)).toBe("http://172.30.0.44:9223/json/version");
         return new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" }));
       },
       turnstileGuardianFactory: guardianFactory,
@@ -97,6 +100,7 @@ describe("managed browser guardians", () => {
     expect(command.calls[0]).toContain("--remote-debugging-port=9222");
     expect(command.calls[0]?.find((argument) => argument.includes("destination=/fabric/profile"))).toContain("destination=/fabric/profile");
     expect(command.calls[0]?.some((argument) => argument.includes("destination=/fabric/profile,rw"))).toBe(false);
+    expect(command.calls.some((args) => args[0] === "container" && args[1] === "inspect" && args.includes("{{json .NetworkSettings.Networks}}"))).toBe(true);
     expect(await executor.isRunning(started.processId)).toBe(true);
 
     guardian.running = false;
@@ -126,6 +130,30 @@ describe("managed browser guardians", () => {
 
     const create = command.calls.find((args) => args[0] === "container" && args[1] === "create")!;
     const containerName = create[create.indexOf("--name") + 1]!;
+    expect(command.calls.some((args) => args[0] === "container" && args[1] === "rm" && args.includes(containerName))).toBe(true);
+  });
+
+  test("fails closed rather than resolving browser CDP through an invalid worker-network address", async () => {
+    const { worker, assignment } = await claimedSocialAssignment();
+    const command = new RecordingDockerCommand();
+    const originalRun = command.run.bind(command);
+    command.run = async (args) => {
+      if (args[0] === "container" && args[1] === "inspect" && args.includes("{{json .NetworkSettings.Networks}}")) {
+        command.calls.push([...args]);
+        return { exitCode: 0, stdout: "{\"browser-fabric-workers\":{\"IPAddress\":\"127.0.0.1\"}}\n", stderr: "" };
+      }
+      return originalRun(args);
+    };
+    const executor = new DockerContainerExecutor({
+      command,
+      fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" })),
+      requireImmutableImages: false,
+    });
+
+    await expect(executor.start(buildBrowserProcessSpec(worker, assignment))).rejects.toThrow("browser has no valid private worker-network address");
+
+    const created = command.calls.find((args) => args[0] === "container" && args[1] === "create")!;
+    const containerName = created[created.indexOf("--name") + 1]!;
     expect(command.calls.some((args) => args[0] === "container" && args[1] === "rm" && args.includes(containerName))).toBe(true);
   });
 

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { isIP } from "node:net";
 import { FabricError, MEDIA_SOURCE_MAX_BYTES } from "@browser-fabric/contracts";
 import { assertFailClosedPac, internalEgressProxyUrl } from "@browser-fabric/policy";
 import {
@@ -277,6 +278,7 @@ export class DockerContainerExecutor implements Executor {
   async #startEffective(spec: BrowserProcessSpec, identity: string, name: string): Promise<{ processId: string; cdpBrowserEndpoint?: string }> {
     const temporaryVolumes: string[] = [];
     let created = false;
+    let browserEndpoint: string | undefined;
     try {
       await this.#prepareVolumes(spec, name, temporaryVolumes);
       const primaryNetwork = this.#options.browserNetworks[0];
@@ -294,12 +296,17 @@ export class DockerContainerExecutor implements Executor {
       this.#temporaryVolumesByContainer.set(name, { workerId: spec.container.workerId, volumes: temporaryVolumes });
 
       if (spec.container.cdpBind.port !== 0) {
-        const endpoint = this.#browserEndpoint(name, spec.container.cdpBind.port);
-        await this.#waitForBrowserReady(endpoint, this.#options.browserReadyTimeoutMs ?? this.#options.startupTimeoutMs ?? 30_000);
+        // The manager itself is also on the egress network, so Docker's
+        // container-name DNS can resolve a dynamic browser to its egress IP.
+        // Resolve the exact address assigned on the fixed worker network
+        // instead. The browser bridge is deliberately bound to this address;
+        // Caddy/CDP gateway retain the worker-owned hostname route separately.
+        browserEndpoint = await this.#browserEndpointOnNetwork(name, spec.container.cdpBind.port, primaryNetwork);
+        await this.#waitForBrowserReady(browserEndpoint, this.#options.browserReadyTimeoutMs ?? this.#options.startupTimeoutMs ?? 30_000);
         if (this.#containers.get(identity) !== name) throw new FabricError("worker_unavailable", "browser container was stopped while becoming ready", 503);
         const guardianSpec = spec.container.turnstileGuardian;
         if (!guardianSpec) throw new Error("Fabric browser has no Turnstile guardian specification");
-        const guardian = this.#turnstileGuardianFactory({ endpoint, spec: guardianSpec });
+        const guardian = this.#turnstileGuardianFactory({ endpoint: browserEndpoint, spec: guardianSpec });
         this.#guardians.set(name, guardian);
         await guardian.start();
         if (this.#containers.get(identity) !== name || this.#guardians.get(name) !== guardian) {
@@ -315,7 +322,7 @@ export class DockerContainerExecutor implements Executor {
     }
     return {
       processId: name,
-      ...(spec.container.cdpBind.port === 0 ? {} : { cdpBrowserEndpoint: this.#browserEndpoint(name, spec.container.cdpBind.port) }),
+      ...(browserEndpoint === undefined ? {} : { cdpBrowserEndpoint: browserEndpoint }),
     };
   }
 
@@ -424,9 +431,26 @@ export class DockerContainerExecutor implements Executor {
     return { workerId, volumes: [...new Set(volumes)] };
   }
 
-  #browserEndpoint(name: string, port: number): string {
+  async #browserEndpointOnNetwork(name: string, port: number, network: string): Promise<string> {
     if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("browser CDP port is invalid");
-    return `http://${name}:${port}`;
+    assertNetworkName(network);
+    const inspected = await this.#command.run([
+      "container", "inspect", "--format", "{{json .NetworkSettings.Networks}}", name,
+    ], { timeoutMs: this.#options.startupTimeoutMs ?? 30_000 });
+    if (inspected.exitCode !== 0) throw new FabricError("worker_unavailable", `Docker could not inspect the browser worker-network address (${inspected.stderr.slice(0, 500)})`, 503);
+    let networks: Record<string, { IPAddress?: unknown }>;
+    try {
+      const parsed = JSON.parse(inspected.stdout.trim()) as unknown;
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid Docker network state");
+      networks = parsed as Record<string, { IPAddress?: unknown }>;
+    } catch {
+      throw new FabricError("worker_unavailable", "Docker returned invalid browser network state", 503);
+    }
+    const address = networks[network]?.IPAddress;
+    if (typeof address !== "string" || isIP(address) !== 4 || address === "0.0.0.0" || address.startsWith("127.")) {
+      throw new FabricError("worker_unavailable", "browser has no valid private worker-network address", 503);
+    }
+    return `http://${address}:${port}`;
   }
 
   async #waitForBrowserReady(browserEndpoint: string, timeoutMs: number): Promise<void> {
