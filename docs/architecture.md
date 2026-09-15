@@ -1,7 +1,7 @@
 # Browser Fabric architecture
 
 ```text
-                 Cloudflare Access + mTLS
+                 Cloudflare Tunnel + Basic credentials
                            |
              +-------------+--------------+
              |                            |

@@ -6,7 +6,7 @@ import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler } from "@browser-f
 import type { BrowserSessionId } from "@browser-fabric/contracts";
 
 describe("private API and CDP gateway boundary", () => {
-  test("requires mTLS principal and enforces idempotency header", async () => {
+  test("requires an authenticated principal and enforces idempotency header", async () => {
     const { scheduler } = await bootstrapTestScheduler();
     const unauthenticated = createApiFetch({ scheduler, authenticate: () => undefined });
     const noAuth = await unauthenticated(new Request("https://fabric.test/v1/browser-sessions", { method: "POST" }));

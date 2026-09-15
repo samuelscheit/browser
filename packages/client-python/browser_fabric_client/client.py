@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import re
 import time
 from typing import Any, Callable, Mapping
@@ -112,24 +114,27 @@ def _environment_configuration() -> tuple[str, dict[str, str]]:
     base_url = os.environ.get("FABRIC_API_URL", "").strip()
     if not base_url:
         raise RuntimeError("FABRIC_API_URL is required")
-    headers = {"x-fabric-mtls-verified": "true"}
-    for env_name, header_name in (
-        ("FABRIC_PRINCIPAL", "x-fabric-principal"),
-        ("FABRIC_PROJECT", "x-fabric-project"),
-        ("FABRIC_CERT_FINGERPRINT", "x-fabric-cert-fingerprint"),
-    ):
-        value = os.environ.get(env_name, "").strip()
-        if value:
-            headers[header_name] = value
+    username = os.environ.get("FABRIC_API_USERNAME", "").strip()
+    password_file = os.environ.get("FABRIC_API_PASSWORD_FILE", "").strip()
+    try:
+        password = Path(password_file).read_text(encoding="utf-8").strip() if password_file else os.environ.get("FABRIC_API_PASSWORD", "").strip()
+    except OSError as error:
+        raise RuntimeError("FABRIC_API_PASSWORD could not be read") from error
+    if not re.fullmatch(r"principal_[A-Za-z0-9][A-Za-z0-9_-]{0,127}", username):
+        raise RuntimeError("FABRIC_API_USERNAME must be an opaque Fabric principal ID")
+    if len(password) < 24 or len(password) > 4096 or any(character in password for character in "\0\r\n"):
+        raise RuntimeError("FABRIC_API_PASSWORD must be a secret of 24 to 4096 characters")
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    headers = {"authorization": f"Basic {token}"}
     return base_url, headers
 
 
 class BrowserFabricClient:
     """Synchronous Fabric client for workers and CLI adapters.
 
-    The caller owns TLS configuration by passing an httpx.Client configured with
-    its mTLS certificate/key/CA. Credentials are never read from or placed in
-    job payloads by this class.
+    The caller owns transport configuration by passing an httpx.Client when
+    needed. The client uses a password-backed Basic credential from the
+    environment; credentials are never read from or placed in job payloads.
     """
 
     def __init__(self, base_url: str, client: httpx.Client | None = None, headers: Mapping[str, str] | None = None, timeout: float = 30.0) -> None:

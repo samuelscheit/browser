@@ -4,7 +4,7 @@ import { FabricError } from "@browser-fabric/contracts";
 import { ArtifactCollector, MemoryObjectStore } from "@browser-fabric/control-plane";
 import { builtInEgressPolicies } from "@browser-fabric/policy";
 import { defaultRuntimeRegistry } from "@browser-fabric/worker-runtime";
-import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler } from "@browser-fabric/testkit";
+import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, createTestScheduler, makeProfile, makeWorker } from "@browser-fabric/testkit";
 
 describe("artifacts and worker isolation", () => {
   test("object store is immutable and signed URLs are bounded", async () => {
@@ -82,6 +82,55 @@ describe("artifacts and worker isolation", () => {
     expect(spec.cdpBind.port).toBe(9222);
     expect(spec.turnstileGuardian?.enabled).toBe(true);
     expect(job.status).toBe("queued");
+  });
+
+  test("an explicitly interactive managed worker receives a private Xvfb browser lease", async () => {
+    const { scheduler } = createTestScheduler({ maxActiveBrowserLeases: 1 });
+    await scheduler.bootstrap({ projects: [{ id: TEST_PROJECT, name: "Test" }], principals: [TEST_PRINCIPAL] });
+    const worker = makeWorker({
+      id: "worker_managed_chat" as never,
+      isLocal: false,
+      capacity: 1,
+      mediaCapacity: 0,
+      volumeNames: ["profile_chat"],
+      capabilities: {
+        runtimeFamilies: ["chromium-cdp"],
+        recipeRefs: ["recipe_chat-browser-controller@1" as never],
+        browserVersions: { chromium: "pinned" },
+        supportsInteractive: true,
+        supportsCompanionCompanion: false,
+        supportedProfileFamilies: ["chat"],
+      },
+    });
+    await scheduler.registerWorker(worker, TEST_PRINCIPAL);
+    const profile = await scheduler.createProfile(makeProfile(worker, {
+      ref: "profile_chat" as never,
+      profileFamily: "chat",
+      volumeName: "profile_chat",
+    }), TEST_PRINCIPAL);
+    await scheduler.createBrowserSession({
+      project: TEST_PROJECT,
+      idempotencyKey: "managed-interactive-chat",
+      runtime: "chromium-cdp",
+      browserRecipeRef: "recipe_chat-browser-controller@1" as never,
+      profileRef: profile.ref,
+      leaseMode: "interactive",
+      egressPolicyRef: "egress_tor-egress@1" as never,
+      artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
+      ttlSeconds: 600,
+    }, TEST_PRINCIPAL);
+    const [assignment] = await scheduler.dispatch();
+    expect(assignment?.lease?.workerId).toBe(worker.id);
+    const spec = defaultRuntimeRegistry().get("chromium-cdp").buildSpec(
+      assignment!,
+      worker,
+      builtInEgressPolicies.find((policy) => policy.ref === "egress_tor-egress@1")!,
+    );
+    expect(spec.command.slice(0, 2)).toEqual(["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]);
+    expect(spec.command).toContain("--start-maximized");
+    expect(spec.command).toContain("--disable-setuid-sandbox");
+    expect(spec.command).not.toContain("--no-sandbox");
+    expect(spec.cdpBind).toEqual({ host: "private-overlay", port: 9222 });
   });
 
   test("media relay validates immutable-source ranges, public URLs, and content types", async () => {

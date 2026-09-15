@@ -15,16 +15,12 @@ test("the client relay always looks up the fixed Fabric API session", () => {
     .toBe("https://fabric.internal.example/v1/browser-sessions/browser-session_abc");
 });
 
-test("relay configuration refuses unreadable mTLS material before it can serve a connection", () => {
+test("relay configuration refuses missing password credentials before it can serve a connection", () => {
   expect(() => relayConfigFromEnvironment({
     FABRIC_API_URL: "https://fabric.example/v1/other",
-    FABRIC_CDP_RELAY_CLIENT_CERT_FILE: "/missing/cert",
-    FABRIC_CDP_RELAY_CLIENT_KEY_FILE: "/missing/key",
-    FABRIC_CDP_RELAY_CLIENT_CA_FILE: "/missing/ca",
-    FABRIC_PROJECT: "project_reporting",
-    FABRIC_PRINCIPAL: "principal_reporting",
-    FABRIC_CERT_FINGERPRINT: "fingerprint",
-  })).toThrow("FABRIC_CDP_RELAY_CLIENT_CERT_FILE");
+    FABRIC_CDP_GATEWAY_URL: "ws://fabric.example",
+    FABRIC_API_USERNAME: "principal_reporting",
+  })).toThrow("FABRIC_API_PASSWORD");
 });
 
 test("the relay waits internally for readiness instead of giving a capability to its caller", async () => {
@@ -40,9 +36,7 @@ test("the relay waits internally for readiness instead of giving a capability to
   try {
     const endpoint = await resolveFabricCdpEndpoint({
       apiBaseUrl: "https://fabric.example/v1",
-      certificate: Buffer.from("cert"),
-      key: Buffer.from("key"),
-      ca: Buffer.from("ca"),
+      cdpGatewayBaseUrl: "ws://fabric.example",
       headers: {},
       maxConnections: 1,
       readyTimeoutMs: 5_000,

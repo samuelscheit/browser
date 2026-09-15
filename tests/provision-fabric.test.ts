@@ -31,6 +31,7 @@ describe("Fabric provisioning manifests", () => {
       projectsToCreate: [manifest.projects[0]!.id],
       principalsToCreate: [manifest.principals[0]!.id],
       workersToCreate: [manifest.workers[0]!.id],
+      workersToEnableInteractive: [],
       profilesToCreate: [manifest.profiles[0]!.ref]
     });
     expect(JSON.stringify(plan)).not.toContain("enrollmentTokenHash");
@@ -61,7 +62,7 @@ describe("Fabric provisioning manifests", () => {
     expect(snapshot.profiles.get(manifest.profiles[0]!.ref)?.workerId).toBe(manifest.workers[0]!.id);
 
     const replay = await provisionManifest(runtime, manifest);
-    expect(replay).toEqual({ projectsToCreate: [], principalsToCreate: [], workersToCreate: [], profilesToCreate: [] });
+    expect(replay).toEqual({ projectsToCreate: [], principalsToCreate: [], workersToCreate: [], workersToEnableInteractive: [], profilesToCreate: [] });
   });
 
   test("detects static worker endpoint drift instead of overwriting a provisioned worker", async () => {
@@ -111,5 +112,44 @@ describe("Fabric provisioning manifests", () => {
     await provisionManifest(runtime, replayable);
     const replay = parseProvisionManifest(rawWithoutCreatedAt);
     expect((await provisionManifest(runtime, replay)).principalsToCreate).toEqual([]);
+  });
+
+  test("enables managed interactive capability only as an idle, otherwise identical worker upgrade", async () => {
+    const manifest = await exampleManifest();
+    const runtime = await provisionRuntime();
+    await provisionManifest(runtime, manifest);
+
+    const upgraded = structuredClone(manifest);
+    upgraded.workers[0]!.capabilities = { ...upgraded.workers[0]!.capabilities, supportsInteractive: true };
+
+    const plan = await provisionManifest(runtime, upgraded, true);
+    expect(plan.workersToEnableInteractive).toEqual([upgraded.workers[0]!.id]);
+    await provisionManifest(runtime, upgraded);
+    expect((await runtime.scheduler.store.snapshot()).workers.get(upgraded.workers[0]!.id)?.capabilities.supportsInteractive).toBe(true);
+    expect((await provisionManifest(runtime, upgraded)).workersToEnableInteractive).toEqual([]);
+  });
+
+  test("refuses the managed interactive capability upgrade while the worker owns an active lease", async () => {
+    const manifest = await exampleManifest();
+    const runtime = await provisionRuntime();
+    await provisionManifest(runtime, manifest);
+    const worker = manifest.workers[0]!;
+    const profile = manifest.profiles[0]!;
+    const session = await runtime.scheduler.createBrowserSession({
+      project: profile.ownerProject,
+      idempotencyKey: "interactive-upgrade-active-lease",
+      runtime: worker.capabilities.runtimeFamilies[0]!,
+      browserRecipeRef: worker.capabilities.recipeRefs[0]!,
+      profileRef: profile.ref,
+      leaseMode: "writer",
+      egressPolicyRef: "egress_reporting-residential@1" as never,
+      artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
+      ttlSeconds: 600,
+    }, manifest.principals[0]!);
+    expect((await runtime.scheduler.dispatch()).map((assignment) => assignment.session?.id)).toContain(session.id);
+
+    const upgraded = structuredClone(manifest);
+    upgraded.workers[0]!.capabilities = { ...upgraded.workers[0]!.capabilities, supportsInteractive: true };
+    await expect(provisionManifest(runtime, upgraded)).rejects.toMatchObject({ code: "conflict", status: 409 });
   });
 });

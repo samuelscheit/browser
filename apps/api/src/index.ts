@@ -21,7 +21,7 @@ export interface ApiServerOptions {
   artifactAccess?: ArtifactAccess;
   /** Authenticated issuer for active media-playback job URLs. It need not reach media workers. */
   mediaPlaybackGateway?: MediaPlaybackGateway;
-  /** Production deployment should derive this only after Traefik mTLS verification. */
+  /** Production deployment should derive this only after the trusted edge verifies a credential. */
   authenticate(request: Request): Promise<Principal | undefined> | Principal | undefined;
   corsOrigins?: readonly string[];
 }
@@ -176,7 +176,7 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/healthz") return json({ status: "ok" }, 200, corsHeaders);
       const actor = await options.authenticate(request);
-      if (!actor) throw new FabricError("authentication_required", "mutual TLS principal is required", 401);
+      if (!actor) throw new FabricError("authentication_required", "authenticated Fabric principal is required", 401);
       const parts = pathParts(url);
       if (request.method === "GET" && (url.pathname === "/openapi.yaml" || url.pathname === "/v1/openapi.yaml")) {
         const file = Bun.file(new URL("../../../packages/contracts/openapi/browser-fabric.openapi.yaml", import.meta.url));
@@ -333,7 +333,7 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
 }
 
 function localPrincipal(request: Request): Principal | undefined {
-  // Development only. Production Traefik injects an mTLS-verified principal header over a private network.
+  // Development only. Production Caddy injects an authenticated principal header over a private network.
   if (process.env.FABRIC_DEV_AUTH !== "1") return undefined;
   const project = request.headers.get("x-fabric-project") ?? "project_demo";
   return {

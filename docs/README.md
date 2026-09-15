@@ -38,10 +38,10 @@ The default test suite uses an in-memory store and fake clock. PostgreSQL and Mi
 
 | Component | Entry point | Responsibility |
 | --- | --- | --- |
-| API | `apps/api/src/server.ts` | mTLS-authenticated control-plane API and authorized media-playback capability issuer |
+| API | `apps/api/src/server.ts` | Basic-authenticated control-plane API and authorized media-playback capability issuer |
 | Scheduler | `apps/scheduler/src/index.ts` | FIFO dispatch, recovery, callbacks |
 | CDP gateway | `apps/cdp-gateway/src/server.ts` | per-session browser-level WSS relay |
-| CDP client relay | `apps/cdp-client-relay/src/server.ts` | private application-side mTLS bridge for CDP clients that cannot present a client certificate |
+| CDP client relay | `apps/cdp-client-relay/src/server.ts` | private application-side password bridge for CDP clients that cannot attach an Authorization header to upgrades |
 | Media playback gateway | `apps/media-playback-gateway/src/server.ts` | opaque Ed25519 HLS/direct-MP4 capability relay to private media workers |
 | Worker manager | `apps/worker-manager/src/server.ts` | worker registration, mailbox, assignment claims |
 | Encrypted input broker | `apps/input-broker/src/index.ts` | transient ciphertext-only input handoff |
@@ -55,4 +55,4 @@ payloads, manifests, environment variables, artifacts, events, logs, or public p
 
 ## Security boundary
 
-Raw CDP is full authority over the selected browser profile. It is scoped by project/profile/worker/expiration capability and protected by mTLS at ingress; it is not origin-restricted. Workers run with bounded resources and no Docker socket, host-home mount, repository mount, or application-secret mount. Secret values enter only through an active lease's ephemeral input channel and are wiped after one-time consumption.
+Raw CDP is full authority over the selected browser profile. It is scoped by project/profile/worker/expiration capability and protected by per-principal Basic authentication at ingress; it is not origin-restricted. Internal service connections still use origin mTLS. Workers run with bounded resources and no Docker socket, host-home mount, repository mount, or application-secret mount. Secret values enter only through an active lease's ephemeral input channel and are wiped after one-time consumption.

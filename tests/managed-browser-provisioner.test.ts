@@ -73,6 +73,8 @@ describe("managed browser guardians", () => {
       },
       turnstileGuardianFactory: guardianFactory,
       requireImmutableImages: false,
+      browserSeccompProfile: "/etc/compose/browser-fabric-seccomp/chromium-userns.json",
+      requireBrowserSeccompProfile: true,
     });
     const spec = buildBrowserProcessSpec(worker, assignment);
 
@@ -87,6 +89,9 @@ describe("managed browser guardians", () => {
     expect(command.calls[0]).not.toContain("--publish");
     expect(command.calls[0]).toContain("--cap-drop");
     expect(command.calls[0]).toContain("--security-opt");
+    expect(command.calls[0]).toContain("seccomp=/etc/compose/browser-fabric-seccomp/chromium-userns.json");
+    expect(command.calls[0]).toContain("/tmp:rw,noexec,nosuid,nodev,size=1073741824,mode=1777");
+    expect(command.calls[0]).toContain("/tmp/.X11-unix:rw,nosuid,nodev,size=1048576,mode=1777");
     expect(command.calls[0]?.find((argument) => argument.includes("destination=/fabric/profile"))).toContain("destination=/fabric/profile");
     expect(command.calls[0]?.some((argument) => argument.includes("destination=/fabric/profile,rw"))).toBe(false);
     expect(await executor.isRunning(started.processId)).toBe(true);
@@ -119,6 +124,17 @@ describe("managed browser guardians", () => {
     const create = command.calls.find((args) => args[0] === "container" && args[1] === "create")!;
     const containerName = create[create.indexOf("--name") + 1]!;
     expect(command.calls.some((args) => args[0] === "container" && args[1] === "rm" && args.includes(containerName))).toBe(true);
+  });
+
+  test("fails closed when production browser sandbox configuration is missing or unapproved", async () => {
+    expect(() => new DockerContainerExecutor({
+      command: new RecordingDockerCommand(),
+      requireBrowserSeccompProfile: true,
+    })).toThrow("seccomp profile is required");
+    expect(() => new DockerContainerExecutor({
+      command: new RecordingDockerCommand(),
+      browserSeccompProfile: "/tmp/attacker.json",
+    })).toThrow("seccomp profile path is not approved");
   });
 
   test("removes browser containers left by a manager process that did not own their guardian", async () => {

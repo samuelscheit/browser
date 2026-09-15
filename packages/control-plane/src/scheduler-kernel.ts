@@ -187,7 +187,11 @@ export class SchedulerKernel {
       .filter((worker) => worker.capabilities.runtimeFamilies.includes(recipe.runtime))
       .filter((worker) => worker.capabilities.recipeRefs.includes(recipe.ref))
       .filter((worker) => worker.capabilities.supportedProfileFamilies.includes(recipe.profileFamily))
-      .filter((worker) => recipe.mode !== "interactive" || (worker.isLocal && worker.capabilities.supportsInteractive))
+      // Interactive Fabric workloads may run either on a federated local
+      // worker or on a managed worker that explicitly advertises its private
+      // Xvfb/interactive capability. A generic managed CDP worker remains
+      // ineligible until provisioning enables this capability.
+      .filter((worker) => recipe.mode !== "interactive" || worker.capabilities.supportsInteractive)
       .filter((worker) => profile === undefined || worker.id === profile.workerId)
       .filter((worker) => onlyWorkerId === undefined || worker.id === onlyWorkerId)
       .filter((worker) => worker.isLocal ? activeLocalLeases < 1 : activeManagedLeases < 3)

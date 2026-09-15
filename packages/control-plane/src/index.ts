@@ -23,5 +23,6 @@ export * from "./scheduler-admin";
 export * from "./input-broker";
 export * from "./tls";
 export * from "./identity";
+export * from "./application-auth";
 export * from "./media-manifest";
 export * from "./media-playback";

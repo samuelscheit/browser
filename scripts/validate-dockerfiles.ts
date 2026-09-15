@@ -38,6 +38,11 @@ for (const file of dockerfiles.sort()) {
       throw new Error("Social image must be a Chromium CDP client and must not install a browser engine");
     }
   }
+  if (file === "workers/chromium-cdp/Dockerfile") {
+    if (!/\bxvfb\b/.test(text) || !/\bxauth\b/.test(text) || !/\bchromium-sandbox\b/.test(text) || !text.includes("deploy/compose/chromium-launch.sh")) {
+      throw new Error("managed Chromium image must include the private Xvfb, Chromium sandbox, and reviewed launcher runtimes for interactive leases");
+    }
+  }
 }
 
 const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { packageManager?: unknown };

@@ -2,7 +2,7 @@
  * Privileged, idempotent Browser Fabric bootstrap.
  *
  * This is intentionally an operator CLI instead of a public API route. It creates the initial
- * projects/principals/workers/profiles needed before application mTLS identities can call the
+ * projects/principals/workers/profiles needed before application password identities can call the
  * control plane. The manifest contains public identities, worker capability declarations, named
  * volume metadata, and *hashes* of enrollment secrets only; it must never contain raw cookies,
  * passwords, proxy URLs with credentials, private keys, or enrollment token bytes.
@@ -45,6 +45,8 @@ export interface ProvisionPlan {
   projectsToCreate: readonly ProjectId[];
   principalsToCreate: readonly Principal["id"][];
   workersToCreate: readonly Worker["id"][];
+  /** Narrow, quiescent upgrade from a managed CDP worker to interactive CDP support. */
+  workersToEnableInteractive: readonly Worker["id"][];
   profilesToCreate: readonly Profile["ref"][];
 }
 
@@ -198,6 +200,25 @@ function staticWorkerEqual(left: Worker, right: ProvisionWorker): boolean {
   return canonicalJson(staticWorkerIdentity(left)) === canonicalJson(staticWorkerIdentity(right));
 }
 
+/**
+ * A provisioner may enable—but never disable or otherwise mutate—the reviewed
+ * interactive capability on an idle managed worker. This supports adding an
+ * application-side interactive profile without loosening worker identity or
+ * accepting arbitrary manifest drift.
+ */
+function isManagedInteractiveCapabilityUpgrade(existing: Worker, desired: ProvisionWorker): boolean {
+  if (existing.isLocal || desired.isLocal || existing.capabilities.supportsInteractive || !desired.capabilities.supportsInteractive) return false;
+  const equivalentBeforeEnable = {
+    ...desired,
+    capabilities: { ...desired.capabilities, supportsInteractive: false },
+  };
+  return canonicalJson(staticWorkerIdentity(existing)) === canonicalJson(staticWorkerIdentity(equivalentBeforeEnable));
+}
+
+function workerHasActiveLease(state: Awaited<ReturnType<BrowserScheduler["store"]["snapshot"]>>, workerId: Worker["id"]): boolean {
+  return [...state.leases.values()].some((lease) => lease.workerId === workerId && lease.status === "active");
+}
+
 function staticProfileEqual(left: Profile, right: ProvisionProfile): boolean {
   return canonicalJson({
     ref: left.ref,
@@ -226,6 +247,7 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
   const projectsToCreate: ProjectId[] = [];
   const principalsToCreate: Principal["id"][] = [];
   const workersToCreate: Worker["id"][] = [];
+  const workersToEnableInteractive: Worker["id"][] = [];
   const profilesToCreate: Profile["ref"][] = [];
   for (const project of manifest.projects) {
     const existing = state.projects.get(project.id);
@@ -241,14 +263,17 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
   for (const worker of manifest.workers) {
     const existing = state.workers.get(worker.id);
     if (!existing) workersToCreate.push(worker.id);
-    else if (!staticWorkerEqual(existing, worker)) throw new FabricError("conflict", `existing worker ${worker.id} differs from provisioning manifest`, 409);
+    else if (!staticWorkerEqual(existing, worker)) {
+      if (isManagedInteractiveCapabilityUpgrade(existing, worker) && !workerHasActiveLease(state, worker.id)) workersToEnableInteractive.push(worker.id);
+      else throw new FabricError("conflict", `existing worker ${worker.id} differs from provisioning manifest`, 409);
+    }
   }
   for (const profile of manifest.profiles) {
     const existing = state.profiles.get(profile.ref);
     if (!existing) profilesToCreate.push(profile.ref);
     else if (!staticProfileEqual(existing, profile)) throw new FabricError("conflict", `existing profile ${profile.ref} differs from provisioning manifest`, 409);
   }
-  const plan: ProvisionPlan = { projectsToCreate, principalsToCreate, workersToCreate, profilesToCreate };
+  const plan: ProvisionPlan = { projectsToCreate, principalsToCreate, workersToCreate, workersToEnableInteractive, profilesToCreate };
   if (dryRun) return plan;
   // Creation order is important: projects -> principals -> workers -> profiles. Refresh a snapshot
   // between stages because every method intentionally uses a serialized transaction.
@@ -256,6 +281,9 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
   for (const principal of manifest.principals) if (principalsToCreate.includes(principal.id)) await runtime.scheduler.registerPrincipal(principal);
   for (const worker of manifest.workers) {
     if (workersToCreate.includes(worker.id)) await runtime.scheduler.registerWorker(worker, bootstrapAdmin);
+  }
+  for (const workerId of workersToEnableInteractive) {
+    await runtime.scheduler.enableManagedWorkerInteractiveCapability(workerId, bootstrapAdmin);
   }
   for (const profile of manifest.profiles) {
     if (profilesToCreate.includes(profile.ref)) await runtime.scheduler.createProfile(profile, bootstrapAdmin);

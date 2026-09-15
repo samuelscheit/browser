@@ -71,7 +71,7 @@ export class CdpGateway {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") throw new FabricError("validation_failed", "worker relay requires a WebSocket upgrade", 426);
     const workerId = match[1] as WorkerId;
     const leaseId = match[2]!;
-    if (this.#authenticate && !(await this.#authenticate(request, { kind: "worker_relay" }))) throw new FabricError("authentication_required", "mutual TLS worker principal is required", 401);
+    if (this.#authenticate && !(await this.#authenticate(request, { kind: "worker_relay" }))) throw new FabricError("authentication_required", "authenticated worker principal is required", 401);
     const snapshot = await this.#scheduler.store.snapshot();
     const worker = snapshot.workers.get(workerId);
     const lease = snapshot.leases.get(leaseId);
@@ -111,7 +111,7 @@ export class CdpGateway {
     const internalSession = (await this.#scheduler.store.snapshot()).sessions.get(sessionId);
     if (!session.workerId || !internalSession?.cdpInternalEndpoint) throw new FabricError("invalid_state", "CDP session is not assigned to a worker", 409);
     if (this.#authenticate && !(await this.#authenticate(request, { kind: "cdp", project: internalSession.project }))) {
-      throw new FabricError("authorization_denied", "mutual TLS principal is not granted access to this session project", 403);
+      throw new FabricError("authorization_denied", "Fabric principal is not granted access to this session project", 403);
     }
     this.#capabilities.verify(capability, {
       sessionId,

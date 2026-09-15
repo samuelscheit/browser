@@ -559,6 +559,30 @@ export class BrowserScheduler {
   }
 
   /**
+   * Enable the one additional capability required for a managed browser worker
+   * to host a reviewed interactive recipe. This is deliberately narrower than
+   * generic worker mutation: identity, endpoint, capacity, recipes, profile
+   * families, volumes, and every other capability remain immutable.
+   */
+  public async enableManagedWorkerInteractiveCapability(workerId: Worker["id"], actor?: Principal): Promise<Worker> {
+    return this.#store.transact((state) => {
+      this.#kernel.authorizeFabricAdmin(state, actor, "enable_managed_worker_interactive", workerId);
+      const worker = this.#kernel.worker(state, workerId);
+      if (worker.isLocal) throw new FabricError("validation_failed", "the federated local worker already owns its interactive capability", 400);
+      if (worker.capabilities.supportsInteractive) return structuredClone(worker);
+      if ([...state.leases.values()].some((lease) => lease.workerId === worker.id && lease.status === "active")) {
+        throw new FabricError("conflict", "cannot enable interactive capability while the worker has an active lease", 409);
+      }
+      worker.capabilities = { ...worker.capabilities, supportsInteractive: true };
+      worker.updatedAt = now(this.#clock);
+      state.workers.set(worker.id, worker);
+      this.#kernel.event(state, undefined, { kind: "worker", id: worker.id }, "worker.interactive_enabled", {});
+      this.#kernel.audit(state, actor, undefined, "worker.interactive_enabled", { kind: "worker", id: worker.id }, "succeeded", {});
+      return structuredClone(worker);
+    });
+  }
+
+  /**
    * Worker-side registration refresh. The worker must already be provisioned by a Fabric admin
    * and prove possession of its per-worker enrollment token on every control-channel request.
    */

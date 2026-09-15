@@ -3,12 +3,12 @@ info:
   title: Browser Fabric Control Plane
   version: 0.1.0
   description: |
-    Private Browser Fabric API. Calls require mTLS at the ingress and a project-scoped principal.
+    Private Browser Fabric API. Calls require a per-principal Basic credential at the ingress and a project-scoped principal.
     Raw CDP endpoints are short-lived signed capabilities scoped to exactly one browser session.
 servers:
   - url: https://fabric.internal.example/v1
 security:
-  - mutualTLS: []
+  - fabricBasicAuth: []
 paths:
   /browser-sessions:
     post:
@@ -320,7 +320,7 @@ paths:
         default: { $ref: '#/components/responses/Problem' }
 components:
   securitySchemes:
-    mutualTLS: { type: mutualTLS }
+    fabricBasicAuth: { type: http, scheme: basic }
   parameters:
     IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 255 } }
     SessionId: { name: sessionId, in: path, required: true, schema: { type: string, pattern: '^browser-session_' } }

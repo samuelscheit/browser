@@ -66,6 +66,14 @@ export interface DockerContainerExecutorOptions {
   egressReadyTimeoutMs?: number;
   /** Extra allowlisted environment keys supplied by a runtime image, never client values. */
   allowedEnvironmentKeys?: readonly string[];
+  /**
+   * Absolute host path to the narrowly reviewed Chromium user-namespace
+   * seccomp profile. Docker resolves this path in the daemon host namespace,
+   * not inside the manager container.
+   */
+  browserSeccompProfile?: string;
+  /** Fail browser starts closed when a production seccomp profile is absent. */
+  requireBrowserSeccompProfile?: boolean;
   /** Factory boundary for the mandatory browser-level companion; production uses real CDP. */
   turnstileGuardianFactory?: TurnstileGuardianFactory;
 }
@@ -79,6 +87,7 @@ const localFabricImage = /^browser-fabric-[a-z][a-z0-9-]{0,62}:local$/;
 const immutableImage = /^.+@sha256:[a-f0-9]{64}$/i;
 const forbiddenEnv = /(PASSWORD|SECRET|TOKEN|COOKIE|CREDENTIAL|AUTHORIZATION|OTP|MS_TOKEN)/i;
 const forbiddenArg = /(^|\s)(--no-sandbox|--disable-web-security)(\s|$)/;
+const chromiumSeccompProfile = "/etc/compose/browser-fabric-seccomp/chromium-userns.json";
 
 function containerName(prefix: string, id: string): string {
   const value = `${prefix}-${id}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 63).replace(/-+$/, "");
@@ -101,6 +110,16 @@ function assertVolumeName(name: string): void {
 
 function assertNetworkName(name: string): void {
   if (!safeNetworkName.test(name)) throw new FabricError("validation_failed", "Docker network name is invalid", 400);
+}
+
+function assertBrowserSeccompProfile(value: string | undefined, required: boolean): void {
+  if (!value) {
+    if (required) throw new FabricError("worker_unavailable", "managed browser seccomp profile is required", 503);
+    return;
+  }
+  if (value !== chromiumSeccompProfile) {
+    throw new FabricError("validation_failed", "managed browser seccomp profile path is not approved", 400);
+  }
 }
 
 function assertSpec(spec: BrowserProcessSpec, allowedEnvironmentKeys: ReadonlySet<string>): void {
@@ -153,7 +172,7 @@ function volumeMount(source: string, destination: string, readOnly = false): str
   return `type=volume,source=${source},destination=${destination}${readOnly ? ",readonly" : ""}`;
 }
 
-function createArgs(spec: BrowserProcessSpec, name: string, primaryNetwork: string, temporaryVolumes: readonly string[]): string[] {
+function createArgs(spec: BrowserProcessSpec, name: string, primaryNetwork: string, temporaryVolumes: readonly string[], browserSeccompProfile?: string): string[] {
   const container = spec.container;
   assertNetworkName(primaryNetwork);
   const temporary = temporaryVolumeLabel(temporaryVolumes);
@@ -172,10 +191,15 @@ function createArgs(spec: BrowserProcessSpec, name: string, primaryNetwork: stri
     "--read-only",
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges:true",
+    ...(container.cdpBind.port === 0 || !browserSeccompProfile ? [] : ["--security-opt", `seccomp=${browserSeccompProfile}`]),
     "--cpus", String(Math.max(0.1, container.limits.cpuMilli / 1_000)),
     "--memory", `${container.limits.memoryMiB}m`,
     "--pids-limit", String(container.limits.pids),
-    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=1073741824",
+    // Chromium's private X server needs a user-writable sticky temp root and
+    // Unix-domain socket directory. No executable temp files or host paths are
+    // permitted.
+    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=1073741824,mode=1777",
+    ...(container.cdpBind.port === 0 ? [] : ["--tmpfs", "/tmp/.X11-unix:rw,nosuid,nodev,size=1048576,mode=1777"]),
     "--shm-size", `${container.limits.shmMiB}m`,
   ];
   for (const volume of container.volumes) {
@@ -214,6 +238,7 @@ export class DockerContainerExecutor implements Executor {
     };
     for (const network of this.#options.browserNetworks) assertNetworkName(network);
     if (this.#options.egressNetwork) assertNetworkName(this.#options.egressNetwork);
+    assertBrowserSeccompProfile(this.#options.browserSeccompProfile, this.#options.requireBrowserSeccompProfile === true);
   }
 
   public async start(spec: BrowserProcessSpec): Promise<{ processId: string; cdpBrowserEndpoint?: string }> {
@@ -224,6 +249,9 @@ export class DockerContainerExecutor implements Executor {
     }
     const effectiveSpec = override ? { ...spec, container: { ...spec.container, image: override } } : spec;
     assertSpec(effectiveSpec, new Set(this.#options.allowedEnvironmentKeys ?? []));
+    if (effectiveSpec.container.cdpBind.port !== 0) {
+      assertBrowserSeccompProfile(this.#options.browserSeccompProfile, this.#options.requireBrowserSeccompProfile === true);
+    }
     assertImage(effectiveSpec.container.image, {
       requireImmutable: this.#options.requireImmutableImages,
       allowLocalBuildImages: this.#options.allowLocalBuildImages,
@@ -253,7 +281,7 @@ export class DockerContainerExecutor implements Executor {
       await this.#prepareVolumes(spec, name, temporaryVolumes);
       const primaryNetwork = this.#options.browserNetworks[0];
       if (!primaryNetwork) throw new FabricError("worker_unavailable", "no Fabric worker network is configured", 503);
-      const createdContainer = await this.#command.run(createArgs(spec, name, primaryNetwork, temporaryVolumes), { timeoutMs: this.#options.startupTimeoutMs ?? 30_000 });
+      const createdContainer = await this.#command.run(createArgs(spec, name, primaryNetwork, temporaryVolumes, this.#options.browserSeccompProfile), { timeoutMs: this.#options.startupTimeoutMs ?? 30_000 });
       if (createdContainer.exitCode !== 0) throw new FabricError("worker_unavailable", `Docker could not create browser container (${createdContainer.stderr.slice(0, 500)})`, 503);
       created = true;
       for (const network of this.#runtimeNetworks(spec).filter((network) => network !== primaryNetwork)) {

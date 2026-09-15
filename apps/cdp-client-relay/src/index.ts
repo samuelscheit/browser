@@ -10,9 +10,7 @@ const DEFAULT_READY_TIMEOUT_MS = 120_000;
 
 export type CdpRelayConfig = {
   apiBaseUrl: string;
-  certificate: Buffer;
-  key: Buffer;
-  ca: Buffer;
+  cdpGatewayBaseUrl: string;
   headers: Readonly<Record<string, string>>;
   maxConnections: number;
   readyTimeoutMs: number;
@@ -58,19 +56,44 @@ function fabricApiBaseUrl(value: string): string {
   return parsed.toString().replace(/\/+$/, "");
 }
 
-function safeFile(value: string, name: string): Buffer {
+function secretValue(environment: Record<string, string | undefined>, name: string): string {
+  const file = environment[`${name}_FILE`]?.trim();
+  let value: string | undefined;
   try {
-    const bytes = readFileSync(value);
-    if (bytes.byteLength === 0) throw new Error("empty");
-    return bytes;
+    value = file ? readFileSync(file, "utf8").trim() : environment[name]?.trim();
   } catch {
-    throw new Error(`${name} must reference readable non-empty certificate material`);
+    throw new Error(`${name} must be a non-empty secret of 24 to 4096 characters`);
   }
+  if (!value || value.length < 24 || value.length > 4096 || /[\0\r\n]/.test(value)) {
+    throw new Error(`${name} must be a non-empty secret of 24 to 4096 characters`);
+  }
+  return value;
+}
+
+function apiUsername(value: string): string {
+  if (!/^principal_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) {
+    throw new Error("FABRIC_API_USERNAME must be an opaque Fabric principal ID");
+  }
+  return value;
+}
+
+function cdpGatewayBaseUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("FABRIC_CDP_GATEWAY_URL must be a valid WebSocket origin");
+  }
+  if (!["ws:", "wss:"].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== "/") {
+    throw new Error("FABRIC_CDP_GATEWAY_URL must be a credential-free WebSocket origin");
+  }
+  return parsed.toString().replace(/\/$/, "");
 }
 
 /**
- * Companion receives only an opaque session path. The short-lived Fabric
- * capability remains exclusively in relay memory after an mTLS API lookup.
+ * The application receives only an opaque session path. The short-lived Fabric
+ * capability remains exclusively in relay memory after a password-authenticated
+ * API lookup.
  */
 export function parseCdpSessionRoute(raw: string): ParsedCdpSessionRoute | undefined {
   let url: URL;
@@ -90,22 +113,13 @@ export function fabricSessionUrl(config: Pick<CdpRelayConfig, "apiBaseUrl">, rou
 }
 
 export function relayConfigFromEnvironment(environment: Record<string, string | undefined> = process.env): CdpRelayConfig {
-  const certificate = safeFile(requiredEnvironment(environment, "FABRIC_CDP_RELAY_CLIENT_CERT_FILE"), "FABRIC_CDP_RELAY_CLIENT_CERT_FILE");
-  const key = safeFile(requiredEnvironment(environment, "FABRIC_CDP_RELAY_CLIENT_KEY_FILE"), "FABRIC_CDP_RELAY_CLIENT_KEY_FILE");
-  const ca = safeFile(requiredEnvironment(environment, "FABRIC_CDP_RELAY_CLIENT_CA_FILE"), "FABRIC_CDP_RELAY_CLIENT_CA_FILE");
-  const project = requiredEnvironment(environment, "FABRIC_PROJECT");
-  const principal = requiredEnvironment(environment, "FABRIC_PRINCIPAL");
-  const fingerprint = requiredEnvironment(environment, "FABRIC_CERT_FINGERPRINT");
+  const username = apiUsername(requiredEnvironment(environment, "FABRIC_API_USERNAME"));
+  const password = secretValue(environment, "FABRIC_API_PASSWORD");
   return {
     apiBaseUrl: fabricApiBaseUrl(requiredEnvironment(environment, "FABRIC_API_URL")),
-    certificate,
-    key,
-    ca,
+    cdpGatewayBaseUrl: cdpGatewayBaseUrl(requiredEnvironment(environment, "FABRIC_CDP_GATEWAY_URL")),
     headers: {
-      "x-fabric-mtls-verified": "true",
-      "x-fabric-project": project,
-      "x-fabric-principal": principal,
-      "x-fabric-cert-fingerprint": fingerprint,
+      authorization: `Basic ${Buffer.from(`${username}:${password}`, "utf8").toString("base64")}`,
     },
     maxConnections: boundedInteger(environment.FABRIC_CDP_RELAY_MAX_CONNECTIONS, "FABRIC_CDP_RELAY_MAX_CONNECTIONS", 4, 1, MAX_CONNECTIONS),
     readyTimeoutMs: boundedInteger(environment.FABRIC_CDP_RELAY_READY_TIMEOUT_MS, "FABRIC_CDP_RELAY_READY_TIMEOUT_MS", DEFAULT_READY_TIMEOUT_MS, 1_000, 300_000),
@@ -126,7 +140,7 @@ function validCdpEndpoint(value: unknown): value is string {
   if (typeof value !== "string" || value.length > 16_384) return false;
   try {
     const endpoint = new URL(value);
-    return endpoint.protocol === "wss:"
+    return (endpoint.protocol === "ws:" || endpoint.protocol === "wss:")
       && !endpoint.username
       && !endpoint.password
       && /^\/v1\/cdp\/browser-session_[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/.test(endpoint.pathname)
@@ -137,13 +151,18 @@ function validCdpEndpoint(value: unknown): value is string {
   }
 }
 
+function privateCdpEndpoint(value: string, baseUrl: string): string {
+  const endpoint = new URL(value);
+  const base = new URL(baseUrl);
+  return `${base.protocol}//${base.host}${endpoint.pathname}?${endpoint.searchParams.toString()}`;
+}
+
 async function fabricSession(config: CdpRelayConfig, route: ParsedCdpSessionRoute): Promise<{ status?: unknown; cdpEndpoint?: unknown }> {
   let response: Response;
   try {
     response = await globalThis.fetch(fabricSessionUrl(config, route), {
       headers: { accept: "application/json", ...config.headers },
-      tls: { cert: config.certificate, key: config.key, ca: config.ca, rejectUnauthorized: true },
-    } as RequestInit);
+    });
   } catch {
     throw new Error("Fabric API session lookup failed");
   }
@@ -170,7 +189,7 @@ export async function resolveFabricCdpEndpoint(
   while (true) {
     const session = await fabricSession(config, route);
     if ((session.status === "ready" || session.status === "active") && validCdpEndpoint(session.cdpEndpoint)) {
-      return session.cdpEndpoint;
+      return privateCdpEndpoint(session.cdpEndpoint, config.cdpGatewayBaseUrl);
     }
     if (["released", "cancelled", "failed", "timed_out"].includes(String(session.status))) {
       throw new Error(`Fabric session ended in ${String(session.status)}`);
@@ -209,10 +228,6 @@ async function relayConnection(client: WebSocket, config: CdpRelayConfig, route:
     const endpoint = await resolveFabricCdpEndpoint(config, route);
     if (closed) return;
     upstream = new WebSocket(endpoint, {
-      cert: config.certificate,
-      key: config.key,
-      ca: config.ca,
-      rejectUnauthorized: true,
       headers: config.headers,
       perMessageDeflate: false,
       maxPayload: MAX_PAYLOAD_BYTES,

@@ -22,9 +22,9 @@ import {
 /**
  * Transport-independent options for the generated-style client.
  *
- * Certificates are deliberately not accepted here. The caller supplies a
- * fetch implementation backed by its mTLS sidecar (or a private service mesh)
- * and may add the already-verified principal headers through `headers`.
+ * Credentials are deliberately not accepted here. The caller supplies a
+ * fetch implementation or an Authorization header backed by its password
+ * secret and may add transport-specific headers through `headers`.
  */
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 

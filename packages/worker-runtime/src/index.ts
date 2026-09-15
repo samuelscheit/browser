@@ -75,7 +75,9 @@ export class GenericBrowserRuntime implements BrowserRuntime {
     const job = assignment.job;
     if (recipe.runtime !== this.family) throw new FabricError("validation_failed", `runtime ${this.family} cannot execute ${recipe.runtime}`, 400);
     assertRecipeEgressFlags(recipe);
-    if (recipe.mode === "interactive" && !worker.isLocal) throw new FabricError("worker_unavailable", "interactive recipes require the federated local worker", 409);
+    if (recipe.mode === "interactive" && !worker.capabilities.supportsInteractive) {
+      throw new FabricError("worker_unavailable", "interactive recipes require an interactive-capable worker", 409);
+    }
     if (lease && lease.workerId !== worker.id) throw new FabricError("authorization_denied", "assignment worker mismatch", 403);
     const profileVolume = assignment.clone?.volumeName ?? assignment.profile?.volumeName ?? assignment.lease?.ephemeralVolumeName;
     const volumes = profileVolume ? [{ source: profileVolume, target: "/fabric/profile", readOnly: false }] : [];
@@ -91,6 +93,7 @@ export class GenericBrowserRuntime implements BrowserRuntime {
       ...(job ? { FABRIC_JOB_ID: job.id } : {})
     };
     assertNoSecretEnvironment(environment);
+    const managedInteractive = recipe.mode === "interactive" && !worker.isLocal;
     return {
       workerId: worker.id,
       ...(lease ? { leaseId: lease.id } : {}),
@@ -99,7 +102,12 @@ export class GenericBrowserRuntime implements BrowserRuntime {
       image: recipe.browserImage,
       browserVersion: recipe.browserVersion,
       command: [
-        "/usr/bin/chromium",
+        // Managed interactive workers run a private X server inside the
+        // lease-scoped container. Federated local workers retain their native
+        // desktop session and launch Chromium directly.
+        ...(managedInteractive
+          ? ["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]
+          : ["/usr/bin/chromium"]),
         ...(recipe.mode === "headless" ? ["--headless=new"] : []),
         ...(recipe.mode === "interactive" ? ["--start-maximized"] : []),
         ...(recipe.launch.disableServiceWorkers ? ["--disable-service-worker"] : []),
@@ -109,6 +117,11 @@ export class GenericBrowserRuntime implements BrowserRuntime {
         `--remote-debugging-address=${worker.isLocal ? "127.0.0.1" : "0.0.0.0"}`,
         `--remote-debugging-port=${cdpPort}`,
         `--user-data-dir=${profileVolume ? "/fabric/profile/chromium" : "/tmp/fabric-browser-profile"}`,
+        // Docker's no-new-privileges setting deliberately disables Debian's
+        // setuid sandbox. Managed browser containers use Chromium's user
+        // namespace sandbox instead, enabled by the dedicated reviewed seccomp
+        // profile selected by the controller.
+        ...(!worker.isLocal ? ["--disable-setuid-sandbox"] : []),
         `--proxy-pac-url=${internalEgressPacUrl(policy, { baseUrl: process.env.FABRIC_EGRESS_PAC_BASE_URL, localWorker: worker.isLocal })}`,
         "--proxy-auto-detect=false",
         "--proxy-bypass-list=<-loopback>",

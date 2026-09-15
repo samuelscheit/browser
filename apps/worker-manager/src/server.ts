@@ -205,6 +205,10 @@ if (import.meta.main) {
       .filter((entry): entry is [string, string] => Boolean(entry[1])),
   );
   const production = process.env.NODE_ENV === "production";
+  const browserSeccompProfile = process.env.FABRIC_CHROMIUM_SECCOMP_PROFILE?.trim();
+  if (production && browserSeccompProfile !== "/etc/compose/browser-fabric-seccomp/chromium-userns.json") {
+    throw new Error("FABRIC_CHROMIUM_SECCOMP_PROFILE must reference the approved Chromium user-namespace profile in production");
+  }
   const browserExecutor = new DockerContainerExecutor({
     browserNetworks,
     egressNetwork,
@@ -216,6 +220,8 @@ if (import.meta.main) {
     allowLocalBuildImages: production,
     requireRuntimeImageOverrides: production,
     verifyEgressReady: production,
+    browserSeccompProfile,
+    requireBrowserSeccompProfile: production,
     volumeHelperImage: process.env.FABRIC_VOLUME_HELPER_IMAGE,
   });
   // Media tasks use the same hardened Docker-container path as browser leases, but must receive the
