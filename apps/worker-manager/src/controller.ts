@@ -15,6 +15,8 @@ export interface ManagedWorkerControllerOptions {
   /** Runtime families executed by this Docker controller. Native workers poll their own mailbox. */
   managedRuntimeFamilies?: readonly string[];
   pollIntervalMs?: number;
+  /** Independent browser-lease liveness cadence; must not depend on reconciliation completing. */
+  leaseHeartbeatIntervalMs?: number;
   maxWorkersPerTick?: number;
 }
 
@@ -26,7 +28,10 @@ interface ActiveProcess {
   leaseId?: string;
   mediaAttemptId?: AttemptId;
   watching?: boolean;
+  actor?: Principal;
 }
+
+const DEFAULT_LEASE_HEARTBEAT_INTERVAL_MS = 5_000;
 
 /**
  * Controller-side loop for managed fabric-host workers. It is the only component with Docker access;
@@ -40,9 +45,12 @@ export class ManagedWorkerController {
   readonly #mediaResultGateway?: Pick<MediaResultGateway, "prepare" | "verifyCompletion">;
   readonly #managedRuntimeFamilies: ReadonlySet<string>;
   readonly #pollIntervalMs: number;
+  readonly #leaseHeartbeatIntervalMs: number;
   readonly #maxWorkersPerTick: number;
   readonly #active = new Map<string, ActiveProcess>();
   #timer?: ReturnType<typeof setInterval>;
+  #leaseHeartbeatTimer?: ReturnType<typeof setInterval>;
+  #leaseHeartbeatInFlight = false;
   #ticking = false;
   #stopping = false;
 
@@ -53,21 +61,45 @@ export class ManagedWorkerController {
     this.#managedRuntimeFamilies = new Set(options.managedRuntimeFamilies ?? ["chromium-cdp", "patchright", "rebrowser-puppeteer", "companion", "media-relay"]);
     this.#manager = new WorkerManager(options.scheduler, options.browserExecutor, options.mediaExecutor);
     this.#pollIntervalMs = Math.max(250, Math.min(30_000, options.pollIntervalMs ?? 1_000));
+    this.#leaseHeartbeatIntervalMs = Math.max(1_000, Math.min(15_000, options.leaseHeartbeatIntervalMs ?? DEFAULT_LEASE_HEARTBEAT_INTERVAL_MS));
     this.#maxWorkersPerTick = Math.max(1, Math.min(32, options.maxWorkersPerTick ?? 8));
   }
 
   public start(): void {
     this.#stopping = false;
+    if (this.#timer) clearInterval(this.#timer);
+    if (this.#leaseHeartbeatTimer) clearInterval(this.#leaseHeartbeatTimer);
     this.#timer = setInterval(() => void this.tick(), this.#pollIntervalMs);
+    this.#leaseHeartbeatTimer = setInterval(() => void this.heartbeatActiveLeases(), this.#leaseHeartbeatIntervalMs);
     void this.tick();
+    void this.heartbeatActiveLeases();
   }
 
   public async stop(): Promise<void> {
     this.#stopping = true;
     if (this.#timer) clearInterval(this.#timer);
+    if (this.#leaseHeartbeatTimer) clearInterval(this.#leaseHeartbeatTimer);
     this.#timer = undefined;
+    this.#leaseHeartbeatTimer = undefined;
     await Promise.all([...this.#active.values()].map((process) => this.#stopProcess(process)));
     this.#active.clear();
+  }
+
+  /** Keep active browser leases alive independently of reconciliation and Docker inspection. */
+  public async heartbeatActiveLeases(): Promise<void> {
+    if (this.#stopping || this.#leaseHeartbeatInFlight) return;
+    this.#leaseHeartbeatInFlight = true;
+    try {
+      await Promise.all([...this.#active.values()]
+        .filter((process) => !process.media && process.leaseId && process.actor)
+        .map((process) => this.#scheduler.heartbeatLease(
+          process.leaseId as never,
+          process.workerId,
+          process.actor!,
+        ).catch(() => undefined)));
+    } finally {
+      this.#leaseHeartbeatInFlight = false;
+    }
   }
 
   public async tick(): Promise<void> {
@@ -92,7 +124,6 @@ export class ManagedWorkerController {
               continue;
             }
           }
-          await this.#scheduler.heartbeatLease(process.leaseId as never, worker.id, workerPrincipalIdentity).catch(() => undefined);
         }
         const assignments = await this.#scheduler.assignmentsForWorker(worker.id, worker.capacity + (worker.mediaCapacity ?? 0));
         for (const assignment of assignments) {
@@ -194,7 +225,7 @@ export class ManagedWorkerController {
       if (claimed.lease && !claimed.lease.startedAt) {
         await this.#scheduler.markLeaseStarted(claimed.lease.id, worker.id, actor);
       }
-      this.#active.set(identity, { workerId: worker.id, identity, processId: started.processId, media: startedProcess.media, ...(claimed.lease ? { leaseId: claimed.lease.id } : {}), ...(mediaAttemptId === undefined ? {} : { mediaAttemptId }) });
+      this.#active.set(identity, { workerId: worker.id, identity, processId: started.processId, media: startedProcess.media, actor, ...(claimed.lease ? { leaseId: claimed.lease.id } : {}), ...(mediaAttemptId === undefined ? {} : { mediaAttemptId }) });
       if (startedProcess.media && this.#mediaExecutor?.wait && claimed.job) {
       const active = this.#active.get(identity);
         if (active) {

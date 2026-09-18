@@ -5,7 +5,7 @@ import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, makeWorker } from
 import { ArtifactCollector, MemoryObjectStore } from "@browser-fabric/control-plane";
 
 test("managed controller revokes a ready CDP capability and releases the lease when its browser process exits", async () => {
-  const { scheduler, profile } = await bootstrapTestScheduler();
+  const { scheduler, profile, clock } = await bootstrapTestScheduler();
   // Keep the test at one managed lease so its liveness transition is unambiguous.
   const worker = makeWorker({
     id: "worker_controller" as never,
@@ -56,6 +56,13 @@ test("managed controller revokes a ready CDP capability and releases the lease w
   expect(ready.status).toBe("ready");
   expect(ready.cdpEndpoint).toContain("cap=");
   expect(started).toHaveLength(1);
+
+  const leaseBeforeHeartbeat = (await scheduler.store.snapshot()).leases.values().next().value;
+  expect(leaseBeforeHeartbeat?.lastHeartbeatAt).toBeDefined();
+  clock.advance(1);
+  await controller.heartbeatActiveLeases();
+  const leaseAfterHeartbeat = (await scheduler.store.snapshot()).leases.values().next().value;
+  expect(leaseAfterHeartbeat?.lastHeartbeatAt).not.toBe(leaseBeforeHeartbeat?.lastHeartbeatAt);
 
   running = false;
   await controller.tick();
