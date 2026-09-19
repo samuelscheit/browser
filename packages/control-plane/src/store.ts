@@ -22,6 +22,13 @@ import {
 } from "@browser-fabric/contracts";
 import { Mutex } from "./mutex";
 
+// A durable snapshot is a crash-recovery checkpoint, not an audit log. Keeping every full JSON
+// state forever makes heartbeat-heavy deployments grow without bound and eventually blocks the
+// control plane on multi-gigabyte snapshot scans. Retain a bounded recent window and keep the
+// normalized tables/events as the queryable history.
+const STATE_SNAPSHOT_RETENTION = 1_000;
+const STATE_SNAPSHOT_PRUNE_INTERVAL = 100;
+
 export interface FabricState {
   projects: Map<string, Project>;
   principals: Map<string, Principal>;
@@ -323,6 +330,12 @@ export class PostgresFabricStore extends InMemoryFabricStore {
     for (const audit of draft.audits.values()) await client.query("INSERT INTO fabric_audit_events(id,actor_id,project_id,action,target_kind,target_id,outcome,metadata,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (id) DO NOTHING", [audit.id, audit.actor, audit.project ?? null, audit.action, audit.target.kind, audit.target.id, audit.outcome, JSON.stringify(audit.metadata), audit.createdAt]);
     await client.query("INSERT INTO fabric_capacity(id,active_browser_leases,updated_at) VALUES (1,$1,now()) ON CONFLICT (id) DO UPDATE SET active_browser_leases=EXCLUDED.active_browser_leases,updated_at=now()", [draft.activeBrowserLeases]);
     await client.query("INSERT INTO fabric_state_snapshots(sequence, state) VALUES ($1, $2::jsonb) ON CONFLICT (sequence) DO UPDATE SET state = EXCLUDED.state, created_at = now()", [sequence, serialized]);
+    if (sequence % STATE_SNAPSHOT_PRUNE_INTERVAL === 0) {
+      const cutoff = sequence - STATE_SNAPSHOT_RETENTION;
+      if (cutoff > 0) {
+        await client.query("DELETE FROM fabric_state_snapshots WHERE sequence < $1", [cutoff]);
+      }
+    }
     this.#persistedSequence = sequence;
   }
 }
