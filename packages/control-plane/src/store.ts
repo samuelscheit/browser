@@ -192,9 +192,10 @@ export class PostgresFabricStore extends InMemoryFabricStore {
         await transaction.query("SELECT ref FROM fabric_profiles ORDER BY ref FOR UPDATE");
         await transaction.query("SELECT id FROM fabric_browser_leases WHERE status = 'active' ORDER BY id FOR UPDATE");
         await this.#loadLatestState(transaction, false);
+        const projectionBase = cloneState(this.state);
         const draft = cloneState(this.state);
         const result = await operation(draft);
-        await this.persistNormalizedProjection(draft, transaction);
+        await this.persistNormalizedProjection(draft, transaction, projectionBase);
         this.state = draft;
         return result;
       };
@@ -287,7 +288,11 @@ export class PostgresFabricStore extends InMemoryFabricStore {
     this.#persistedSequence = persistedSequence;
   }
 
-  private async persistNormalizedProjection(draft: FabricState, client: SqlClient = this.#client): Promise<void> {
+  private async persistNormalizedProjection(
+    draft: FabricState,
+    client: SqlClient = this.#client,
+    previous?: FabricState,
+  ): Promise<void> {
     const revisionResult = await client.query<{ next: string | number }>("SELECT COALESCE(MAX(sequence),0)+1 AS next FROM fabric_state_snapshots");
     const sequence = Number(revisionResult.rows[0]?.next ?? 1);
     const serialized = JSON.stringify(serializeState(draft));
@@ -323,11 +328,20 @@ export class PostgresFabricStore extends InMemoryFabricStore {
     for (const lease of draft.leases.values()) await client.query("INSERT INTO fabric_browser_leases(id,session_id,job_id,project_id,profile_ref,worker_id,mode,clone_id,status,expires_at,last_heartbeat_at,assignment_claimed_at,started_at,created_at,released_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,last_heartbeat_at=EXCLUDED.last_heartbeat_at,assignment_claimed_at=EXCLUDED.assignment_claimed_at,started_at=EXCLUDED.started_at,released_at=EXCLUDED.released_at", [lease.id, lease.sessionId ?? null, lease.jobId ?? null, lease.project, lease.profileRef ?? null, lease.workerId, lease.mode, lease.cloneId ?? null, lease.status, lease.expiresAt, lease.lastHeartbeatAt, lease.assignmentClaimedAt ?? null, lease.startedAt ?? null, lease.createdAt, lease.releasedAt ?? null]);
     for (const clone of draft.clones.values()) await client.query("INSERT INTO fabric_profile_clones(id,source_profile_ref,worker_id,volume_name,created_for_lease,status,created_at,deleted_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,deleted_at=EXCLUDED.deleted_at", [clone.id, clone.sourceProfileRef, clone.workerId, clone.volumeName, clone.createdForLease, clone.status, clone.createdAt, clone.deletedAt ?? null]);
     for (const attempt of draft.attempts.values()) await client.query("INSERT INTO fabric_job_attempts(id,job_id,attempt_number,worker_id,lease_id,status,created_at,completed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,completed_at=EXCLUDED.completed_at", [attempt.id, attempt.jobId, attempt.number, attempt.workerId ?? null, attempt.leaseId ?? null, attempt.status, attempt.createdAt, attempt.completedAt ?? null]);
-    for (const event of draft.events.values()) await client.query("INSERT INTO fabric_events(id,sequence,project_id,subject_kind,subject_id,type,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8) ON CONFLICT (id) DO NOTHING", [event.id, event.sequence, event.project ?? null, event.subject.kind, event.subject.id, event.type, JSON.stringify(event.payload), event.createdAt]);
+    const newEvents = previous === undefined
+      ? draft.events.values()
+      : [...draft.events.values()].filter((event) => !previous.events.has(event.id));
+    for (const event of newEvents) await client.query("INSERT INTO fabric_events(id,sequence,project_id,subject_kind,subject_id,type,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8) ON CONFLICT (id) DO NOTHING", [event.id, event.sequence, event.project ?? null, event.subject.kind, event.subject.id, event.type, JSON.stringify(event.payload), event.createdAt]);
     for (const artifact of draft.artifacts.values()) await client.query("INSERT INTO fabric_artifacts(id,project_id,session_id,job_id,profile_ref,kind,object_key,sha256,mime_type,size_bytes,created_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (id) DO UPDATE SET expires_at=EXCLUDED.expires_at", [artifact.id, artifact.project, artifact.sessionId ?? null, artifact.jobId ?? null, artifact.profileRef ?? null, artifact.kind, artifact.objectKey, artifact.sha256, artifact.mimeType, artifact.sizeBytes, artifact.createdAt, artifact.expiresAt]);
     for (const request of draft.inputRequests.values()) await client.query("INSERT INTO fabric_ephemeral_input_requests(id,project_id,session_id,job_id,lease_id,media_attempt_id,worker_id,worker_input_encryption_public_key_pem,field,field_type,status,expires_at,created_at,resolved_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,resolved_at=EXCLUDED.resolved_at", [request.id, request.project, request.sessionId ?? null, request.jobId ?? null, request.leaseId ?? null, request.mediaAttemptId ?? null, request.workerId ?? null, request.workerInputEncryptionPublicKeyPem ?? null, request.field, request.fieldType, request.status, request.expiresAt, request.createdAt, request.resolvedAt ?? null]);
-    for (const record of draft.idempotency.values()) await client.query("INSERT INTO fabric_idempotency(id,project_id,scope,key,request_hash,response_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (project_id,scope,key) DO UPDATE SET request_hash=EXCLUDED.request_hash,response_id=EXCLUDED.response_id", [record.id, record.project, record.scope, record.key, record.requestHash, record.responseId, record.createdAt]);
-    for (const audit of draft.audits.values()) await client.query("INSERT INTO fabric_audit_events(id,actor_id,project_id,action,target_kind,target_id,outcome,metadata,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (id) DO NOTHING", [audit.id, audit.actor, audit.project ?? null, audit.action, audit.target.kind, audit.target.id, audit.outcome, JSON.stringify(audit.metadata), audit.createdAt]);
+    const newIdempotencyRecords = previous === undefined
+      ? draft.idempotency.values()
+      : [...draft.idempotency.values()].filter((record) => !previous.idempotency.has(record.id));
+    for (const record of newIdempotencyRecords) await client.query("INSERT INTO fabric_idempotency(id,project_id,scope,key,request_hash,response_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (project_id,scope,key) DO UPDATE SET request_hash=EXCLUDED.request_hash,response_id=EXCLUDED.response_id", [record.id, record.project, record.scope, record.key, record.requestHash, record.responseId, record.createdAt]);
+    const newAudits = previous === undefined
+      ? draft.audits.values()
+      : [...draft.audits.values()].filter((audit) => !previous.audits.has(audit.id));
+    for (const audit of newAudits) await client.query("INSERT INTO fabric_audit_events(id,actor_id,project_id,action,target_kind,target_id,outcome,metadata,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (id) DO NOTHING", [audit.id, audit.actor, audit.project ?? null, audit.action, audit.target.kind, audit.target.id, audit.outcome, JSON.stringify(audit.metadata), audit.createdAt]);
     await client.query("INSERT INTO fabric_capacity(id,active_browser_leases,updated_at) VALUES (1,$1,now()) ON CONFLICT (id) DO UPDATE SET active_browser_leases=EXCLUDED.active_browser_leases,updated_at=now()", [draft.activeBrowserLeases]);
     await client.query("INSERT INTO fabric_state_snapshots(sequence, state) VALUES ($1, $2::jsonb) ON CONFLICT (sequence) DO UPDATE SET state = EXCLUDED.state, created_at = now()", [sequence, serialized]);
     if (sequence % STATE_SNAPSHOT_PRUNE_INTERVAL === 0) {
