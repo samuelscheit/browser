@@ -5,6 +5,8 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const MAX_CONNECTIONS = 16;
 const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
+const MAX_HTTP_BODY_BYTES = 256 * 1024;
+const MAX_HTTP_RESPONSE_BYTES = 1024 * 1024;
 const MAX_BUFFERED_MESSAGES = 64;
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 
@@ -18,6 +20,10 @@ export type CdpRelayConfig = {
 
 export type ParsedCdpSessionRoute = {
   sessionId: string;
+};
+
+export type ParsedClientApiRoute = {
+  path: string;
 };
 
 function requiredEnvironment(environment: Record<string, string | undefined>, name: string): string {
@@ -110,6 +116,81 @@ export function parseCdpSessionRoute(raw: string): ParsedCdpSessionRoute | undef
 /** The relay calls only the configured Fabric API base; callers cannot choose an upstream. */
 export function fabricSessionUrl(config: Pick<CdpRelayConfig, "apiBaseUrl">, route: ParsedCdpSessionRoute): string {
   return `${config.apiBaseUrl}/browser-sessions/${encodeURIComponent(route.sessionId)}`;
+}
+
+/**
+ * Expose only the browser-session lifecycle operations required by an
+ * application adapter. Session reads stay private because they may contain a
+ * short-lived CDP capability.
+ */
+export function parseClientApiRoute(raw: string, method: string | undefined): ParsedClientApiRoute | undefined {
+  if (method !== "POST") return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw, "http://fabric-client-relay.invalid");
+  } catch {
+    return undefined;
+  }
+  if (url.search || url.hash) return undefined;
+  if (url.pathname === "/v1/browser-sessions") return { path: "/browser-sessions" };
+  const match = /^\/v1\/browser-sessions\/(browser-session_[A-Za-z0-9][A-Za-z0-9_-]{0,255})\/(heartbeat|release|cancel)$/.exec(url.pathname);
+  return match ? { path: `/browser-sessions/${encodeURIComponent(match[1]!)}/${match[2]}` } : undefined;
+}
+
+function boundedHeader(value: string | undefined, maximum: number): string | undefined {
+  if (!value || value.length > maximum || /[\0\r\n]/.test(value)) return undefined;
+  return value;
+}
+
+async function boundedRequestBody(request: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > MAX_HTTP_BODY_BYTES) throw new Error("client API request body is too large");
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+function sanitizeApiJson(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const result = { ...(value as Record<string, unknown>) };
+  delete result.cdpEndpoint;
+  delete result.capability;
+  return result;
+}
+
+async function relayApiRequest(request: IncomingMessage, response: import("node:http").ServerResponse, config: CdpRelayConfig, route: ParsedClientApiRoute): Promise<void> {
+  try {
+    const body = await boundedRequestBody(request);
+    const bodyText = body.toString("utf8");
+    const idempotencyKey = boundedHeader(request.headers["idempotency-key"] as string | undefined, 512);
+    const upstream = await globalThis.fetch(`${config.apiBaseUrl}${route.path}`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        ...config.headers,
+        ...(bodyText ? { "content-type": "application/json" } : {}),
+        ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
+      },
+      ...(bodyText ? { body: bodyText } : {}),
+    });
+    const raw = Buffer.from(await upstream.arrayBuffer());
+    if (raw.length > MAX_HTTP_RESPONSE_BYTES) throw new Error("Fabric API response is too large");
+    if (raw.length === 0) {
+      response.writeHead(upstream.status, { "cache-control": "no-store" });
+      response.end();
+      return;
+    }
+    const json = sanitizeApiJson(JSON.parse(raw.toString("utf8")));
+    response.writeHead(upstream.status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    response.end(JSON.stringify(json));
+  } catch {
+    response.writeHead(502, { "content-type": "application/problem+json; charset=utf-8", "cache-control": "no-store" });
+    response.end(JSON.stringify({ detail: "Fabric client relay request failed" }));
+  }
 }
 
 export function relayConfigFromEnvironment(environment: Record<string, string | undefined> = process.env): CdpRelayConfig {
@@ -255,6 +336,11 @@ export function createCdpClientRelayServer(config: CdpRelayConfig): { server: Se
     if (request.method === "GET" && url.pathname === "/healthz") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
       response.end(JSON.stringify({ status: "ok", activeConnections }));
+      return;
+    }
+    const apiRoute = parseClientApiRoute(request.url ?? "/", request.method);
+    if (apiRoute) {
+      void relayApiRequest(request, response, config, apiRoute);
       return;
     }
     response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
