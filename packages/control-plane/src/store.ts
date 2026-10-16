@@ -1,5 +1,7 @@
 import {
   isMediaRuntime,
+  terminalBrowserSessionStatuses,
+  terminalJobStatuses,
   type Artifact,
   type ArtifactPolicy,
   type AuditEvent,
@@ -34,6 +36,68 @@ const STATE_SNAPSHOT_PRUNE_INTERVAL = 100;
 // APIs). Worker and profile events are durable telemetry: they are appended to fabric_events
 // and then dropped from the state, so worker registration churn cannot grow every snapshot.
 const HOT_EVENT_SUBJECTS: ReadonlySet<FabricEvent["subject"]["kind"]> = new Set(["browser_session", "job"]);
+
+// Terminal sessions and jobs stay hot for a bounded window so clients can still read their final
+// status, events, and idempotent replays; afterwards they live only in the normalized tables.
+const TERMINAL_HISTORY_RETENTION_MS = 24 * 60 * 60 * 1_000;
+const TERMINAL_SESSION_STATUSES: ReadonlySet<string> = new Set(terminalBrowserSessionStatuses);
+const TERMINAL_JOB_STATUSES: ReadonlySet<string> = new Set(terminalJobStatuses);
+
+/**
+ * Drop terminal sessions/jobs older than the retention window, with every record that only
+ * exists to describe them. A subject stays hot while anything live can still resolve it: an
+ * unexpired artifact listing, a pending input request, or a lease that has not been released.
+ */
+function evictTerminalHistory(state: FabricState, nowMs: number, retentionMs: number): void {
+  const pinned = new Set<string>();
+  for (const artifact of state.artifacts.values()) {
+    if (Date.parse(artifact.expiresAt) <= nowMs) continue;
+    if (artifact.sessionId) pinned.add(artifact.sessionId);
+    if (artifact.jobId) pinned.add(artifact.jobId);
+  }
+  for (const request of state.inputRequests.values()) {
+    if (request.status !== "pending" && request.status !== "supplied") continue;
+    if (request.sessionId) pinned.add(request.sessionId);
+    if (request.jobId) pinned.add(request.jobId);
+  }
+  for (const lease of state.leases.values()) {
+    if (lease.status !== "active" && lease.status !== "releasing") continue;
+    if (lease.sessionId) pinned.add(lease.sessionId);
+    if (lease.jobId) pinned.add(lease.jobId);
+  }
+  const cutoff = nowMs - retentionMs;
+  const evicted = new Set<string>();
+  for (const session of state.sessions.values()) {
+    if (TERMINAL_SESSION_STATUSES.has(session.status) && Date.parse(session.releasedAt ?? session.updatedAt) <= cutoff && !pinned.has(session.id)) evicted.add(session.id);
+  }
+  for (const job of state.jobs.values()) {
+    if (TERMINAL_JOB_STATUSES.has(job.status) && Date.parse(job.updatedAt) <= cutoff && !pinned.has(job.id)) evicted.add(job.id);
+  }
+  if (evicted.size === 0) return;
+  const evictedLeases = new Set<string>();
+  for (const [id, lease] of state.leases) {
+    const owner = lease.sessionId ?? lease.jobId;
+    if (owner === undefined || !evicted.has(owner)) continue;
+    state.leases.delete(id);
+    evictedLeases.add(id);
+  }
+  for (const [id, clone] of state.clones) if (clone.status === "destroyed" && evictedLeases.has(clone.createdForLease)) state.clones.delete(id);
+  for (const [id, attempt] of state.attempts) if (evicted.has(attempt.jobId)) state.attempts.delete(id);
+  for (const [id, event] of state.events) if (evicted.has(event.subject.id)) state.events.delete(id);
+  for (const [id, record] of state.idempotency) if (evicted.has(record.responseId)) state.idempotency.delete(id);
+  for (const [id, request] of state.inputRequests) {
+    if ((request.sessionId && evicted.has(request.sessionId)) || (request.jobId && evicted.has(request.jobId))) state.inputRequests.delete(id);
+  }
+  for (const id of evicted) {
+    state.sessions.delete(id);
+    state.jobs.delete(id);
+  }
+}
+
+/** Map key for idempotent create replays; reloaded snapshots must index records the same way. */
+export function idempotencyKey(project: string, scope: IdempotencyRecord["scope"], key: string): string {
+  return `${project}:${scope}:${key}`;
+}
 
 /** Entities that are new or differ from the pre-transaction state; all of them without a base. */
 function changedValues<T>(current: Map<string, T>, previous: Map<string, T> | undefined): Iterable<T> {
@@ -160,11 +224,15 @@ export class PostgresFabricStore extends InMemoryFabricStore {
   #initialized = false;
   #initializing?: Promise<void>;
   #persistedSequence = -1;
+  readonly #now: () => number;
+  readonly #terminalHistoryRetentionMs: number;
 
-  public constructor(client: SqlClient, schemaSql: string) {
+  public constructor(client: SqlClient, schemaSql: string, options: { now?: () => number; terminalHistoryRetentionMs?: number } = {}) {
     super();
     this.#client = client;
     this.#schemaSql = schemaSql;
+    this.#now = options.now ?? Date.now;
+    this.#terminalHistoryRetentionMs = options.terminalHistoryRetentionMs ?? TERMINAL_HISTORY_RETENTION_MS;
   }
 
   public async initialize(): Promise<void> {
@@ -354,13 +422,16 @@ export class PostgresFabricStore extends InMemoryFabricStore {
     for (const request of changedValues(draft.inputRequests, previous?.inputRequests)) await client.query("INSERT INTO fabric_ephemeral_input_requests(id,project_id,session_id,job_id,lease_id,media_attempt_id,worker_id,worker_input_encryption_public_key_pem,field,field_type,status,expires_at,created_at,resolved_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,resolved_at=EXCLUDED.resolved_at", [request.id, request.project, request.sessionId ?? null, request.jobId ?? null, request.leaseId ?? null, request.mediaAttemptId ?? null, request.workerId ?? null, request.workerInputEncryptionPublicKeyPem ?? null, request.field, request.fieldType, request.status, request.expiresAt, request.createdAt, request.resolvedAt ?? null]);
     const newIdempotencyRecords = previous === undefined
       ? draft.idempotency.values()
-      : [...draft.idempotency.values()].filter((record) => !previous.idempotency.has(record.id));
+      : [...draft.idempotency].filter(([key]) => !previous.idempotency.has(key)).map(([, record]) => record);
     for (const record of newIdempotencyRecords) await client.query("INSERT INTO fabric_idempotency(id,project_id,scope,key,request_hash,response_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (project_id,scope,key) DO UPDATE SET request_hash=EXCLUDED.request_hash,response_id=EXCLUDED.response_id", [record.id, record.project, record.scope, record.key, record.requestHash, record.responseId, record.createdAt]);
     const newAudits = previous === undefined
       ? draft.audits.values()
       : [...draft.audits.values()].filter((audit) => !previous.audits.has(audit.id));
     for (const audit of newAudits) await client.query("INSERT INTO fabric_audit_events(id,actor_id,project_id,action,target_kind,target_id,outcome,metadata,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (id) DO NOTHING", [audit.id, audit.actor, audit.project ?? null, audit.action, audit.target.kind, audit.target.id, audit.outcome, JSON.stringify(audit.metadata), audit.createdAt]);
+    // Audits are append-only records that no state reader consults; keep them in the table only.
+    draft.audits.clear();
     await client.query("INSERT INTO fabric_capacity(id,active_browser_leases,updated_at) VALUES (1,$1,now()) ON CONFLICT (id) DO UPDATE SET active_browser_leases=EXCLUDED.active_browser_leases,updated_at=now()", [draft.activeBrowserLeases]);
+    evictTerminalHistory(draft, this.#now(), this.#terminalHistoryRetentionMs);
     const serialized = JSON.stringify(serializeState(draft));
     await client.query("INSERT INTO fabric_state_snapshots(sequence, state) VALUES ($1, $2::jsonb) ON CONFLICT (sequence) DO UPDATE SET state = EXCLUDED.state, created_at = now()", [sequence, serialized]);
     if (sequence % STATE_SNAPSHOT_PRUNE_INTERVAL === 0) {
@@ -459,7 +530,10 @@ export function deserializeState(raw: Record<string, unknown>, options: { recove
   state.events = map("events", (item) => String((item as { id: string }).id));
   state.artifacts = map("artifacts", (item) => String((item as { id: string }).id));
   state.inputRequests = map("inputRequests", (item) => String((item as { id: string }).id));
-  state.idempotency = map("idempotency", (item) => String((item as { id: string }).id));
+  state.idempotency = map("idempotency", (item) => {
+    const record = item as IdempotencyRecord;
+    return idempotencyKey(record.project, record.scope, record.key);
+  });
   state.audits = map("audits", (item) => String((item as { id: string }).id));
   state.eventSequence = Number(raw.eventSequence ?? 0);
   state.queueSequence = Number(raw.queueSequence ?? 0);

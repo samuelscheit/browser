@@ -44,7 +44,7 @@ import { CapabilitySigner } from "./capability";
 import { type Clock, SystemClock } from "./clock";
 import { EncryptedInputRouter, type EphemeralInputEnvelope, type EphemeralInputVault } from "./ephemeral";
 import { assertDurablePayload, safeFailureReason, scalarMetadata } from "./security";
-import { type FabricState, type FabricStore, InMemoryFabricStore } from "./store";
+import { type FabricState, type FabricStore, InMemoryFabricStore, idempotencyKey } from "./store";
 import { SchedulerKernel } from "./scheduler-kernel";
 import { recoverSchedulerState } from "./scheduler-recovery";
 import { events, getJob, getSession, watchEvents } from "./scheduler-events";
@@ -198,10 +198,6 @@ function assertProfileUpdateAvatar(state: FabricState, input: JobCreateInput, cl
   if (!artifact.mimeType.toLowerCase().startsWith("image/") || artifact.sizeBytes < 1 || artifact.sizeBytes > 10 * 1024 * 1024) {
     throw new FabricError("validation_failed", "profile update avatar artifact must be a non-empty image no larger than 10 MiB", 400);
   }
-}
-
-function idempotencyKey(project: ProjectId, scope: "browser_session" | "job", key: string): string {
-  return `${project}:${scope}:${key}`;
 }
 
 const safeArtifactObjectKey = /^[a-z0-9][a-z0-9/_\-.]{0,511}$/;
