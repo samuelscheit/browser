@@ -23,6 +23,8 @@ jobs:
         with: { bun-version: 1.4.0 }
       - run: bun install --frozen-lockfile
       - run: bun run check
+        env:
+          FABRIC_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       - run: RUN_BROWSER_INTEGRATION=1 bun test tests/raw-cdp.integration.test.ts --timeout 120000
       - run: bun scripts/validate-deployment.ts
       - run: ./scripts/validate-sql.sh browser_fabric_ci

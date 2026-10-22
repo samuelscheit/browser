@@ -8,6 +8,14 @@ class RecordingSqlClient implements SqlClient {
   #snapshots: Array<{ sequence: number; state: string }> = [];
 
   public async query<T = unknown>(sql: string, parameters: readonly unknown[] = []): Promise<{ rows: T[] }> {
+    // PostgreSQL parses a `$n::jsonb` parameter as JSON text and fails the transaction with 22P02
+    // otherwise; reject the same mis-bound placeholders here so every projection test guards them.
+    for (const [, index] of sql.matchAll(/\$(\d+)::jsonb/g)) {
+      const value = parameters[Number(index) - 1];
+      if (value === null) continue;
+      if (typeof value !== "string") throw new Error(`$${index}::jsonb must be bound to JSON text, got ${typeof value}`);
+      try { JSON.parse(value); } catch { throw new Error(`invalid input syntax for type json: $${index}=${JSON.stringify(value)}`); }
+    }
     this.statements.push({ sql, parameters });
     if (sql.startsWith("SELECT sequence, state FROM fabric_state_snapshots")) {
       const latest = this.#snapshots.at(-1);
@@ -71,6 +79,22 @@ describe("PostgreSQL state projection", () => {
     expect(written[0]?.[0]).toBe("browser-session_b");
     expect(written[0]?.[10]).toBe("released");
     expect(client.take("INSERT INTO fabric_state_snapshots")).toHaveLength(1);
+  });
+
+  test("binds text failure reasons as text and JSON results as JSON", async () => {
+    const client = new RecordingSqlClient();
+    const store = new PostgresFabricStore(client, "-- schema");
+    const job = (id: string, fields: Record<string, unknown>) => record<Job>({ id, status: "failed", metadata: { label: "browser" }, operation: { operation: "fetch_news" }, ...fields });
+    await store.transact((draft) => {
+      draft.jobs.set("job_failed", job("job_failed", { failureReason: "browser lease heartbeat expired" }));
+      draft.jobs.set("job_done", job("job_done", { status: "succeeded", result: { title: "browser", nested: { ok: true, missing: null } } }));
+    });
+    const rows = new Map(client.take("INSERT INTO fabric_jobs").map((parameters) => [parameters[0], parameters]));
+    // Column order: ...,lease_id($17),result($18),failure_reason($19),...
+    expect(rows.get("job_failed")?.[17]).toBeNull();
+    expect(rows.get("job_failed")?.[18]).toBe("browser lease heartbeat expired");
+    expect(JSON.parse(String(rows.get("job_done")?.[17]))).toEqual({ title: "browser", nested: { ok: true, missing: null } });
+    expect(rows.get("job_done")?.[18]).toBeNull();
   });
 
   test("appends worker events durably without keeping them in the hot state", async () => {
