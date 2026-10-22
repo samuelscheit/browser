@@ -28,3 +28,8 @@ jobs:
       - run: RUN_BROWSER_INTEGRATION=1 bun test tests/raw-cdp.integration.test.ts --timeout 120000
       - run: bun scripts/validate-deployment.ts
       - run: ./scripts/validate-sql.sh browser_fabric_ci
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
