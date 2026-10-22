@@ -18,6 +18,22 @@ describe("scheduler lifecycle, leases, and recovery", () => {
     expect(snapshot.workers.get(worker.id)?.activeLeases).toBe(1);
   });
 
+  test("rejects historical policies without a sidecar route before creating work", async () => {
+    const { scheduler, profile, store } = await bootstrapTestScheduler();
+    const retiredRef = "egress_retired@1" as never;
+    await store.transact((state) => {
+      const policy = state.egressPolicies.get("egress_direct-egress@1")!;
+      state.egressPolicies.set(retiredRef, { ...policy, ref: retiredRef, family: "retired" as never });
+    });
+    const before = await store.snapshot();
+    await expect(scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "retired-session", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: retiredRef, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL)).rejects.toThrow(/no Fabric sidecar listener/);
+    await expect(scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "retired-job", recipeRef: "recipe_news-browser-fetch@1" as never, operation: { operation: "fetch_news", url: "https://news.example" }, egressPolicyRef: retiredRef, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL)).rejects.toThrow(/no Fabric sidecar listener/);
+    const after = await store.snapshot();
+    expect(after.sessions.size).toBe(before.sessions.size);
+    expect(after.jobs.size).toBe(before.jobs.size);
+    expect(after.egressPolicies.has(retiredRef)).toBe(true);
+  });
+
   test("idempotency returns the original resource and rejects request mutation", async () => {
     const { scheduler, profile } = await bootstrapTestScheduler();
     const input = { project: TEST_PROJECT, idempotencyKey: "same", runtime: "rebrowser-puppeteer" as const, browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: profile.ref, leaseMode: "writer" as const, egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 };

@@ -1,5 +1,5 @@
 import { createId, FabricError, isMediaRuntime, type Artifact, type ArtifactPolicy, type AuditEvent, type BrowserLease, type BrowserRecipe, type BrowserSession, type BrowserSessionCreateInput, type BrowserSessionId, type BrowserSessionResponse, type EgressPolicy, type EphemeralInputRequest, type FabricEvent, type Job, type JobId, type JobResponse, type JobStatus, type LeaseMode, type Principal, type Profile, type ProfileClone, type ProjectId, type Worker, type WorkerAssignment } from "@browser-fabric/contracts";
-import { assertRuntimePolicyCompatibility } from "@browser-fabric/policy";
+import { assertRuntimePolicyCompatibility, egressSidecarListenerForPolicy } from "@browser-fabric/policy";
 import { RecipeRegistry, type RecipeDefinition } from "@browser-fabric/recipes";
 import { CapabilitySigner } from "./capability";
 import type { Clock } from "./clock";
@@ -71,6 +71,7 @@ export class SchedulerKernel {
     if (!egress) throw new FabricError("not_found", `egress policy ${egressPolicyRef} was not found`, 404);
     try {
       assertRuntimePolicyCompatibility(recipe.runtime, egress);
+      egressSidecarListenerForPolicy(egress);
     } catch (error) {
       throw new FabricError("validation_failed", error instanceof Error ? error.message : "runtime and egress policy are incompatible", 400);
     }
