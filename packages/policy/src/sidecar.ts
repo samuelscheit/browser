@@ -9,11 +9,9 @@ import { FabricError } from "@browser-fabric/contracts";
 export const egressSidecarListeners = {
   direct: { id: "direct", port: 11_000 },
   signup: { id: "signup-proxy", port: 11_001 },
-  reporting: { id: "reporting-residential", port: 11_002 },
   media: { id: "media-proxy", port: 11_003 },
   social: { id: "social-fallback", port: 11_004 },
   tor: { id: "tor", port: 11_005 },
-  reportingSolver: { id: "reporting-solver", port: 11_006 },
   mediaDirect: { id: "media-direct", port: 11_007 },
 } as const;
 
@@ -40,7 +38,6 @@ export function egressSidecarListenerForPolicy(policy: EgressPolicy, trafficClas
   if (policy.family === "signup-direct-assets") {
     return effectiveClass === "static_asset" || effectiveClass === "direct_exception" ? "direct" : "signup";
   }
-  if (policy.family === "reporting-residential") return effectiveClass === "captcha_solver" ? "reportingSolver" : "reporting";
   if (policy.family === "media-proxy-affinity") return effectiveClass === "direct_exception" ? "mediaDirect" : "media";
   if (policy.family === "social-proxy-fallback") return "social";
   if (policy.family === "tor-egress") return "tor";

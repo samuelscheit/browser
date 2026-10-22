@@ -94,19 +94,6 @@ export const builtInEgressPolicies: readonly EgressPolicy[] = [
     { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: true, allowDirectMediaRelay: false }
   ),
   makePolicy(
-    "reporting-residential",
-    {
-      document: proxy("reporting-residential", "https", true),
-      api: proxy("reporting-residential", "https", true),
-      websocket: proxy("reporting-residential", "https", true),
-      static_asset: proxy("reporting-residential", "https", true),
-      browser_download: proxy("reporting-residential", "https", true),
-      provider_handshake: proxy("reporting-residential", "https", true),
-      captcha_solver: proxy("reporting-solver", "https", true)
-    },
-    { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: false }
-  ),
-  makePolicy(
     "media-proxy-affinity",
     {
       document: proxy("media", "socks5h", true),

@@ -143,7 +143,7 @@ describe("Fabric provisioning manifests", () => {
       browserRecipeRef: worker.capabilities.recipeRefs[0]!,
       profileRef: profile.ref,
       leaseMode: "writer",
-      egressPolicyRef: "egress_reporting-residential@1" as never,
+      egressPolicyRef: "egress_direct-egress@1" as never,
       artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
       ttlSeconds: 600,
     }, manifest.principals[0]!);
@@ -181,7 +181,7 @@ describe("Fabric provisioning manifests", () => {
       browserRecipeRef: worker.capabilities.recipeRefs[0]!,
       profileRef: profile.ref,
       leaseMode: "writer",
-      egressPolicyRef: "egress_reporting-residential@1" as never,
+      egressPolicyRef: "egress_direct-egress@1" as never,
       artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
       ttlSeconds: 600,
     }, manifest.principals[0]!);

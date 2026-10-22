@@ -347,7 +347,7 @@ test("a restarted manager also fails an untracked generic CDP lease", async () =
     browserRecipeRef: "recipe_rebrowser-reporting@1" as never,
     profileRef: context.profile.ref,
     leaseMode: "writer",
-    egressPolicyRef: "egress_reporting-residential@1" as never,
+    egressPolicyRef: "egress_direct-egress@1" as never,
     artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
     ttlSeconds: 600,
   }, TEST_PRINCIPAL);
@@ -375,7 +375,7 @@ test("a restarted manager releases a claimed generic lease that never reached br
     browserRecipeRef: "recipe_rebrowser-reporting@1" as never,
     profileRef: context.profile.ref,
     leaseMode: "writer",
-    egressPolicyRef: "egress_reporting-residential@1" as never,
+    egressPolicyRef: "egress_direct-egress@1" as never,
     artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
     ttlSeconds: 600,
   }, TEST_PRINCIPAL);

@@ -91,7 +91,7 @@ describe("real browser-level CDP compatibility", () => {
     await scheduler.registerWorker(worker);
     const profile = makeProfile(worker);
     await scheduler.createProfile(profile);
-    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway-integration", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 });
+    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway-integration", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 });
     const supervisor = new ChromiumProcessSupervisor({ executablePath, startupTimeoutMs: 20_000, cwd: "/tmp" });
     const spec: BrowserContainerSpec = {
       workerId: worker.id,
@@ -174,7 +174,7 @@ describe("real browser-level CDP compatibility", () => {
       browserRecipeRef: "recipe_interactive-chromium@1" as never,
       profileRef: profile.ref,
       leaseMode: "interactive",
-      egressPolicyRef: "egress_reporting-residential@1" as never,
+      egressPolicyRef: "egress_direct-egress@1" as never,
       artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
       ttlSeconds: 600,
     }, TEST_PRINCIPAL);
@@ -227,7 +227,7 @@ describe("real browser-level CDP compatibility", () => {
         config: parseEgressConfig({
           version: 1,
           listeners: [{ id: "reporting", port: egressListenerPort, bindHost: "127.0.0.1", mode: "proxy", upstreamUrls: [`http://127.0.0.1:${upstreamPort}`] }],
-          policies: [{ ref: "egress_reporting-residential@1", defaultListenerId: "reporting" }],
+          policies: [{ ref: "egress_direct-egress@1", defaultListenerId: "reporting" }],
         }),
         pacPort: 0,
         pacHost: "127.0.0.1",

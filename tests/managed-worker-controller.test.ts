@@ -32,7 +32,7 @@ test("managed controller revokes a ready CDP capability and releases the lease w
     browserRecipeRef: "recipe_rebrowser-reporting@1" as never,
     profileRef: controllerProfile.ref,
     leaseMode: "writer",
-    egressPolicyRef: "egress_reporting-residential@1" as never,
+    egressPolicyRef: "egress_direct-egress@1" as never,
     artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
     ttlSeconds: 600,
   }, TEST_PRINCIPAL);

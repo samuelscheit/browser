@@ -85,13 +85,13 @@ describe("Fabric egress sidecar", () => {
     const config = parseEgressConfig(await Bun.file(new URL("../deploy/compose/egress-sidecar.json", import.meta.url)).json());
     const listenerIds = new Set(config.listeners.map((listener) => listener.id));
     for (const policy of builtInEgressPolicies) {
-      const url = new URL(internalEgressProxyUrl(policy, { trafficClass: policy.family === "reporting-residential" ? "captcha_solver" : undefined }));
+      const url = new URL(internalEgressProxyUrl(policy));
       const listener = Object.values(egressSidecarListeners).find((candidate) => candidate.port === Number(url.port));
       expect(listener).toBeDefined();
       expect(listenerIds.has(listener!.id)).toBe(true);
     }
-    const reporting = config.policies.find((policy) => policy.ref === "egress_reporting-residential@1")!;
-    expect(reporting.rules?.[0]?.listenerId).toBe("reporting-solver");
+    expect(config.policies.some((policy) => policy.ref.includes("reporting"))).toBe(false);
+    expect(config.listeners.some((listener) => listener.id.includes("reporting"))).toBe(false);
     const media = config.policies.find((policy) => policy.ref === "egress_media-proxy-affinity@1")!;
     expect(media.rules?.[0]?.listenerId).toBe("media-direct");
     expect(config.listeners.find((listener) => listener.id === "media-direct")?.allowedHostnameSuffixes).toEqual(["cdn-a.example", "cdn-b.example"]);

@@ -22,7 +22,7 @@ describe("artifacts and worker isolation", () => {
     const context = await bootstrapTestScheduler();
     const objectStore = new MemoryObjectStore();
     const collector = new ArtifactCollector({ scheduler: context.scheduler, objectStore });
-    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "artifact-session", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "artifact-session", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const artifact = await collector.capture({ project: TEST_PROJECT, sessionId: session.id as never, kind: "screenshot", contentType: "image/png", bytes: new Uint8Array([1, 2, 3]), policy: { ref: "artifact-policy_standard-30-days@1" as never, retentionDays: 30, allowedKinds: ["screenshot"], createdAt: new Date().toISOString() } });
     expect(artifact.objectKey).toContain("projects/project_test/artifacts");
     expect((await objectStore.head(artifact.objectKey)).sha256).toBe(artifact.sha256);
@@ -39,7 +39,7 @@ describe("artifacts and worker isolation", () => {
       // attempt to extend 30-day retention.
       clock: () => new Date(context.clock.now().getTime() + 2 * 60_000),
     });
-    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "artifact-clock-skew", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "artifact-clock-skew", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const artifact = await collector.capture({
       project: TEST_PROJECT,
       sessionId: session.id,
@@ -54,10 +54,10 @@ describe("artifacts and worker isolation", () => {
 
   test("runtime specs cannot mount secrets or host resources", async () => {
     const context = await bootstrapTestScheduler();
-    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "runtime", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_reporting-residential@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "runtime", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const [assignment] = await context.scheduler.dispatch();
     const runtime = defaultRuntimeRegistry().get("rebrowser-puppeteer");
-    const spec = runtime.buildSpec(assignment!, context.worker, builtInEgressPolicies.find((policy) => policy.family === "reporting-residential")!);
+    const spec = runtime.buildSpec(assignment!, context.worker, builtInEgressPolicies.find((policy) => policy.family === "direct-egress")!);
     expect(spec.security).toEqual({ dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false });
     expect(spec.volumes[0]?.target).toBe("/fabric/profile");
     expect(spec.command.some((arg) => arg.includes("remote-debugging-port"))).toBe(true);

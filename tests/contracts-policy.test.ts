@@ -14,7 +14,7 @@ describe("contracts and immutable policies", () => {
       browserRecipeRef: "recipe_rebrowser-reporting@1",
       profileRef: "profile_reporting",
       leaseMode: "writer",
-      egressPolicyRef: "egress_reporting-residential@1",
+      egressPolicyRef: "egress_direct-egress@1",
       artifactPolicyRef: "artifact-policy_standard-30-days@1"
     });
     expect(request.ttlSeconds).toBe(1800);
@@ -24,7 +24,7 @@ describe("contracts and immutable policies", () => {
 
   test("accepts every required egress family and preserves direct-asset no-retry", () => {
     expect(builtInEgressPolicies.map((policy) => policy.family)).toEqual([
-      "signup-direct-assets", "reporting-residential", "media-proxy-affinity", "social-proxy-fallback", "tor-egress", "direct-egress"
+      "signup-direct-assets", "media-proxy-affinity", "social-proxy-fallback", "tor-egress", "direct-egress"
     ]);
     const signup = builtInEgressPolicies.find((policy) => policy.family === "signup-direct-assets")!;
     expect(decideEgress(signup, { trafficClass: "static_asset", hostname: "cdn.example", isRetry: false }).route.kind).toBe("direct");
