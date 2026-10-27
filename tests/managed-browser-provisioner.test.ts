@@ -111,6 +111,44 @@ describe("managed browser guardians", () => {
     expect(command.calls.some((args) => args[0] === "container" && args[1] === "rm" && args.includes(started.processId))).toBe(true);
   });
 
+  test("re-owns a cloned profile for the unprivileged browser after copying from a root-owned source", async () => {
+    const { worker, assignment } = await claimedSocialAssignment();
+    const command = new RecordingDockerCommand();
+    const originalRun = command.run.bind(command);
+    command.run = async (args) => {
+      if (args[0] === "volume" && args[1] === "inspect") {
+        command.calls.push([...args]);
+        return { exitCode: 0, stdout: "true|true\n", stderr: "" };
+      }
+      // Volume helpers are polled until they report a clean exit.
+      if (args[0] === "container" && args[1] === "inspect" && args.includes("{{.State.Status}}|{{.State.ExitCode}}")) {
+        command.calls.push([...args]);
+        return { exitCode: 0, stdout: "exited|0\n", stderr: "" };
+      }
+      return originalRun(args);
+    };
+    const executor = new DockerContainerExecutor({
+      command,
+      fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" })),
+      turnstileGuardianFactory: () => new FakeGuardian(),
+      requireImmutableImages: false,
+    });
+    const cloned = {
+      ...assignment,
+      clone: { id: "clone_test", sourceProfileRef: assignment.profile!.ref, workerId: worker.id, volumeName: "profile-clone-test", createdForLease: assignment.lease!.id, status: "creating", createdAt: new Date().toISOString() },
+    } as typeof assignment;
+
+    await executor.start(buildBrowserProcessSpec(worker, cloned));
+
+    const helperScripts = command.calls
+      .filter((args) => args[0] === "container" && args[1] === "create" && args.includes("--cap-add"))
+      .map((args) => ({ kind: args.find((arg) => arg.startsWith("com.browser-fabric.kind="))!, script: args.at(-1)! }));
+    const copy = helperScripts.find(({ kind }) => kind.endsWith("profile-clone"))!;
+    // cp -a preserves the source's (root) ownership, so the copy must end by re-owning to the browser user.
+    expect(copy.script).toMatch(/cp -a \/source\/\. \/destination\/; chown -R 10001:10001 \/destination$/);
+    expect(helperScripts.find(({ kind }) => kind.endsWith("profile-initialize"))!.script).toContain("chown -R 10001:10001 /volume");
+  });
+
   test("removes a newly created container when its mandatory guardian cannot start", async () => {
     const { worker, assignment } = await claimedSocialAssignment();
     const command = new RecordingDockerCommand();

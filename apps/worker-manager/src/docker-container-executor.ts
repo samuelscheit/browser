@@ -88,6 +88,8 @@ const localFabricImage = /^browser-fabric-[a-z][a-z0-9-]{0,62}:local$/;
 const immutableImage = /^.+@sha256:[a-f0-9]{64}$/i;
 const forbiddenEnv = /(PASSWORD|SECRET|TOKEN|COOKIE|CREDENTIAL|AUTHORIZATION|OTP|MS_TOKEN)/i;
 const forbiddenArg = /(^|\s)(--no-sandbox|--disable-web-security)(\s|$)/;
+/** Unprivileged uid:gid every Fabric browser image runs as; profile volumes must be owned by it. */
+const browserVolumeOwner = "10001:10001";
 const chromiumSeccompProfile = "/etc/compose/browser-fabric-seccomp/chromium-userns.json";
 
 function containerName(prefix: string, id: string): string {
@@ -544,7 +546,7 @@ export class DockerContainerExecutor implements Executor {
       kind: "profile-initialize",
       name: containerName("fabric-volume-init", `${volume}-${crypto.randomUUID().slice(0, 8)}`),
       mounts: [volumeMount(volume, "/volume")],
-      command: ["/bin/sh", "-ceu", "mkdir -p /volume; chown -R 10001:10001 /volume"],
+      command: ["/bin/sh", "-ceu", `mkdir -p /volume; chown -R ${browserVolumeOwner} /volume`],
       allowChown: true,
     });
     await this.#runVolumeHelper(helper, this.#options.volumeCopyTimeoutMs ?? 60_000);
@@ -558,7 +560,10 @@ export class DockerContainerExecutor implements Executor {
         volumeMount(source, "/source", true),
         volumeMount(destination, "/destination"),
       ],
-      command: ["/bin/sh", "-ceu", "rm -rf /destination/* /destination/.[!.]* /destination/..?*; cp -a /source/. /destination/"],
+      // `cp -a` preserves the source's ownership (and overwrites the directory's), so a
+      // root-owned source profile would leave the unprivileged browser unable to write
+      // its clone. Re-own the copy so clones work however the source volume was created.
+      command: ["/bin/sh", "-ceu", `rm -rf /destination/* /destination/.[!.]* /destination/..?*; cp -a /source/. /destination/; chown -R ${browserVolumeOwner} /destination`],
       allowChown: true,
     });
     await this.#runVolumeHelper(helper, this.#options.volumeCopyTimeoutMs ?? 60_000);
