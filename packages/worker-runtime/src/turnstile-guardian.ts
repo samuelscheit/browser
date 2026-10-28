@@ -28,6 +28,7 @@ import {
   attributeValue,
   boxFromContentQuad,
   childFrames,
+  documentIframes,
   distinctBoxes,
   isTurnstileFrameUrl,
   isUsableBox,
@@ -67,6 +68,7 @@ export {
 export { resolveTurnstileGuardianWebSocketEndpoint } from "./turnstile-guardian-cdp";
 
 const MAX_TRACKED_CHALLENGES_PER_PAGE = 64;
+const ISOLATED_WORLD_NAME = "fabric-turnstile-guardian";
 
 type ActiveTurnstileChallenge = {
   startedAt: number;
@@ -83,6 +85,13 @@ type AttachedPage = {
   url: string;
   /** Child-frame navigation must not reset the top-level document budget. */
   mainFrameId?: string;
+  /**
+   * Guardian-owned isolated world of the current top-level document. Cloudflare's
+   * challenge watches main-world DOM queries; a widget probed from the main world
+   * never leaves its "Checking your browser" stage, so page-side guardian code
+   * runs only here.
+   */
+  isolatedContextId?: number;
   /** Bounded state is per visible widget, rather than per whole page. */
   challenges: Map<string, ActiveTurnstileChallenge>;
 };
@@ -405,7 +414,23 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
   #resetPageDocument(page: AttachedPage, url: string, mainFrameId?: string): void {
     page.url = url;
     if (mainFrameId) page.mainFrameId = mainFrameId;
+    page.isolatedContextId = undefined;
     page.challenges.clear();
+  }
+
+  /** The guardian's isolated world in the page's current top-level document. */
+  async #isolatedContext(page: AttachedPage): Promise<number | undefined> {
+    if (!this.#connection) return undefined;
+    if (page.isolatedContextId !== undefined) return page.isolatedContextId;
+    const tree = await this.#connection.send("Page.getFrameTree", {}, page.sessionId);
+    const frameId = tree?.frameTree?.frame?.id;
+    if (typeof frameId !== "string") return undefined;
+    page.mainFrameId = frameId;
+    const world = await this.#connection.send("Page.createIsolatedWorld", { frameId, worldName: ISOLATED_WORLD_NAME }, page.sessionId);
+    const contextId = world?.executionContextId;
+    if (typeof contextId !== "number") return undefined;
+    page.isolatedContextId = contextId;
+    return contextId;
   }
 
   async #pollAll(): Promise<void> {
@@ -428,11 +453,18 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
     this.#checks += 1;
     let observation: TurnstilePageObservation;
     try {
+      const contextId = await this.#isolatedContext(page);
+      if (contextId === undefined) return;
       const result = await this.#connection.send("Runtime.evaluate", {
         expression: TURNSTILE_OBSERVATION_SCRIPT,
+        contextId,
         returnByValue: true,
         awaitPromise: false,
-      }, page.sessionId);
+      }, page.sessionId).catch((error: unknown) => {
+        // A navigation destroys the isolated world; recreate it next poll.
+        page.isolatedContextId = undefined;
+        throw error;
+      });
       const normalized = normalizeObservation(result?.result?.value);
       if (!normalized) return;
       // Page JavaScript supplies signals only. Never trust a page-returned
@@ -543,7 +575,7 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
         const owner = await this.#connection.send("DOM.getFrameOwner", { frameId: frame.id }, page.sessionId).catch(() => undefined);
         if (typeof owner?.backendNodeId !== "number") continue;
         const model = await this.#connection.send("DOM.getBoxModel", { backendNodeId: owner.backendNodeId }, page.sessionId).catch(() => undefined);
-        const visible = await this.#isVisibleNode(page.sessionId, { backendNodeId: owner.backendNodeId });
+        const visible = await this.#isVisibleNode(page, owner.backendNodeId);
         // Older Chromium/CDP wrappers may not resolve a cross-process owner.
         // A non-empty CDP box is then the only available visibility proof.
         if (visible === false) continue;
@@ -567,45 +599,36 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
     return distinctBoxes(boxes);
   }
 
-  /** Covers normal same-process iframes before they appear in Page.getFrameTree. */
+  /**
+   * Covers iframes the frame tree does not list. Cloudflare's managed challenge
+   * mounts its out-of-process Turnstile iframe inside a closed shadow root,
+   * which only a shadow-piercing document walk reaches.
+   */
   async #turnstileDomFrameBoxes(page: AttachedPage): Promise<TurnstileChallengeBox[]> {
     if (!this.#connection) return [];
-    const documentResult = await this.#connection.send("DOM.getDocument", { depth: 1, pierce: false }, page.sessionId);
-    const rootNodeId = documentResult?.root?.nodeId;
-    if (typeof rootNodeId !== "number") return [];
-    const query = await this.#connection.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: "iframe" }, page.sessionId);
-    const nodeIds = Array.isArray(query?.nodeIds)
-      ? query.nodeIds.filter((nodeId: unknown): nodeId is number => Number.isInteger(nodeId)).slice(0, MAX_TRACKED_CHALLENGES_PER_PAGE)
-      : [];
+    const documentResult = await this.#connection.send("DOM.getDocument", { depth: -1, pierce: true }, page.sessionId);
+    const iframes = documentIframes(documentResult?.root).slice(0, MAX_TRACKED_CHALLENGES_PER_PAGE);
     const boxes: TurnstileChallengeBox[] = [];
-    for (const nodeId of nodeIds) {
-      const described = await this.#connection.send("DOM.describeNode", { nodeId, depth: 0 }, page.sessionId).catch(() => undefined);
-      const node = described?.node as { attributes?: unknown; backendNodeId?: unknown } | undefined;
-      const frameUrl = resolveTurnstileFrameUrl(attributeValue(node?.attributes, "src"), page.url);
+    for (const node of iframes) {
+      const frameUrl = resolveTurnstileFrameUrl(attributeValue(node.attributes, "src"), page.url);
       if (!frameUrl) continue;
-      const model = await this.#connection.send("DOM.getBoxModel", { nodeId }, page.sessionId).catch(() => undefined);
-      const visible = await this.#isVisibleNode(page.sessionId, {
-        nodeId,
-        ...(typeof node?.backendNodeId === "number" ? { backendNodeId: node.backendNodeId } : {}),
-      });
+      const model = await this.#connection.send("DOM.getBoxModel", { backendNodeId: node.backendNodeId }, page.sessionId).catch(() => undefined);
+      const visible = await this.#isVisibleNode(page, node.backendNodeId);
       if (visible === false) continue;
-      const box = boxFromContentQuad(model?.model?.content ?? model?.model?.border, frameUrl, `dom:${nodeId}`);
+      const box = boxFromContentQuad(model?.model?.content ?? model?.model?.border, frameUrl, `dom:${node.backendNodeId}`);
       if (box) boxes.push(box);
     }
     return boxes;
   }
 
-  async #isVisibleNode(sessionId: string, node: { nodeId?: number; backendNodeId?: number }): Promise<boolean | undefined> {
+  async #isVisibleNode(page: AttachedPage, backendNodeId: number): Promise<boolean | undefined> {
     if (!this.#connection) return false;
+    const sessionId = page.sessionId;
     let objectId: string | undefined;
     try {
-      const resolveParams = node.backendNodeId !== undefined
-        ? { backendNodeId: node.backendNodeId }
-        : node.nodeId !== undefined
-          ? { nodeId: node.nodeId }
-          : {};
-      if (Object.keys(resolveParams).length === 0) return undefined;
-      const resolved = await this.#connection.send("DOM.resolveNode", resolveParams, sessionId);
+      const executionContextId = await this.#isolatedContext(page);
+      if (executionContextId === undefined) return undefined;
+      const resolved = await this.#connection.send("DOM.resolveNode", { backendNodeId, executionContextId }, sessionId);
       objectId = typeof resolved?.object?.objectId === "string" ? resolved.object.objectId : undefined;
       if (!objectId) return undefined;
       const result = await this.#connection.send("Runtime.callFunctionOn", {

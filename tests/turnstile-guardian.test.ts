@@ -14,6 +14,7 @@ import {
 import puppeteer, { type Browser as PuppeteerBrowser } from "puppeteer-core";
 
 type Listener = { callback: (event: any) => void; once: boolean };
+const ISOLATED_CONTEXT_ID = 7;
 type Command = { id: number; method: string; params?: Record<string, unknown>; sessionId?: string };
 
 const challengeObservation = (overrides: Partial<TurnstilePageObservation> = {}): TurnstilePageObservation => ({
@@ -36,10 +37,18 @@ class FakeCdpTransport implements CdpTransport {
   readonly commands: Command[] = [];
   readonly #observation: TurnstilePageObservation;
   readonly #frameUrls: string[];
+  readonly #documentChildren: unknown[];
 
-  public constructor(options: { observation?: TurnstilePageObservation; frameUrl?: string; frameUrls?: readonly string[] } = {}) {
+  public constructor(options: {
+    observation?: TurnstilePageObservation;
+    frameUrl?: string;
+    frameUrls?: readonly string[];
+    /** Pierced DOM children of the document root, for iframes absent from the frame tree. */
+    documentChildren?: unknown[];
+  } = {}) {
     this.#observation = options.observation ?? challengeObservation();
     this.#frameUrls = [...(options.frameUrls ?? (options.frameUrl ? [options.frameUrl] : ["https://challenges.cloudflare.com/turnstile/v0/abc"]))];
+    this.#documentChildren = options.documentChildren ?? [];
   }
 
   public get readyState(): number { return this.#closed ? 3 : 1; }
@@ -82,8 +91,10 @@ class FakeCdpTransport implements CdpTransport {
         return { targetInfos: [{ targetId: "page-1", type: "page", url: this.#observation.url }] };
       case "Target.attachToTarget":
         return { sessionId: "page-session-1" };
+      case "Page.createIsolatedWorld":
+        return { executionContextId: ISOLATED_CONTEXT_ID };
       case "Runtime.evaluate":
-        return command.params?.expression === TURNSTILE_OBSERVATION_SCRIPT
+        return command.params?.expression === TURNSTILE_OBSERVATION_SCRIPT && command.params?.contextId === ISOLATED_CONTEXT_ID
           ? { result: { type: "object", value: this.#observation } }
           : { result: { type: "undefined" } };
       case "Page.getFrameTree":
@@ -93,6 +104,8 @@ class FakeCdpTransport implements CdpTransport {
             childFrames: this.#frameUrls.map((url, index) => ({ frame: { id: `turnstile-frame-${index + 1}`, url } })),
           },
         };
+      case "DOM.getDocument":
+        return { root: { nodeName: "#document", backendNodeId: 1, children: this.#documentChildren } };
       case "DOM.getFrameOwner":
         return { backendNodeId: 73 + Math.max(0, Number(String(command.params?.frameId ?? "").split("-").pop()) - 1) };
       case "DOM.getBoxModel":
@@ -201,6 +214,84 @@ describe("Fabric Turnstile guardian", () => {
 
     await guardian.stop();
     expect(transport.readyState).toBe(3);
+  });
+
+  test("probes the page only from its own isolated world, never the main world Cloudflare watches", async () => {
+    const transport = new FakeCdpTransport();
+    const guardian = new TurnstileGuardian({
+      endpoint: "ws://browser.test/devtools/browser/isolated-world",
+      transportFactory: async () => transport,
+      maxClickAttempts: 1,
+      pollIntervalMs: 30_000,
+      logger: () => undefined,
+    });
+
+    await guardian.start();
+
+    const worlds = transport.commands.filter((command) => command.method === "Page.createIsolatedWorld");
+    expect(worlds).toHaveLength(1);
+    expect(worlds[0]?.params).toMatchObject({ frameId: "top", worldName: "fabric-turnstile-guardian" });
+    const observations = transport.commands.filter((command) => command.method === "Runtime.evaluate" && command.params?.expression === TURNSTILE_OBSERVATION_SCRIPT);
+    expect(observations.length).toBeGreaterThan(0);
+    expect(observations.every((command) => command.params?.contextId === ISOLATED_CONTEXT_ID)).toBe(true);
+    const resolutions = transport.commands.filter((command) => command.method === "DOM.resolveNode");
+    expect(resolutions.length).toBeGreaterThan(0);
+    expect(resolutions.every((command) => command.params?.executionContextId === ISOLATED_CONTEXT_ID)).toBe(true);
+    expect(guardian.snapshot.clickAttempts).toBe(1);
+    await guardian.stop();
+  });
+
+  test("finds a Turnstile iframe absent from the frame tree inside a closed shadow root", async () => {
+    // Cloudflare's managed challenge page: the frame tree lists no child frame,
+    // and the widget iframe sits in a closed shadow root of the challenge host.
+    const transport = new FakeCdpTransport({
+      frameUrls: [],
+      documentChildren: [{
+        nodeName: "HTML",
+        backendNodeId: 2,
+        children: [{
+          nodeName: "DIV",
+          backendNodeId: 3,
+          shadowRoots: [{
+            nodeName: "#document-fragment",
+            backendNodeId: 4,
+            children: [{ nodeName: "IFRAME", backendNodeId: 73, attributes: ["src", "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/x/0xAA/light/fbE/new/normal"] }],
+          }],
+        }, { nodeName: "IFRAME", backendNodeId: 74, attributes: ["src", "https://ads.example/frame"] }],
+      }],
+    });
+    const guardian = new TurnstileGuardian({
+      endpoint: "ws://browser.test/devtools/browser/closed-shadow-root",
+      transportFactory: async () => transport,
+      maxClickAttempts: 1,
+      pollIntervalMs: 30_000,
+      logger: () => undefined,
+    });
+
+    await guardian.start();
+
+    expect(transport.commands.find((command) => command.method === "DOM.getDocument")?.params).toMatchObject({ depth: -1, pierce: true });
+    expect(transport.commands.filter((command) => command.method === "DOM.getBoxModel").map((command) => command.params?.backendNodeId)).toEqual([73]);
+    expect(buttonEvents(transport)).toHaveLength(2);
+    expect(guardian.snapshot.clickAttempts).toBe(1);
+    await guardian.stop();
+  });
+
+  test("creates a fresh isolated world after the top-level document navigates", async () => {
+    const transport = new FakeCdpTransport();
+    const guardian = new TurnstileGuardian({
+      endpoint: "ws://browser.test/devtools/browser/isolated-world-navigation",
+      transportFactory: async () => transport,
+      pollIntervalMs: 250,
+      logger: () => undefined,
+    });
+
+    await guardian.start();
+    transport.emitEvent("Page.frameNavigated", { frame: { id: "top", url: "https://example.test/next" } }, "page-session-1");
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    expect(transport.commands.filter((command) => command.method === "Page.createIsolatedWorld")).toHaveLength(2);
+    await guardian.stop();
   });
 
   test("tracks multiple visible Turnstile instances independently", async () => {

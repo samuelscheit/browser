@@ -122,6 +122,27 @@ export function childFrames(tree: unknown): CdpFrame[] {
   return result;
 }
 
+type CdpDomNode = { nodeName?: unknown; backendNodeId?: unknown; attributes?: unknown; children?: unknown; shadowRoots?: unknown };
+
+/**
+ * IFRAME elements of one document, including those inside open or closed
+ * shadow roots. Nested frame documents are skipped: their boxes are relative
+ * to that frame, not to the page the guardian clicks.
+ */
+export function documentIframes(root: unknown): Array<{ backendNodeId: number; attributes: unknown }> {
+  const iframes: Array<{ backendNodeId: number; attributes: unknown }> = [];
+  const visit = (candidate: unknown) => {
+    if (!candidate || typeof candidate !== "object") return;
+    const node = candidate as CdpDomNode;
+    if (node.nodeName === "IFRAME" && typeof node.backendNodeId === "number") iframes.push({ backendNodeId: node.backendNodeId, attributes: node.attributes });
+    for (const children of [node.children, node.shadowRoots]) {
+      if (Array.isArray(children)) for (const child of children) visit(child);
+    }
+  };
+  visit(root);
+  return iframes;
+}
+
 export function boxFromContentQuad(value: unknown, frameUrl: string, instanceId?: string): TurnstileChallengeBox | undefined {
   if (!Array.isArray(value) || value.length < 8 || value.some((coordinate) => typeof coordinate !== "number" || !Number.isFinite(coordinate))) return undefined;
   const xs = value.filter((_, index) => index % 2 === 0) as number[];
