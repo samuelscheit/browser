@@ -292,6 +292,8 @@ export interface BrowserSessionCreateInput {
   leaseMode: LeaseMode;
   egressPolicyRef: EgressPolicyRef;
   artifactPolicyRef: ArtifactPolicyRef;
+  /** Maximum simultaneous external CDP clients for this session. Defaults to one. */
+  maxExternalConnections?: 1 | 2;
   metadata?: Record<string, string | number | boolean | null>;
   ttlSeconds: number;
 }
@@ -315,6 +317,7 @@ export interface BrowserSession {
   cdpEndpoint?: string;
   cdpInternalEndpoint?: string;
   cdpCapabilityExpiresAt?: string;
+  maxExternalConnections?: 1 | 2;
   externalConnectionCount: number;
   reconnectGraceUntil?: string;
   expiresAt: string;

@@ -41,6 +41,7 @@ describe("scheduler lifecycle, leases, and recovery", () => {
     const replay = await scheduler.createBrowserSession(input, TEST_PRINCIPAL);
     expect(replay.id).toBe(first.id);
     await expect(scheduler.createBrowserSession({ ...input, ttlSeconds: 601 }, TEST_PRINCIPAL)).rejects.toThrow();
+    await expect(scheduler.createBrowserSession({ ...input, idempotencyKey: "invalid-client-limit", maxExternalConnections: 3 } as never, TEST_PRINCIPAL)).rejects.toThrow(/maxExternalConnections/);
   });
 
   test("clone leases are isolated and destroyed on release", async () => {
@@ -71,6 +72,37 @@ describe("scheduler lifecycle, leases, and recovery", () => {
     expect((await scheduler.getSession(session.id as BrowserSessionId, TEST_PRINCIPAL)).status).toBe("ready");
     // The fake clock used by this context is deterministic and advances through the session TTL in the next test.
     expect(clock.now().toISOString()).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  test("permits a second CDP client only for sessions that explicitly request it", async () => {
+    const { scheduler, profile, store, worker } = await bootstrapTestScheduler();
+    const session = await scheduler.createBrowserSession({
+      project: TEST_PROJECT,
+      idempotencyKey: "two-cdp-clients",
+      runtime: "rebrowser-puppeteer",
+      browserRecipeRef: "recipe_rebrowser-reporting@1" as never,
+      profileRef: profile.ref,
+      leaseMode: "clone",
+      egressPolicyRef: "egress_tor-egress@1" as never,
+      artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
+      maxExternalConnections: 2,
+      ttlSeconds: 600,
+    }, TEST_PRINCIPAL);
+    const [assignment] = await scheduler.dispatch();
+    await scheduler.claimAssignment(worker.id, assignment!.lease!.id, undefined, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
+    await scheduler.markLeaseStarted(assignment!.lease!.id, worker.id, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
+    const internal = (await store.snapshot()).sessions.get(session.id as BrowserSessionId)!;
+    const capability = new URL(internal.cdpEndpoint!).searchParams.get("cap")!;
+
+    await scheduler.registerExternalCdpConnection(session.id as BrowserSessionId, capability);
+    await scheduler.registerExternalCdpConnection(session.id as BrowserSessionId, capability);
+    await expect(scheduler.registerExternalCdpConnection(session.id as BrowserSessionId, capability)).rejects.toThrow(/at most 2/);
+
+    await scheduler.unregisterExternalCdpConnection(session.id as BrowserSessionId);
+    expect((await store.snapshot()).sessions.get(session.id as BrowserSessionId)?.externalConnectionCount).toBe(1);
+    expect((await scheduler.getSession(session.id as BrowserSessionId, TEST_PRINCIPAL)).status).toBe("active");
+    await scheduler.unregisterExternalCdpConnection(session.id as BrowserSessionId);
+    expect((await scheduler.getSession(session.id as BrowserSessionId, TEST_PRINCIPAL)).status).toBe("ready");
   });
 
   test("ephemeral input never enters durable state and is one-shot", async () => {

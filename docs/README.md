@@ -25,6 +25,15 @@ The only deployment knobs are bounded timing values (`FABRIC_TURNSTILE_POLL_INTE
 `FABRIC_TURNSTILE_CHALLENGE_TIMEOUT_MS`, and `FABRIC_TURNSTILE_MAX_CLICK_ATTEMPTS`). There is no
 disable switch: omitting them uses the reviewed defaults (1 second, 12 seconds, and five clicks).
 
+## External CDP client limits
+
+Browser sessions accept one external CDP client by default. A reviewed workload may request
+`maxExternalConnections: 2` when two independent clients must share the same isolated browser—for
+example, a passive network recorder attached before a Companion automation client. The session value
+is persisted and enforced by PostgreSQL; the scheduler also retains a global ceiling of two. Values
+above two are rejected by the public contract, and opting one session into two clients does not widen
+any existing or unrelated session.
+
 ## Local development
 
 ```sh

@@ -103,6 +103,11 @@ export function parseBrowserSessionCreate(value: unknown): BrowserSessionCreateI
     leaseMode: enumValue(input.leaseMode, "leaseMode", leaseModes) as LeaseMode,
     egressPolicyRef: id<EgressPolicyRef>(input.egressPolicyRef, "egressPolicyRef", "egress"),
     artifactPolicyRef: id<ArtifactPolicyRef>(input.artifactPolicyRef, "artifactPolicyRef", "artifact-policy"),
+    maxExternalConnections: input.maxExternalConnections === undefined
+      ? 1
+      : input.maxExternalConnections === 1 || input.maxExternalConnections === 2
+        ? input.maxExternalConnections
+        : (() => { throw new FabricError("validation_failed", "maxExternalConnections must be 1 or 2", 400); })(),
     ...(metadata === undefined ? {} : { metadata }),
     ttlSeconds: input.ttlSeconds === undefined ? 1_800 : positiveInt(input.ttlSeconds, "ttlSeconds", 60, 14_400)
   };

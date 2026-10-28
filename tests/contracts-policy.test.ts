@@ -18,6 +18,9 @@ describe("contracts and immutable policies", () => {
       artifactPolicyRef: "artifact-policy_standard-30-days@1"
     });
     expect(request.ttlSeconds).toBe(1800);
+    expect(request.maxExternalConnections).toBe(1);
+    expect(parseBrowserSessionCreate({ ...request, maxExternalConnections: 2 }).maxExternalConnections).toBe(2);
+    expect(() => parseBrowserSessionCreate({ ...request, maxExternalConnections: 3 })).toThrow(/maxExternalConnections/);
     expect(() => parseBrowserSessionCreate({ ...request, project: "test" })).toThrow(FabricError);
     expect(() => parseJobCreate({ project: "project_test", idempotencyKey: "j", recipeRef: "recipe_social-insights@1", operation: {}, egressPolicyRef: "egress_social-proxy-fallback@1", artifactPolicyRef: "artifact-policy_standard-30-days@1", callback: { url: "http://insecure" } })).toThrow(/HTTPS/);
   });

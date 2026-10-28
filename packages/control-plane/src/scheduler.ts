@@ -318,7 +318,9 @@ export class BrowserScheduler {
     this.#recipes = options.recipes ?? new RecipeRegistry();
     this.#maxActiveBrowserLeases = options.maxActiveBrowserLeases ?? 4;
     this.#reconnectGraceSeconds = options.reconnectGraceSeconds ?? 60;
-    this.#maxExternalCdpConnections = options.maxExternalCdpConnections ?? 1;
+    // Per-session limits remain one by default. This global ceiling permits the
+    // explicitly requested recorder + automation pair without widening legacy sessions.
+    this.#maxExternalCdpConnections = options.maxExternalCdpConnections ?? 2;
     this.#assignmentClaimTimeoutSeconds = options.assignmentClaimTimeoutSeconds ?? 30;
     this.#ephemeralInputVault = options.ephemeralInputVault ?? new EncryptedInputRouter();
     this.#allowPlaintextEphemeralInputs = options.allowPlaintextEphemeralInputs ?? false;
@@ -780,6 +782,7 @@ export class BrowserScheduler {
         metadata: structuredClone(metadata),
         status: "queued",
         queueSequence: ++state.queueSequence,
+        maxExternalConnections: input.maxExternalConnections ?? 1,
         externalConnectionCount: 0,
         expiresAt: after(this.#clock, input.ttlSeconds),
         lastHeartbeatAt: timestamp,
@@ -1399,7 +1402,10 @@ export class BrowserScheduler {
       if (!session.workerId) throw new FabricError("invalid_state", "session does not have an allocated worker", 409);
       this.#capabilitySigner.verify(capability, { sessionId, project: session.project, profileRef: session.profileRef, workerId: session.workerId });
       if (!(session.status === "ready" || session.status === "active")) throw new FabricError("invalid_state", "CDP is unavailable for this session", 409);
-      if (session.externalConnectionCount >= this.#maxExternalCdpConnections) throw new FabricError("conflict", "only one external CDP connection is allowed", 409);
+      const connectionLimit = Math.min(session.maxExternalConnections ?? 1, this.#maxExternalCdpConnections);
+      if (session.externalConnectionCount >= connectionLimit) {
+        throw new FabricError("conflict", `this session allows at most ${connectionLimit} external CDP connection${connectionLimit === 1 ? "" : "s"}`, 409);
+      }
       session.externalConnectionCount += 1;
       if (session.status === "ready") {
         session.status = "active";

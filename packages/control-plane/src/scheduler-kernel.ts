@@ -51,6 +51,9 @@ export class SchedulerKernel {
   }
 
   public validateSessionInput(state: FabricState, input: BrowserSessionCreateInput): void {
+    if (input.maxExternalConnections !== undefined && input.maxExternalConnections !== 1 && input.maxExternalConnections !== 2) {
+      throw new FabricError("validation_failed", "maxExternalConnections must be 1 or 2", 400);
+    }
     const recipe = this.recipe(state, input.browserRecipeRef) as RecipeDefinition;
     if (recipe.access !== "raw_cdp") throw new FabricError("validation_failed", `${recipe.ref} only supports typed jobs`, 400);
     if (input.runtime !== recipe.runtime) throw new FabricError("validation_failed", "runtime must match the selected recipe", 400);
