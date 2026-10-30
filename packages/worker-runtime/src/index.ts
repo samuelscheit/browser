@@ -203,5 +203,6 @@ export function defaultRuntimeRegistry(): WorkerRuntimeRegistry {
 export function artifactChecksum(bytes: Uint8Array): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
+export * from "./browser-fingerprint";
 export * from "./chromium";
 export * from "./turnstile-guardian";

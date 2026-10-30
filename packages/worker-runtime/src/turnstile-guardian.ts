@@ -21,6 +21,7 @@ import {
   type TurnstileGuardianSpec,
   type TurnstilePageObservation,
 } from "./turnstile-guardian-types";
+import { BROWSER_FINGERPRINT_SCRIPT } from "./browser-fingerprint";
 import { CdpConnection } from "./turnstile-guardian-cdp";
 import {
   TURNSTILE_MOUSE_COMPAT_SCRIPT,
@@ -404,8 +405,13 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
       await this.#connection.send("Runtime.enable", {}, sessionId);
       await this.#connection.send("Page.enable", {}, sessionId);
       await this.#connection.send("DOM.enable", {}, sessionId);
-      await this.#connection.send("Page.addScriptToEvaluateOnNewDocument", { source: TURNSTILE_MOUSE_COMPAT_SCRIPT }, sessionId);
-      await this.#connection.send("Runtime.evaluate", { expression: TURNSTILE_MOUSE_COMPAT_SCRIPT, returnByValue: true }, sessionId);
+      // The guardian is the one Fabric-owned session on every page, so it also
+      // installs the GPU identity. Clients open a blank page and then navigate
+      // it, so every site document they load starts with these scripts.
+      for (const source of [BROWSER_FINGERPRINT_SCRIPT, TURNSTILE_MOUSE_COMPAT_SCRIPT]) {
+        await this.#connection.send("Page.addScriptToEvaluateOnNewDocument", { source }, sessionId);
+        await this.#connection.send("Runtime.evaluate", { expression: source, returnByValue: true }, sessionId);
+      }
     } catch (error) {
       this.#logError("initialize page failed", error, { targetId, url });
     }

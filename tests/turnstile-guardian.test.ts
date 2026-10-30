@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BROWSER_FINGERPRINT_SCRIPT,
   ChromiumProcessSupervisor,
+  TURNSTILE_MOUSE_COMPAT_SCRIPT,
   TURNSTILE_OBSERVATION_SCRIPT,
+  WEBGL_RENDERER,
+  WEBGL_VENDOR,
   TurnstileGuardian,
   defaultTurnstileGuardianSpec,
   resolveTurnstileGuardianWebSocketEndpoint,
@@ -385,6 +389,33 @@ describe("Fabric Turnstile guardian", () => {
     await guardian.stop();
   });
 
+  test("installs the GPU identity on every page it attaches, before its Turnstile mouse hint", async () => {
+    const transport = new FakeCdpTransport();
+    const guardian = new TurnstileGuardian({
+      endpoint: "ws://browser.test/devtools/browser/fingerprint",
+      transportFactory: async () => transport,
+      pollIntervalMs: 30_000,
+      logger: () => undefined,
+    });
+
+    await guardian.start();
+    transport.emitEvent("Target.attachedToTarget", {
+      sessionId: "new-page-session",
+      targetInfo: { targetId: "page-2", type: "page", url: "about:blank" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    for (const sessionId of ["page-session-1", "new-page-session"]) {
+      const documentStart = transport.commands
+        .filter((command) => command.sessionId === sessionId && command.method === "Page.addScriptToEvaluateOnNewDocument")
+        .map((command) => command.params?.source);
+      expect(documentStart).toEqual([BROWSER_FINGERPRINT_SCRIPT, TURNSTILE_MOUSE_COMPAT_SCRIPT]);
+      // The page's current document gets the identity too.
+      expect(transport.commands.some((command) => command.sessionId === sessionId && command.method === "Runtime.evaluate" && command.params?.expression === BROWSER_FINGERPRINT_SCRIPT)).toBe(true);
+    }
+    await guardian.stop();
+  });
+
   test("detaches auxiliary auto-attached targets and keeps page coverage isolated", async () => {
     const transport = new FakeCdpTransport();
     const guardian = new TurnstileGuardian({
@@ -561,6 +592,71 @@ test.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium receives the
     expect(supervisor.isRunning(launched.processId)).toBe(true);
     expect(supervisor.guardianSnapshot(launched.processId)).toMatchObject({ running: true, clickAttempts: 1 });
     await page.close();
+  } finally {
+    await browser?.disconnect().catch(() => undefined);
+    if (processId) await supervisor.stop(processId);
+    await supervisor.stopAll();
+  }
+}, 120_000);
+
+test.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium reports an ordinary GPU to a page's very first script, without exposing the override", async () => {
+  const port = 23_000 + Math.floor(Math.random() * 1_000);
+  const supervisor = new ChromiumProcessSupervisor({ executablePath: chromeExecutable, startupTimeoutMs: 20_000, cwd: "/tmp" });
+  const spec: BrowserContainerSpec = {
+    workerId: "worker_fingerprint_integration" as never,
+    leaseId: `browser-lease_fingerprint_${crypto.randomUUID().replaceAll("-", "")}` as never,
+    image: "integration",
+    browserVersion: "system-test",
+    // SwiftShader is what Fabric's GPU-less servers render with.
+    command: [chromeExecutable, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+    environment: {},
+    volumes: [],
+    networks: [],
+    limits: { maxBrowserLeases: 1, cpuMilli: 2_000, memoryMiB: 2_048, pids: 256, shmMiB: 512, temporaryStorageMiB: 512 },
+    security: { dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false },
+    cdpBind: { host: "127.0.0.1", port },
+    turnstileGuardian: { ...defaultTurnstileGuardianSpec(), pollIntervalMs: 250 },
+  };
+  let processId: string | undefined;
+  let browser: PuppeteerBrowser | undefined;
+  try {
+    const launched = await supervisor.start(spec);
+    processId = launched.processId;
+    browser = await puppeteer.connect({ browserWSEndpoint: launched.cdpBrowserEndpoint });
+    const kit = `<script>
+      const gl = document.createElement('canvas').getContext('webgl');
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      window.firstScript = {
+        vendor: gl.getParameter(info.UNMASKED_VENDOR_WEBGL),
+        renderer: gl.getParameter(info.UNMASKED_RENDERER_WEBGL),
+        version: gl.getParameter(gl.VERSION),
+        source: WebGLRenderingContext.prototype.getParameter.toString(),
+        name: WebGLRenderingContext.prototype.getParameter.name,
+        length: WebGLRenderingContext.prototype.getParameter.length,
+        ownKeys: Object.getOwnPropertyNames(WebGLRenderingContext.prototype).filter((key) => key.startsWith('__')),
+        toStringSource: Function.prototype.toString.toString(),
+        toStringOfToString: Function.prototype.toString.call(Function.prototype.toString),
+        ordinary: Function.prototype.toString.call(function sample() { return 1; }),
+      };
+    </script>`;
+    // The kit's check runs inline in the first script of the document, in
+    // the open-a-page-then-navigate flow every Fabric client uses.
+    const page = await browser.newPage();
+    await page.goto(`data:text/html,${encodeURIComponent(kit)}`, { waitUntil: "domcontentloaded", timeout: 10_000 });
+    const firstScript = await page.waitForFunction(() => (window as any).firstScript, { timeout: 10_000 }).then((handle) => handle.jsonValue()) as Record<string, unknown>;
+
+    expect(firstScript).toMatchObject({
+      vendor: WEBGL_VENDOR,
+      renderer: WEBGL_RENDERER,
+      source: "function getParameter() { [native code] }",
+      name: "getParameter",
+      length: 1,
+      ownKeys: [],
+      toStringSource: "function toString() { [native code] }",
+      toStringOfToString: "function toString() { [native code] }",
+      ordinary: "function sample() { return 1; }",
+    });
+    expect(String(firstScript.version)).toStartWith("WebGL 1.0");
   } finally {
     await browser?.disconnect().catch(() => undefined);
     if (processId) await supervisor.stop(processId);
