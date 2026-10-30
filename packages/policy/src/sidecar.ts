@@ -12,6 +12,7 @@ export const egressSidecarListeners = {
   media: { id: "media-proxy", port: 11_003 },
   social: { id: "social-fallback", port: 11_004 },
   tor: { id: "tor", port: 11_005 },
+  macExit: { id: "home-exit", port: 11_006 },
   mediaDirect: { id: "media-direct", port: 11_007 },
 } as const;
 
@@ -41,6 +42,7 @@ export function egressSidecarListenerForPolicy(policy: EgressPolicy, trafficClas
   if (policy.family === "media-proxy-affinity") return effectiveClass === "direct_exception" ? "mediaDirect" : "media";
   if (policy.family === "social-proxy-fallback") return "social";
   if (policy.family === "tor-egress") return "tor";
+  if (policy.family === "home-exit") return "macExit";
   if (policy.family === "direct-egress") return "direct";
   throw new FabricError("validation_failed", `egress policy ${policy.ref} has no Fabric sidecar listener`, 400);
 }

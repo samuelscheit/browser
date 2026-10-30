@@ -27,7 +27,7 @@ describe("contracts and immutable policies", () => {
 
   test("accepts every required egress family and preserves direct-asset no-retry", () => {
     expect(builtInEgressPolicies.map((policy) => policy.family)).toEqual([
-      "signup-direct-assets", "media-proxy-affinity", "social-proxy-fallback", "tor-egress", "direct-egress"
+      "signup-direct-assets", "media-proxy-affinity", "social-proxy-fallback", "tor-egress", "home-exit", "direct-egress"
     ]);
     const signup = builtInEgressPolicies.find((policy) => policy.family === "signup-direct-assets")!;
     expect(decideEgress(signup, { trafficClass: "static_asset", hostname: "cdn.example", isRetry: false }).route.kind).toBe("direct");

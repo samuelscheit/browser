@@ -137,6 +137,20 @@ export const builtInEgressPolicies: readonly EgressPolicy[] = [
     },
     { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: false }
   ),
+  // Reporting pages that cloak by visitor IP send Tor and datacenter exits to a decoy.
+  // This route leaves through the operator's own residential connection (a VPN
+  // exit node), so it is used only after a capture shows cloaking.
+  makePolicy(
+    "home-exit",
+    {
+      document: proxy("home-exit", "socks5h", true),
+      api: proxy("home-exit", "socks5h", true),
+      websocket: proxy("home-exit", "socks5h", true),
+      static_asset: proxy("home-exit", "socks5h", true),
+      browser_download: proxy("home-exit", "socks5h", true)
+    },
+    { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: false }
+  ),
   makePolicy(
     "direct-egress",
     Object.fromEntries(([

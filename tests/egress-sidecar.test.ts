@@ -92,6 +92,13 @@ describe("Fabric egress sidecar", () => {
     }
     expect(config.policies.some((policy) => policy.ref.includes("reporting"))).toBe(false);
     expect(config.listeners.some((listener) => listener.id.includes("reporting"))).toBe(false);
+    // The residential capture exit is a fixed, credential-free hop to the Fabric-owned
+    // VPN node; it never falls back to direct egress, which would expose the server.
+    const macExit = config.listeners.find((listener) => listener.id === "home-exit")!;
+    expect(macExit).toMatchObject({ port: 11_006, mode: "proxy", upstreamUrls: ["socks5h://fabric-home-exit:1055"] });
+    expect(macExit.fallbackToDirect).toBeUndefined();
+    expect(macExit.upstreamSecretFile).toBeUndefined();
+    expect(config.policies.find((policy) => policy.ref === "egress_home-exit@1")?.defaultListenerId).toBe("home-exit");
     const media = config.policies.find((policy) => policy.ref === "egress_media-proxy-affinity@1")!;
     expect(media.rules?.[0]?.listenerId).toBe("media-direct");
     expect(config.listeners.find((listener) => listener.id === "media-direct")?.allowedHostnameSuffixes).toEqual(["cdn-a.example", "cdn-b.example"]);
