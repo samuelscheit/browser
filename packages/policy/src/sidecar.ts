@@ -9,7 +9,7 @@ import { FabricError } from "@browser-fabric/contracts";
 export const egressSidecarListeners = {
   direct: { id: "direct", port: 11_000 },
   signup: { id: "signup-proxy", port: 11_001 },
-  media: { id: "media-proxy", port: 11_003 },
+  media: { id: "media-ipv6", port: 11_003 },
   social: { id: "social-fallback", port: 11_004 },
   tor: { id: "tor", port: 11_005 },
   macExit: { id: "home-exit", port: 11_006 },

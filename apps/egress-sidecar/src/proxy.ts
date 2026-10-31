@@ -62,7 +62,17 @@ function obviousPrivateHost(host: string): boolean {
   return normalized === "localhost" || normalized.endsWith(".localhost") || normalized.endsWith(".local") || normalized.endsWith(".internal") || normalized === "metadata.google.internal" || isPrivateIpv4(normalized) || isPrivateIpv6(normalized);
 }
 
-async function resolvePublicHost(host: string, allowPrivateTargets: boolean): Promise<string> {
+/** Pick the dial address: the first permitted record of the preferred family, else the first permitted record. */
+export function selectDialAddress(
+  records: readonly { address: string; family: number }[],
+  allowPrivateTargets: boolean,
+  preferredFamily?: 4 | 6,
+): string | undefined {
+  const permitted = records.filter((record) => allowPrivateTargets || !(isPrivateIpv4(record.address) || isPrivateIpv6(record.address)));
+  return (permitted.find((record) => record.family === preferredFamily) ?? permitted[0])?.address;
+}
+
+async function resolvePublicHost(host: string, allowPrivateTargets: boolean, preferredFamily?: 4 | 6): Promise<string> {
   if (!host || host.length > 253 || obviousPrivateHost(host)) {
     if (allowPrivateTargets) return host;
     throw failure("egress target is not a public host", 403);
@@ -74,9 +84,9 @@ async function resolvePublicHost(host: string, allowPrivateTargets: boolean): Pr
   } catch {
     throw failure("egress target DNS lookup failed", 502);
   }
-  const publicRecord = records.find((record) => allowPrivateTargets || !(isPrivateIpv4(record.address) || isPrivateIpv6(record.address)));
-  if (!publicRecord) throw failure("egress target resolved only to private addresses", 403);
-  return publicRecord.address;
+  const address = selectDialAddress(records, allowPrivateTargets, preferredFamily);
+  if (!address) throw failure("egress target resolved only to private addresses", 403);
+  return address;
 }
 
 /**
@@ -211,8 +221,8 @@ function connectSocket(host: string, port: number, tls = false): Promise<Socket>
   });
 }
 
-async function connectDirect(target: Target, allowPrivateTargets: boolean): Promise<Socket> {
-  const address = await resolvePublicHost(target.host, allowPrivateTargets);
+async function connectDirect(target: Target, listener: EgressListenerConfig): Promise<Socket> {
+  const address = await resolvePublicHost(target.host, listener.allowPrivateTargets === true, listener.preferredAddressFamily);
   return connectSocket(address, target.port);
 }
 
@@ -370,9 +380,9 @@ async function connectViaListener(
     const permitted = listener.allowedHostnameSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
     if (!permitted) throw failure("egress listener does not permit this target hostname", 403);
   }
-  if (listener.mode === "direct") return { socket: await connectDirect(target, listener.allowPrivateTargets === true) };
+  if (listener.mode === "direct") return { socket: await connectDirect(target, listener) };
   if (endpoints.length === 0) {
-    if (listener.fallbackToDirect) return { socket: await connectDirect(target, listener.allowPrivateTargets === true) };
+    if (listener.fallbackToDirect) return { socket: await connectDirect(target, listener) };
     throw failure("egress listener has no configured upstream", 503);
   }
   let lastError: unknown;
@@ -388,7 +398,7 @@ async function connectViaListener(
       lastError = error;
     }
   }
-  if (listener.fallbackToDirect) return { socket: await connectDirect(target, listener.allowPrivateTargets === true) };
+  if (listener.fallbackToDirect) return { socket: await connectDirect(target, listener) };
   throw lastError instanceof Error ? lastError : failure("egress proxy strategy failed", 502);
 }
 

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createServer as createTcpServer, connect as connectNet, type Server, type Socket } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 import { loadListenerEndpoints, parseEgressConfig, parseProxyEndpoint } from "../apps/egress-sidecar/src/config";
-import { startProxyListener, type ProxyListener } from "../apps/egress-sidecar/src/proxy";
+import { selectDialAddress, startProxyListener, type ProxyListener } from "../apps/egress-sidecar/src/proxy";
 import { pac } from "../apps/egress-sidecar/src/server";
 import { builtInEgressPolicies, egressSidecarListeners, internalEgressProxyUrl } from "@browser-fabric/policy";
 
@@ -100,11 +100,32 @@ describe("Fabric egress sidecar", () => {
     expect(macExit.upstreamSecretFile).toBeUndefined();
     expect(config.policies.find((policy) => policy.ref === "egress_home-exit@1")?.defaultListenerId).toBe("home-exit");
     const media = config.policies.find((policy) => policy.ref === "egress_media-proxy-affinity@1")!;
+    // Media's Cloudflare zone blocks the host's IPv4 address, so its default route is a direct
+    // listener that prefers IPv6 on the IPv6-enabled external egress network.
+    expect(media.defaultListenerId).toBe("media-ipv6");
+    expect(config.listeners.find((listener) => listener.id === "media-ipv6")).toEqual({ id: "media-ipv6", port: 11_003, mode: "direct", preferredAddressFamily: 6 });
     expect(media.rules?.[0]?.listenerId).toBe("media-direct");
     expect(config.listeners.find((listener) => listener.id === "media-direct")?.allowedHostnameSuffixes).toEqual(["cdn-a.example", "cdn-b.example"]);
     const stack = await Bun.file(new URL("../deploy/compose/browser-fabric.compose.yml", import.meta.url)).text();
     const egressBlock = stack.slice(stack.indexOf("  fabric-egress-sidecar:"), stack.indexOf("\n  fabric-tor:"));
     expect(egressBlock).not.toContain("reporting_solver_credential");
+    const externalNetwork = stack.slice(stack.indexOf("\n  fabric-egress-external:\n"), stack.indexOf("\nvolumes:"));
+    expect(externalNetwork).toContain("enable_ipv6: true");
+  });
+
+  test("validates a direct listener's preferred address family and dials it when published", () => {
+    const parse = (listener: Record<string, unknown>) => parseEgressConfig({ version: 1, listeners: [{ id: "direct", port: 11_000, mode: "direct", ...listener }], policies: [{ ref: "egress_test@1", defaultListenerId: "direct" }] });
+    expect(parse({ preferredAddressFamily: 6 }).listeners[0]?.preferredAddressFamily).toBe(6);
+    expect(() => parse({ preferredAddressFamily: 5 })).toThrow(/4 or 6/);
+    expect(() => parseEgressConfig({ version: 1, listeners: [{ id: "proxy", port: 11_000, mode: "proxy", upstreamUrls: ["http://proxy.example:8080"], preferredAddressFamily: 6 }], policies: [{ ref: "egress_test@1", defaultListenerId: "proxy" }] })).toThrow(/only for direct/);
+
+    const dualStack = [{ address: "104.21.0.1", family: 4 }, { address: "2a06:98c1:3121::2", family: 6 }];
+    expect(selectDialAddress(dualStack, false, 6)).toBe("2a06:98c1:3121::2");
+    expect(selectDialAddress(dualStack, false)).toBe("104.21.0.1");
+    // A provider CDN without AAAA records stays reachable over IPv4.
+    expect(selectDialAddress([{ address: "104.21.0.1", family: 4 }], false, 6)).toBe("104.21.0.1");
+    // The preference never selects a private address.
+    expect(selectDialAddress([{ address: "104.21.0.1", family: 4 }, { address: "fd00::1", family: 6 }], false, 6)).toBe("104.21.0.1");
   });
 
   test("forwards direct HTTP traffic and rejects private targets by default", async () => {

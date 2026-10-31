@@ -26,6 +26,12 @@ export interface EgressListenerConfig {
   allowPrivateTargets?: boolean;
   /** Exact reviewed hostname suffixes this listener may reach; checked by the sidecar per CONNECT. */
   allowedHostnameSuffixes?: readonly string[];
+  /**
+   * Dial this IP family whenever the target publishes it. Media's Cloudflare zone blocks the
+   * host's IPv4 address, so its listener prefers AAAA records; provider/CDN hosts that publish only
+   * A records remain reachable over IPv4.
+   */
+  preferredAddressFamily?: 4 | 6;
   /** Permit this reviewed listener to try direct egress only after every upstream proxy fails. */
   fallbackToDirect?: boolean;
   /**
@@ -113,6 +119,9 @@ function parseListener(value: unknown, index: number): EgressListenerConfig {
   const optional = raw.optional === true;
   if (mode === "proxy" && !upstreamUrls?.length && !upstreamSecretFile && !optional) fail(`listeners[${index}] proxy mode requires an upstream URL or secret`);
   if (allowedHostnameSuffixes && mode !== "direct") fail(`listeners[${index}].allowedHostnameSuffixes is supported only for direct listeners`);
+  const preferredAddressFamily = raw.preferredAddressFamily;
+  if (preferredAddressFamily !== undefined && preferredAddressFamily !== 4 && preferredAddressFamily !== 6) fail(`listeners[${index}].preferredAddressFamily must be 4 or 6`);
+  if (preferredAddressFamily !== undefined && mode !== "direct") fail(`listeners[${index}].preferredAddressFamily is supported only for direct listeners`);
   if (raw.fallbackToDirect === true && mode !== "proxy") fail(`listeners[${index}].fallbackToDirect requires proxy mode`);
   if (upstreamIndex !== undefined && (!Number.isInteger(upstreamIndex) || (upstreamIndex as number) < 0 || (upstreamIndex as number) > 63)) fail(`listeners[${index}].upstreamIndex is invalid`);
   return {
@@ -124,6 +133,7 @@ function parseListener(value: unknown, index: number): EgressListenerConfig {
     ...(upstreamSecretFile ? { upstreamSecretFile } : {}),
     ...(raw.allowPrivateTargets === true ? { allowPrivateTargets: true } : {}),
     ...(allowedHostnameSuffixes === undefined ? {} : { allowedHostnameSuffixes }),
+    ...(preferredAddressFamily === undefined ? {} : { preferredAddressFamily }),
     ...(raw.fallbackToDirect === true ? { fallbackToDirect: true } : {}),
     ...(optional ? { optional: true } : {}),
     ...(upstreamIndex === undefined ? {} : { upstreamIndex: upstreamIndex as number }),
