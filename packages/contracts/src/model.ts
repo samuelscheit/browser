@@ -571,6 +571,11 @@ export interface WorkerAssignment {
   session?: BrowserSession;
   job?: Job;
   recipe: BrowserRecipe;
+  /**
+   * The recipe's resolved challenge handler set, copied into the signed assignment so a worker decides
+   * which automatic handlers it may run (for example token solving) without any side lookup.
+   */
+  challengeHandlerSet?: ChallengeHandlerSet;
   egressPolicy: EgressPolicy;
   artifactPolicy: ArtifactPolicy;
   profile?: Profile;

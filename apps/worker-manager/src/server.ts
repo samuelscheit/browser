@@ -3,6 +3,8 @@ import { ArtifactCollector, ArtifactMediaManifestResolver, AssignmentSigner, bun
 import { parseWorkerRegistration, workerPrincipal } from "./protocol";
 import { ManagedWorkerController } from "./controller";
 import { DockerContainerExecutor, DockerMediaContainerExecutor } from "./docker-container-executor";
+import { captchaTokenSolverFor, readOptionalSecret } from "./captcha-solver-factory";
+import { egressSidecarListeners } from "@browser-fabric/policy";
 import { LeasedBrowserProvisioner } from "./leased-browser-provisioner";
 import { MediaResultCapabilitySigner, MediaResultGateway } from "./media-result";
 import { MediaPlaybackControl } from "./media-playback";
@@ -223,6 +225,12 @@ if (import.meta.main) {
     browserSeccompProfile,
     requireBrowserSeccompProfile: production,
     volumeHelperImage: process.env.FABRIC_VOLUME_HELPER_IMAGE,
+    tokenSolverFor: captchaTokenSolverFor({
+      providerProxyUrl: process.env.FABRIC_CAPTCHA_SOLVER_PROXY_URL ?? `http://fabric-egress-sidecar:${egressSidecarListeners.captchaSolver.port}`,
+      deathByCaptchaUsername: await readOptionalSecret(process.env.FABRIC_DEATHBYCAPTCHA_USERNAME_FILE),
+      deathByCaptchaPassword: await readOptionalSecret(process.env.FABRIC_DEATHBYCAPTCHA_PASSWORD_FILE),
+      antiCaptchaClientKey: await readOptionalSecret(process.env.FABRIC_ANTICAPTCHA_CLIENT_KEY_FILE),
+    }),
   });
   // Media tasks use the same hardened Docker-container path as browser leases, but must receive the
   // dedicated immutable media image (and helper image policy) rather than the placeholder recipe

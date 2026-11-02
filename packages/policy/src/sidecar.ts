@@ -14,6 +14,8 @@ export const egressSidecarListeners = {
   tor: { id: "tor", port: 11_005 },
   macExit: { id: "home-exit", port: 11_006 },
   mediaDirect: { id: "media-direct", port: 11_007 },
+  /** Token-solver API traffic only; the listener admits the two provider hostnames and nothing else. */
+  captchaSolver: { id: "captcha-solver", port: 11_008 },
 } as const;
 
 export type EgressSidecarListenerName = keyof typeof egressSidecarListeners;

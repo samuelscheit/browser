@@ -88,6 +88,7 @@ export class WorkerManager {
   }
 }
 export * from "./docker-container-executor";
+export * from "./captcha-solver-factory";
 export * from "./controller";
 export * from "./media-result";
 export * from "./media-playback";

@@ -108,7 +108,10 @@ describe("Fabric egress sidecar", () => {
     expect(config.listeners.find((listener) => listener.id === "media-direct")?.allowedHostnameSuffixes).toEqual(["cdn-a.example", "cdn-b.example"]);
     const stack = await Bun.file(new URL("../deploy/compose/browser-fabric.compose.yml", import.meta.url)).text();
     const egressBlock = stack.slice(stack.indexOf("  fabric-egress-sidecar:"), stack.indexOf("\n  fabric-tor:"));
-    expect(egressBlock).not.toContain("reporting_solver_credential");
+    // The solver listener is credential-free: provider keys are mounted only into the manager.
+    for (const solverSecret of ["deathbycaptcha_username", "deathbycaptcha_password", "anticaptcha_client_key"]) {
+      expect(egressBlock).not.toContain(solverSecret);
+    }
     const externalNetwork = stack.slice(stack.indexOf("\n  fabric-egress-external:\n"), stack.indexOf("\nvolumes:"));
     expect(externalNetwork).toContain("enable_ipv6: true");
   });

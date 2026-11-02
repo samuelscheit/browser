@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { BrowserContainerSpec } from "./index";
+import type { TokenCaptchaSolver } from "./captcha-solvers/types";
 import { FabricError } from "@browser-fabric/contracts";
 import { assertFailClosedPac } from "@browser-fabric/policy";
 import {
@@ -74,15 +75,27 @@ export class ChromiumProcessSupervisor {
   readonly #guardians = new Map<string, TurnstileGuardianHandle>();
   readonly #spawner: ChromiumSpawner;
   readonly #guardianFactory: TurnstileGuardianFactory;
+  readonly #tokenSolverFor?: (handlers: BrowserContainerSpec["challengeHandlers"]) => TokenCaptchaSolver | undefined;
   readonly #fetch: ChromiumFetcher;
   readonly #cwd: string;
   readonly #startupTimeoutMs: number;
   readonly #executablePath?: string;
   readonly #profileRoot?: string;
 
-  public constructor(options: { spawner?: ChromiumSpawner; fetch?: ChromiumFetcher; cwd?: string; startupTimeoutMs?: number; executablePath?: string; profileRoot?: string; turnstileGuardianFactory?: TurnstileGuardianFactory } = {}) {
+  public constructor(options: {
+    spawner?: ChromiumSpawner;
+    fetch?: ChromiumFetcher;
+    cwd?: string;
+    startupTimeoutMs?: number;
+    executablePath?: string;
+    profileRoot?: string;
+    turnstileGuardianFactory?: TurnstileGuardianFactory;
+    /** Resolves a recipe's token solver for a locally supervised browser. Absent means no solver. */
+    tokenSolverFor?: (handlers: BrowserContainerSpec["challengeHandlers"]) => TokenCaptchaSolver | undefined;
+  } = {}) {
     this.#spawner = options.spawner ?? defaultSpawner;
     this.#guardianFactory = options.turnstileGuardianFactory ?? defaultTurnstileGuardianFactory;
+    this.#tokenSolverFor = options.tokenSolverFor;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#cwd = options.cwd ?? "/tmp";
     this.#startupTimeoutMs = options.startupTimeoutMs ?? 15_000;
@@ -149,7 +162,8 @@ export class ChromiumProcessSupervisor {
       const guardianSpec = spec.turnstileGuardian ?? turnstileGuardianSpecFromEnvironment();
       assertTurnstileGuardianSpec(guardianSpec);
       {
-        const guardian = this.#guardianFactory({ endpoint: version.webSocketDebuggerUrl, spec: guardianSpec });
+        const tokenSolver = this.#tokenSolverFor?.(spec.challengeHandlers);
+        const guardian = this.#guardianFactory({ endpoint: version.webSocketDebuggerUrl, spec: guardianSpec, ...(tokenSolver ? { tokenSolver } : {}) });
         // Register before awaiting startup so a browser exit or a concurrent
         // stop can always find and close the companion connection.
         this.#guardians.set(processId, guardian);

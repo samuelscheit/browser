@@ -1,5 +1,7 @@
 /** Shared contracts for the process-level Cloudflare Turnstile guardian. */
 
+import type { TokenCaptchaSolver } from "./captcha-solvers/types";
+
 export const DEFAULT_TURNSTILE_POLL_INTERVAL_MS = 1_000;
 export const DEFAULT_TURNSTILE_CHALLENGE_TIMEOUT_MS = 12_000;
 export const DEFAULT_TURNSTILE_MAX_CLICK_ATTEMPTS = 5;
@@ -38,6 +40,8 @@ export interface TurnstileGuardianOptions extends Partial<Omit<TurnstileGuardian
   /** Test hook for resolving HTTP /json/version endpoints. */
   fetcher?: TurnstileGuardianFetcher;
   logger?: TurnstileGuardianLogger;
+  /** Token solver for visible reCAPTCHA v2 widgets. Absent unless the recipe enables a provider. */
+  tokenSolver?: TokenCaptchaSolver;
 }
 
 /** A visible Turnstile iframe rectangle in top-level page coordinates. */
@@ -79,6 +83,8 @@ export interface TurnstileGuardianHandle {
 export interface TurnstileGuardianFactoryInput {
   endpoint: string;
   spec: TurnstileGuardianSpec;
+  /** Recipe-selected solver. Undefined means the guardian only clicks Turnstile, as before. */
+  tokenSolver?: TokenCaptchaSolver;
 }
 
 export type TurnstileGuardianFactory = (input: TurnstileGuardianFactoryInput) => TurnstileGuardianHandle;

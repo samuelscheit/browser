@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { turnstileGuardianSpecFromEnvironment, type TurnstileGuardianSpec } from "./turnstile-guardian";
-import type { BrowserRecipe, EgressPolicy, Worker, WorkerAssignment } from "@browser-fabric/contracts";
+import type { BrowserRecipe, ChallengeHandler, EgressPolicy, Worker, WorkerAssignment } from "@browser-fabric/contracts";
 import { FabricError } from "@browser-fabric/contracts";
 import { internalEgressPacUrl } from "@browser-fabric/policy";
 
@@ -32,6 +32,11 @@ export interface BrowserContainerSpec {
    * client feature, so all ordinary CDP browser sessions receive it.
    */
   turnstileGuardian?: TurnstileGuardianSpec;
+  /**
+   * The recipe's automatic challenge handlers, copied from the signed assignment. Executors use them to
+   * decide which token solvers this browser may use. Absent when the recipe declares no challenge set.
+   */
+  challengeHandlers?: readonly ChallengeHandler[];
 }
 
 export interface BrowserRuntime {
@@ -143,7 +148,8 @@ export class GenericBrowserRuntime implements BrowserRuntime {
       limits: worker.resourceLimits,
       security: { dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false },
       cdpBind: { host: worker.isLocal ? "127.0.0.1" : "private-overlay", port: cdpPort },
-      turnstileGuardian: turnstileGuardianSpecFromEnvironment()
+      turnstileGuardian: turnstileGuardianSpecFromEnvironment(),
+      ...(assignment.challengeHandlerSet ? { challengeHandlers: assignment.challengeHandlerSet.handlers } : {}),
     };
   }
 }
@@ -204,5 +210,11 @@ export function artifactChecksum(bytes: Uint8Array): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 export * from "./browser-fingerprint";
+export * from "./captcha-solvers/types";
+export * from "./captcha-solvers/http";
+export * from "./captcha-solvers/registry";
+export * from "./captcha-solvers/death-by-captcha";
+export * from "./captcha-solvers/anticaptcha";
+export * from "./captcha-solvers/recaptcha-page";
 export * from "./chromium";
 export * from "./turnstile-guardian";

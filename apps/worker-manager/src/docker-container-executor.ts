@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { isIP } from "node:net";
-import { FabricError, MEDIA_SOURCE_MAX_BYTES } from "@browser-fabric/contracts";
+import { FabricError, MEDIA_SOURCE_MAX_BYTES, type ChallengeHandler } from "@browser-fabric/contracts";
 import { assertFailClosedPac, internalEgressProxyUrl } from "@browser-fabric/policy";
 import {
   assertTurnstileGuardianSpec,
   defaultTurnstileGuardianFactory,
+  type TokenCaptchaSolver,
   type TurnstileGuardianFactory,
   type TurnstileGuardianHandle,
 } from "@browser-fabric/worker-runtime";
@@ -77,6 +78,11 @@ export interface DockerContainerExecutorOptions {
   requireBrowserSeccompProfile?: boolean;
   /** Factory boundary for the mandatory browser-level companion; production uses real CDP. */
   turnstileGuardianFactory?: TurnstileGuardianFactory;
+  /**
+   * Resolves the token solver for one browser from its recipe's challenge handler set. Absent in tests and
+   * in deployments without solver credentials; a recipe then never solves tokens.
+   */
+  tokenSolverFor?: (handlers: readonly ChallengeHandler[] | undefined) => TokenCaptchaSolver | undefined;
 }
 
 const safeContainerName = /^[a-z][a-z0-9_-]{0,62}$/;
@@ -308,7 +314,10 @@ export class DockerContainerExecutor implements Executor {
         if (this.#containers.get(identity) !== name) throw new FabricError("worker_unavailable", "browser container was stopped while becoming ready", 503);
         const guardianSpec = spec.container.turnstileGuardian;
         if (!guardianSpec) throw new Error("Fabric browser has no Turnstile guardian specification");
-        const guardian = this.#turnstileGuardianFactory({ endpoint: browserEndpoint, spec: guardianSpec });
+        // The recipe's challenge handler set decides whether this browser may solve tokens. Credentials
+        // come only from the manager's secret-backed solver factory, never from a browser environment.
+        const tokenSolver = this.#options.tokenSolverFor?.(spec.container.challengeHandlers);
+        const guardian = this.#turnstileGuardianFactory({ endpoint: browserEndpoint, spec: guardianSpec, ...(tokenSolver ? { tokenSolver } : {}) });
         this.#guardians.set(name, guardian);
         await guardian.start();
         if (this.#containers.get(identity) !== name || this.#guardians.get(name) !== guardian) {

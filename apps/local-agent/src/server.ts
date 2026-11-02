@@ -2,7 +2,7 @@ import { createHash, X509Certificate } from "node:crypto";
 import type { Worker } from "@browser-fabric/contracts";
 import { AssignmentVerifier, createBunMtlsFetch } from "@browser-fabric/control-plane";
 import { FabricWorkerAgent, WorkerHeartbeatAgent } from "./agent";
-import { ChromiumSupervisorExecutor } from "./executors";
+import { ChromiumSupervisorExecutor, createLocalChromiumSupervisor } from "./executors";
 import { LocalAgentHttpTransport } from "./transport";
 
 async function secret(name: string): Promise<string> {
@@ -72,7 +72,7 @@ if (import.meta.main) {
     await new Promise<void>(() => undefined);
   }
   // A local federated worker starts its browser process itself; it has no inbound public port.
-  const executor = new ChromiumSupervisorExecutor();
+  const executor = new ChromiumSupervisorExecutor(await createLocalChromiumSupervisor());
   const agent = new FabricWorkerAgent({ worker, transport, executor });
   await agent.start();
   const shutdown = () => void agent.stop().finally(() => process.exit(0));

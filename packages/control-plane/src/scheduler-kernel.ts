@@ -341,11 +341,13 @@ export class SchedulerKernel {
     const session = lease.sessionId ? this.session(state, lease.sessionId) : undefined;
     const job = lease.jobId ? this.job(state, lease.jobId) : undefined;
     const recipe = this.recipe(state, session?.browserRecipeRef ?? job!.recipeRef);
+    const challengeHandlerSet = recipe.challengeHandlerSetRef === undefined ? undefined : state.challengeSets.get(recipe.challengeHandlerSetRef);
     return {
       lease: structuredClone(lease),
       ...(session === undefined ? {} : { session: structuredClone(session) }),
       ...(job === undefined ? {} : { job: structuredClone(job) }),
       recipe: structuredClone(recipe),
+      ...(challengeHandlerSet === undefined ? {} : { challengeHandlerSet: structuredClone(challengeHandlerSet) }),
       egressPolicy: structuredClone(this.egress(state, session?.egressPolicyRef ?? job!.egressPolicyRef)),
       artifactPolicy: structuredClone(this.artifactPolicy(state, session?.artifactPolicyRef ?? job!.artifactPolicyRef)),
       ...(lease.profileRef === undefined ? {} : { profile: structuredClone(this.profile(state, lease.profileRef)) }),

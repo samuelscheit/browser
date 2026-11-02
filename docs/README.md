@@ -13,17 +13,41 @@ independent of the application's Puppeteer, Playwright, Patchright, or raw-CDP c
 behavior is automatically active for arbitrary sites using Cloudflare Turnstile rather than being
 an application-specific recipe loop.
 
-The guardian is deliberately **not** a universal CAPTCHA solver: it only recognizes explicit
-Cloudflare Turnstile signals and visible `challenges.cloudflare.com` Turnstile frames. It never calls
-Death by Captcha/AntiCaptcha, fabricates/exports/logs response tokens, or writes site forms. Each
-challenge has bounded time and click attempts; an unresolved challenge remains available for the
-application/manual workflow. If the guardian's own CDP channel dies, the owning executor reports the
+The Turnstile clicker recognizes only explicit Cloudflare Turnstile signals and visible
+`challenges.cloudflare.com` Turnstile frames, and it never writes site forms. Each challenge has
+bounded time and click attempts; an unresolved challenge remains available for the
+application/manual workflow. Token-solving CAPTCHAs use the separate, recipe-gated path described
+in the CAPTCHA token section below. If the guardian's own CDP channel dies, the owning executor reports the
 browser as unhealthy instead of exposing an unguarded ready lease. Media-relay jobs do not start a
 browser and therefore do not receive this companion.
 
 The only deployment knobs are bounded timing values (`FABRIC_TURNSTILE_POLL_INTERVAL_MS`,
 `FABRIC_TURNSTILE_CHALLENGE_TIMEOUT_MS`, and `FABRIC_TURNSTILE_MAX_CLICK_ATTEMPTS`). There is no
 disable switch: omitting them uses the reviewed defaults (1 second, 12 seconds, and five clicks).
+
+## CAPTCHA token solving
+
+Token CAPTCHAs are solved by a recipe-gated companion, not by the Turnstile clicker. A browser solves
+only when its recipe's challenge handler set contains an **automatic** `dbc` or `anticaptcha` handler.
+Manual, fallback, and unrelated recipes never spend provider credit.
+
+- **Supported widget:** Google reCAPTCHA v2 checkboxes (Death by Captcha token type 4, AntiCaptcha
+  `RecaptchaV2TaskProxyless`). hCaptcha is not solved: neither provider's public documentation names a
+  hCaptcha task for this path, so it fails closed as `unsupported` rather than guessing.
+- **Where it runs:** the guardian detects the widget's sitekey in its isolated world, asks the solver
+  for one token, fills the page's response field in that isolated world, then calls the widget's own
+  `data-callback` in the main world. The page's callback therefore sees the same token a human solve
+  would produce.
+- **Credentials:** provider keys are Docker secrets mounted only into the worker manager. Browser
+  containers and the egress sidecar never receive them. An empty or `#`-prefixed secret file means the
+  provider is not configured.
+- **Egress:** solver API traffic leaves through the `captcha-solver` sidecar listener (port 11008),
+  which admits only the `dbcapi.me` and `anti-captcha.com` hostnames.
+- **Bounds:** one paid solve per page document. A failed solve is not retried on later polls, and a
+  navigation resets the budget. A canceled solve is never retried through a second provider. The
+  overall deadline is two minutes per token.
+- **Logging:** only the widget kind, the page origin, and a stable failure class are logged. Sitekeys,
+  tokens, provider bodies, and credentials are never logged.
 
 ## External CDP client limits
 

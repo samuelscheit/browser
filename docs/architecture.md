@@ -55,10 +55,12 @@ issues bounded `Input.dispatchMouseEvent` movement/press/release gestures. A los
 connection makes the executor's liveness probe fail; a manager restart removes an untracked browser
 rather than silently continuing without its guardian.
 
-This is intentionally narrow: it is a local input helper for visible Cloudflare Turnstile, not an
-external token-solving service or a cross-vendor CAPTCHA clicker. It does not export or log response
-token values, cookies, page/form payloads, or external solver API data. After the configured bounded attempts
-or timeout it stops clicking and leaves the browser usable for the normal application/manual path.
+The clicker is a local input helper for visible Cloudflare Turnstile. It does not export or log
+cookies, page/form payloads, or external solver API data. After the configured bounded attempts or
+timeout it stops clicking and leaves the browser usable for the normal application/manual path.
+Token-solving CAPTCHAs follow the separate recipe-gated path described in
+[`docs/README.md`](README.md#captcha-token-solving): one paid solve per page document, with provider
+keys kept in the worker manager and never in a browser or the egress sidecar.
 
 ## Durable versus ephemeral data
 
