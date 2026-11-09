@@ -5,9 +5,12 @@ behind one stable, unauthenticated loopback address that every CDP tool understa
 
 | Command | Browser | Endpoint |
 | --- | --- | --- |
-| `fabric up` | Remote Fabric browser on fabric-host with the persistent agent profile (logins survive) | `http://127.0.0.1:9222` |
-| `fabric up --fresh` | Remote Fabric browser with a throwaway profile | `http://127.0.0.1:9222` |
-| `fabric up --local` | Chrome on this machine, own profile in `~/.config/fabric/profiles/agent`, visible window | `http://127.0.0.1:9223` |
+| `fabric up` | Chrome on this machine, own profile in `~/.config/fabric/profiles/agent`, visible window (default) | `http://127.0.0.1:9222` |
+| `fabric up --remote` | Remote Fabric browser on fabric-host with the persistent agent profile (logins survive) | `http://127.0.0.1:9223` |
+| `fabric up --remote --fresh` | Remote Fabric browser with a throwaway profile | `http://127.0.0.1:9223` |
+
+Every command (`up`, `mcp`, `goto`, `shot`, `eval`, `tabs`, `view`, `down`) uses the local browser
+unless it gets `--remote`.
 
 `fabric up` is idempotent: run it before every task. A running browser with the same settings is
 reused, so several agents share one browser (each with its own CDP connection and tabs) instead of
@@ -23,7 +26,7 @@ fabric whoami
 ```
 
 Credentials live in `~/.config/fabric/credentials.json` (mode 600). `FABRIC_URL`, `FABRIC_USERNAME`
-and `FABRIC_PASSWORD` override it. `fabric up --local` needs no credentials.
+and `FABRIC_PASSWORD` override it. The local browser needs no credentials; only `--remote` does.
 
 ## Driving the browser
 
@@ -53,11 +56,14 @@ fabric tabs                             # list tabs
 both attached to the same browser:
 
 ```sh
-claude mcp add fabric -- fabric mcp                  # remote browser
-claude mcp add fabric-local -- fabric mcp --local    # local Chrome
+claude mcp add --scope user fabric -- fabric mcp                     # local Chrome
+claude mcp add --scope user fabric-remote -- fabric mcp --remote     # remote browser
 ```
 
 Arguments after `--` go to the MCP server, e.g. `fabric mcp -- --caps vision`.
+
+The MCP server only starts the endpoint; the browser itself starts on the first browser tool call,
+so a Claude session that never browses opens no Chrome window and holds no remote browser.
 
 ### Live view: watch and take over
 
@@ -65,7 +71,7 @@ Arguments after `--` go to the MCP server, e.g. `fabric mcp -- --caps vision`.
 tabs, an address bar, back/forward/reload, mouse, wheel, keyboard and paste forwarded to the page.
 Use it to solve a login or a CAPTCHA by hand, then let the agent continue. New tabs an agent opens
 are followed automatically. For full DevTools on a remote tab, open the `devtoolsFrontendUrl` from
-`http://127.0.0.1:9222/json/list` in Chrome.
+`http://127.0.0.1:9223/json/list` in Chrome.
 
 ## Lifecycle and limits
 
@@ -78,10 +84,10 @@ are followed automatically. For full DevTools on a remote tab, open the `devtool
 - **TTL:** a remote session lives at most `--ttl` (default and maximum 4 h); the next client then
   gets a new one.
 - **Capacity:** fabric-host runs at most three interactive Chromium browsers (shared with CHAT) and six
-  browsers in total. When none is free, `fabric up` explains it after 60 s; use `--fresh` (does not
-  wait for the persistent profile) or `--local`.
+  browsers in total. When none is free, `fabric up --remote` explains it after 60 s; use `--fresh`
+  (does not wait for the persistent profile) or the local browser.
 - The persistent `profile_agent` is used by one session at a time. If another machine holds it,
-  `fabric up` says so; `fabric up --fresh` or `--local` always work.
+  `fabric up --remote` says so; `fabric up --remote --fresh` or the local browser always work.
 - One remote session accepts up to eight CDP clients (an MCP, scripts, the live view and the
   daemon's keep-alive connection share it).
 - Turnstile checkboxes are clicked automatically in both modes (the same guardian every Fabric
@@ -97,7 +103,7 @@ your user can drive the browser, exactly as with `--remote-debugging-port`.
 ## Several browsers
 
 `--name <name>` runs additional browsers side by side (they get ports from 9224), e.g.
-`fabric up --fresh --name research` and `fabric goto example.com --name research`.
+`fabric up --remote --fresh --name research` and `fabric goto example.com --name research`.
 
 ## Using the API directly
 

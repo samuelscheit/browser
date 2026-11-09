@@ -46,21 +46,28 @@ describe("credentials", () => {
 describe("browser requests", () => {
   const values = (extra: Record<string, unknown> = {}) => ({ ...extra }) as Parameters<typeof browserRequest>[0];
 
-  test("defaults: remote on 9222 with the persistent profile, local on 9223", async () => {
-    expect(await browserRequest(values())).toEqual({ name: "remote", mode: "remote", port: 9222, fresh: false, ttlSeconds: 14_400, idleMinutes: 10, headless: false });
-    expect(await browserRequest(values({ local: true, headless: true }))).toMatchObject({ name: "local", mode: "local", port: 9223, headless: true });
+  test("defaults: the local browser on 9222; the remote one only with --remote, on 9223", async () => {
+    expect(await browserRequest(values())).toEqual({ name: "local", mode: "local", port: 9222, fresh: false, ttlSeconds: 14_400, idleMinutes: 10, headless: false });
+    expect(await browserRequest(values({ headless: true }))).toMatchObject({ name: "local", mode: "local", port: 9222, headless: true });
+    expect(await browserRequest(values({ remote: true }))).toEqual({ name: "remote", mode: "remote", port: 9223, fresh: false, ttlSeconds: 14_400, idleMinutes: 10, headless: false });
+    expect(await browserRequest(values({ remote: true, fresh: true, name: "scratch" }))).toMatchObject({ name: "scratch", mode: "remote", fresh: true });
   });
 
   test("an extra named browser takes the next free port that no other browser claimed", async () => {
     writeState({ request: remoteRequest({ name: "other", port: 9224 }), pid: process.pid, startedAt: "", status: "ready", updatedAt: "" });
     expect(await choosePort("research", "remote")).toBe(9225);
+    expect(await choosePort("research", "local")).toBe(9225);
     expect(await choosePort("research", "remote", 9500)).toBe(9500);
-    expect(await choosePort("remote", "remote")).toBe(9222);
+    expect(await choosePort("local", "local")).toBe(9222);
+    expect(await choosePort("remote", "remote")).toBe(9223);
   });
 
   test("rejects options that do not apply to the chosen mode, and invalid values", async () => {
-    await expect(browserRequest(values({ local: true, fresh: true }))).rejects.toThrow(/remote browsers only/);
-    await expect(browserRequest(values({ headless: true }))).rejects.toThrow(/--local only/);
+    for (const remoteOnly of [{ fresh: true }, { project: "project_agent" }, { recipe: "recipe_x@1" }, { egress: "egress_x@1" }]) {
+      await expect(browserRequest(values(remoteOnly))).rejects.toThrow(/need --remote/);
+    }
+    await expect(browserRequest(values({ remote: true, headless: true }))).rejects.toThrow(/local browser only/);
+    await expect(browserRequest(values({ remote: true, chrome: "/x" }))).rejects.toThrow(/local browser only/);
     await expect(browserRequest(values({ ttl: "5h" }))).rejects.toThrow(/between 1m and 4h/);
     await expect(browserRequest(values({ ttl: "30s" }))).rejects.toThrow(/between 1m and 4h/);
     await expect(browserRequest(values({ idle: "0" }))).rejects.toThrow(/--idle/);

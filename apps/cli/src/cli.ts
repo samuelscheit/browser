@@ -3,21 +3,21 @@ import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import { evaluate, goto, screenshot, tabs } from "./actions";
 import { choosePort, describeState, down, endpointUrl, liveState, mcp, MCP_SERVERS, up } from "./commands";
-import { assertName, listStates, loadCredentials, normalizeApiUrl, normalizeUsername, saveCredentials, type BrowserRequest } from "./config";
+import { assertName, listStates, loadCredentials, normalizeApiUrl, normalizeUsername, saveCredentials, type BrowserMode, type BrowserRequest } from "./config";
 import { runDaemon } from "./daemon";
 import { fetchIdentity } from "./remote-backend";
 
-export const HELP = `fabric — a CDP browser for agents: remote (Browser Fabric) or local Chrome
+export const HELP = `fabric — a CDP browser for agents: local Chrome, or remote (Browser Fabric) on request
 
 Start a browser (idempotent; reuses a running one) and print its endpoint:
-  fabric up                  remote browser with the persistent agent profile → http://127.0.0.1:9222
-  fabric up --local          Chrome on this machine (own profile, visible window) → http://127.0.0.1:9223
-  fabric up --fresh          remote browser without the persistent profile (throwaway)
+  fabric up                  Chrome on this machine (own profile, visible window) → http://127.0.0.1:9222
+  fabric up --remote         remote browser with the persistent agent profile → http://127.0.0.1:9223
+  fabric up --remote --fresh remote browser without the persistent profile (throwaway)
 
 Drive it from any CDP client:
   Playwright   chromium.connectOverCDP("http://127.0.0.1:9222")
   Puppeteer    puppeteer.connect({ browserURL: "http://127.0.0.1:9222" })
-  MCP          fabric mcp [--local] [--server playwright|devtools]   (stdio MCP server)
+  MCP          fabric mcp [--remote] [--server playwright|devtools]   (stdio MCP server)
   Live view    fabric view   (watch and take over: click, type, switch tabs)
 
 Quick actions (start the browser when needed):
@@ -32,14 +32,14 @@ Manage:
   fabric whoami              principal, projects, profiles and recipes you can use
 
 Options for up/mcp/actions:
-  --local  --name <name>  --port <port>  --profile <ref|dir>  --fresh  --project <id>
+  --remote  --name <name>  --port <port>  --profile <ref|dir>  --fresh  --project <id>
   --recipe <ref>  --egress <ref>  --ttl <4h|90m|seconds>  --idle <minutes>  --headless  --chrome <path>
   --tab <index|id>  --full  --json
 The remote browser is released after --idle minutes (default 10) without a client and restarts
 on the next connection; logins in the persistent profile survive, open tabs do not.`;
 
 const options = {
-  local: { type: "boolean" },
+  remote: { type: "boolean" },
   name: { type: "string" },
   port: { type: "string" },
   profile: { type: "string" },
@@ -82,11 +82,15 @@ function parse(argv: string[]) {
   return parseArgs({ args: argv, options, allowPositionals: true, strict: true });
 }
 
+const modeOf = (values: Values): BrowserMode => values.remote ? "remote" : "local";
+/** Each mode's default browser is named after the mode, so `--remote` alone selects it. */
+const nameOf = (values: Values, positional?: string): string => positional ?? values.name ?? modeOf(values);
+
 export async function browserRequest(values: Values): Promise<BrowserRequest> {
-  const mode = values.local ? "local" : "remote";
-  if (values.local && (values.fresh || values.project || values.recipe || values.egress)) throw new Error("--fresh, --project, --recipe and --egress apply to remote browsers only");
-  if (!values.local && (values.headless || values.chrome)) throw new Error("--headless and --chrome apply to --local only");
-  const name = assertName(values.name ?? mode);
+  const mode = modeOf(values);
+  if (mode === "local" && (values.fresh || values.project || values.recipe || values.egress)) throw new Error("--fresh, --project, --recipe and --egress need --remote");
+  if (mode === "remote" && (values.headless || values.chrome)) throw new Error("--headless and --chrome apply to the local browser only");
+  const name = assertName(nameOf(values));
   const ttlSeconds = parseDuration(values.ttl, 4 * 3600);
   if (ttlSeconds < 60 || ttlSeconds > 14_400) throw new Error("--ttl must be between 1m and 4h");
   return {
@@ -107,8 +111,7 @@ export async function browserRequest(values: Values): Promise<BrowserRequest> {
 
 /** Actions reuse the named browser, or start one with default settings. */
 async function actionPort(values: Values): Promise<number> {
-  const name = values.name ?? (values.local ? "local" : "remote");
-  const running = liveState(name);
+  const running = liveState(nameOf(values));
   if (running && (running.status === "ready" || running.status === "idle")) return running.request.port;
   return (await up(await browserRequest(values))).request.port;
 }
@@ -131,7 +134,7 @@ async function readPassword(values: Values): Promise<string> {
 
 export async function main(argv: string[]): Promise<void> {
   const [command = "help", ...rest] = argv;
-  if (command === "__daemon") return runDaemon(JSON.parse(rest[0]!) as BrowserRequest);
+  if (command === "__daemon") return runDaemon(JSON.parse(rest[0]!) as BrowserRequest, rest[1] === "warm");
   const separator = rest.indexOf("--");
   const { values, positionals } = parse(separator === -1 ? rest : rest.slice(0, separator));
   const passthrough = separator === -1 ? [] : rest.slice(separator + 1);
@@ -147,14 +150,14 @@ export async function main(argv: string[]): Promise<void> {
       return;
     }
     case "down": {
-      const names = values.all ? listStates().map((state) => state.request.name) : [positionals[0] ?? values.name ?? (values.local ? "local" : "remote")];
+      const names = values.all ? listStates().map((state) => state.request.name) : [nameOf(values, positionals[0])];
       for (const name of names) console.log(await down(name) ? `stopped ${name}` : `${name} is not running`);
       return;
     }
     case "status":
     case "ls": {
       const states = listStates().map((state) => liveState(state.request.name)).filter((state) => state !== undefined);
-      print(values, states.length ? states.map(describeState).join("\n\n") : "no browser running; start one with `fabric up` or `fabric up --local`", states);
+      print(values, states.length ? states.map(describeState).join("\n\n") : "no browser running; start one with `fabric up` (local) or `fabric up --remote`", states);
       return;
     }
     case "view": {

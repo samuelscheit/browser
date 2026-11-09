@@ -97,7 +97,8 @@ export interface DaemonState {
   updatedAt: string;
 }
 
-export const DEFAULT_PORTS: Record<BrowserMode, number> = { remote: 9222, local: 9223 };
+/** Local Chrome is the default browser, so it gets Chrome's conventional DevTools port. */
+export const DEFAULT_PORTS: Record<BrowserMode, number> = { local: 9222, remote: 9223 };
 
 export const runDirectory = (home = fabricHome()) => join(home, "run");
 export const statePath = (name: string, home = fabricHome()) => join(runDirectory(home), `${name}.json`);
