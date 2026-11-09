@@ -27,6 +27,11 @@ jobs:
           FABRIC_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       - run: RUN_BROWSER_INTEGRATION=1 bun test tests/raw-cdp.integration.test.ts --timeout 120000
       - run: bun scripts/validate-deployment.ts
+      # The Social worker is Python; its crypto must accept what the TypeScript control plane produces.
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r workers/playwright-social/requirements.lock pytest==8.4.2
+      - run: python -m pytest -q workers/playwright-social/tests
       - run: ./scripts/validate-sql.sh browser_fabric_ci
         env:
           PGHOST: localhost
