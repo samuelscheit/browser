@@ -1,11 +1,11 @@
 /** Shared contracts for the process-level Cloudflare Turnstile guardian. */
 
 import type { TokenCaptchaSolver } from "./captcha-solvers/types";
+import type { CdpFetcher, CdpTransportFactory } from "./cdp-connection";
 
 export const DEFAULT_TURNSTILE_POLL_INTERVAL_MS = 1_000;
 export const DEFAULT_TURNSTILE_CHALLENGE_TIMEOUT_MS = 12_000;
 export const DEFAULT_TURNSTILE_MAX_CLICK_ATTEMPTS = 5;
-export const DEFAULT_TURNSTILE_CONNECT_TIMEOUT_MS = 10_000;
 
 export interface TurnstileGuardianSpec {
   /** Fabric-owned Chromium processes always set this to true. */
@@ -19,26 +19,14 @@ export interface TurnstileGuardianSpec {
 }
 
 export type TurnstileGuardianLogger = (event: string, details?: Record<string, unknown>) => void;
-/** Minimal fetch surface required for deterministic CDP discovery tests. */
-export type TurnstileGuardianFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-
-/** Small WebSocket surface shared by native and deterministic test transports. */
-export interface CdpTransport {
-  readonly readyState?: number;
-  send(message: string): void;
-  close(code?: number, reason?: string): void;
-  addEventListener(type: "open" | "message" | "close" | "error", listener: (event: any) => void, options?: { once?: boolean }): void;
-  removeEventListener?(type: "open" | "message" | "close" | "error", listener: (event: any) => void): void;
-}
-
 export interface TurnstileGuardianOptions extends Partial<Omit<TurnstileGuardianSpec, "enabled">> {
   /** Browser websocket endpoint, or an HTTP(S) /json/version endpoint. */
   endpoint: string;
   connectTimeoutMs?: number;
   /** Test/in-process hook. Production uses the native WebSocket implementation. */
-  transportFactory?: (webSocketUrl: string, timeoutMs: number) => Promise<CdpTransport>;
+  transportFactory?: CdpTransportFactory;
   /** Test hook for resolving HTTP /json/version endpoints. */
-  fetcher?: TurnstileGuardianFetcher;
+  fetcher?: CdpFetcher;
   logger?: TurnstileGuardianLogger;
   /** Token solver for visible reCAPTCHA v2 widgets. Absent unless the recipe enables a provider. */
   tokenSolver?: TokenCaptchaSolver;

@@ -11,7 +11,6 @@
  */
 import {
   DEFAULT_TURNSTILE_CHALLENGE_TIMEOUT_MS,
-  DEFAULT_TURNSTILE_CONNECT_TIMEOUT_MS,
   DEFAULT_TURNSTILE_MAX_CLICK_ATTEMPTS,
   DEFAULT_TURNSTILE_POLL_INTERVAL_MS,
   type TurnstileChallengeBox,
@@ -27,7 +26,7 @@ import { BROWSER_FINGERPRINT_SCRIPT } from "./browser-fingerprint";
 import type { CaptchaTask, TokenCaptchaSolver } from "./captcha-solvers/types";
 import { isCaptchaSitekey, CaptchaSolverError } from "./captcha-solvers/types";
 import { RECAPTCHA_V2_PROBE_SCRIPT, recaptchaCallbackScript, recaptchaFillScript } from "./captcha-solvers/recaptcha-page";
-import { CdpConnection } from "./turnstile-guardian-cdp";
+import { CdpConnection, DEFAULT_CDP_CONNECT_TIMEOUT_MS } from "./cdp-connection";
 import {
   TURNSTILE_MOUSE_COMPAT_SCRIPT,
   TURNSTILE_OBSERVATION_SCRIPT,
@@ -50,16 +49,13 @@ import {
 
 export {
   DEFAULT_TURNSTILE_CHALLENGE_TIMEOUT_MS,
-  DEFAULT_TURNSTILE_CONNECT_TIMEOUT_MS,
   DEFAULT_TURNSTILE_MAX_CLICK_ATTEMPTS,
   DEFAULT_TURNSTILE_POLL_INTERVAL_MS,
 } from "./turnstile-guardian-types";
 export type {
-  CdpTransport,
   TurnstileChallengeBox,
   TurnstileGuardianFactory,
   TurnstileGuardianFactoryInput,
-  TurnstileGuardianFetcher,
   TurnstileGuardianHandle,
   TurnstileGuardianLogger,
   TurnstileGuardianOptions,
@@ -71,7 +67,6 @@ export {
   TURNSTILE_MOUSE_COMPAT_SCRIPT,
   TURNSTILE_OBSERVATION_SCRIPT,
 } from "./turnstile-guardian-observation";
-export { resolveTurnstileGuardianWebSocketEndpoint } from "./turnstile-guardian-cdp";
 
 const MAX_TRACKED_CHALLENGES_PER_PAGE = 64;
 const ISOLATED_WORLD_NAME = "fabric-turnstile-guardian";
@@ -146,7 +141,7 @@ function normalizeOptions(options: TurnstileGuardianOptions): {
     pollIntervalMs: numberInRange(options.pollIntervalMs, DEFAULT_TURNSTILE_POLL_INTERVAL_MS, 250, 30_000),
     challengeTimeoutMs: numberInRange(options.challengeTimeoutMs, DEFAULT_TURNSTILE_CHALLENGE_TIMEOUT_MS, 1_000, 120_000),
     maxClickAttempts: numberInRange(options.maxClickAttempts, DEFAULT_TURNSTILE_MAX_CLICK_ATTEMPTS, 1, 20, true),
-    connectTimeoutMs: numberInRange(options.connectTimeoutMs, DEFAULT_TURNSTILE_CONNECT_TIMEOUT_MS, 500, 60_000),
+    connectTimeoutMs: numberInRange(options.connectTimeoutMs, DEFAULT_CDP_CONNECT_TIMEOUT_MS, 500, 60_000),
     ...(options.transportFactory ? { transportFactory: options.transportFactory } : {}),
     ...(options.fetcher ? { fetcher: options.fetcher } : {}),
     ...(options.logger ? { logger: options.logger } : {}),

@@ -182,6 +182,7 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
         const file = Bun.file(new URL("../../../packages/contracts/openapi/browser-fabric.openapi.yaml", import.meta.url));
         return new Response(await file.text(), { status: 200, headers: { "content-type": "application/yaml; charset=utf-8", ...corsHeaders } });
       }
+      if (parts.length === 1 && parts[0] === "me" && request.method === "GET") return json(await options.scheduler.describePrincipal(actor), 200, corsHeaders);
       if (parts.length === 1 && parts[0] === "browser-sessions" && request.method === "POST") {
         const parsed = parseBrowserSessionCreate(await requestJson(request));
         requireIdempotencyHeader(request, parsed);

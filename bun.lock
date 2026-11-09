@@ -36,6 +36,18 @@
         "pg": "^8.23.0",
       },
     },
+    "apps/cli": {
+      "name": "@browser-fabric/cli",
+      "version": "0.1.0",
+      "bin": {
+        "fabric": "./src/cli.ts",
+      },
+      "dependencies": {
+        "@browser-fabric/client": "workspace:*",
+        "@browser-fabric/contracts": "workspace:*",
+        "@browser-fabric/worker-runtime": "workspace:*",
+      },
+    },
     "apps/egress-sidecar": {
       "name": "@browser-fabric/egress-sidecar",
       "version": "0.1.0",
@@ -162,6 +174,8 @@
     "@browser-fabric/api": ["@browser-fabric/api@workspace:apps/api"],
 
     "@browser-fabric/cdp-gateway": ["@browser-fabric/cdp-gateway@workspace:apps/cdp-gateway"],
+
+    "@browser-fabric/cli": ["@browser-fabric/cli@workspace:apps/cli"],
 
     "@browser-fabric/client": ["@browser-fabric/client@workspace:packages/client-ts"],
 

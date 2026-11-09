@@ -2,6 +2,10 @@
 
 Browser Fabric is the shared browser control plane described in [`/PLAN.md`](../PLAN.md). It owns process lifecycle, profile/volume affinity, leases, scheduling, browser-level CDP capabilities, egress policy, challenge orchestration, artifacts, Companion transport, and worker health. Domain applications remain responsible for business workflows and call the control plane through the typed clients.
 
+**Agents and people who just need a browser:** use the `fabric` CLI ([`agents.md`](agents.md)).
+`fabric up` (remote) or `fabric up --local` (Chrome on this machine) prints a plain
+`http://127.0.0.1:<port>` CDP endpoint for Playwright, Puppeteer or an MCP, plus a live view.
+
 ## Global Cloudflare Turnstile guardian
 
 Every Fabric-owned **Chromium** process starts a process-level Turnstile guardian before its lease
@@ -51,12 +55,33 @@ Manual, fallback, and unrelated recipes never spend provider credit.
 
 ## External CDP client limits
 
-Browser sessions accept one external CDP client by default. A reviewed workload may request
-`maxExternalConnections: 2` when two independent clients must share the same isolated browser—for
-example, a passive network recorder attached before a Companion automation client. The session value
-is persisted and enforced by PostgreSQL; the scheduler also retains a global ceiling of two. Values
-above two are rejected by the public contract, and opting one session into two clients does not widen
-any existing or unrelated session.
+Browser sessions accept one external CDP client by default. A session may request up to
+`maxExternalConnections: 8` (`MAX_EXTERNAL_CDP_CONNECTIONS`) when independent clients share the same
+isolated browser—for example a passive network recorder attached before a Companion automation client,
+or an agent's MCP, scripts, live view and keep-alive connection. Chromium serves many DevTools
+clients natively and every client already holds the session's full raw-CDP authority, so the limit
+bounds resources, not privilege. The value is persisted and enforced by PostgreSQL; values outside
+1–8 are rejected by the public contract, and opting one session in does not widen any other session.
+A session is released 60 seconds after its last external client disconnects.
+
+## Discovering what a principal may use
+
+`GET /v1/me` returns the caller's projects, the profiles it may lease, the recipes a registered
+worker serves (with their `raw_cdp`/`typed_job` access), and the egress and artifact policy refs.
+Clients use it to pick valid refs instead of reading deployment files.
+
+## Application principals
+
+Each application authenticates at the edge with HTTP Basic: the username is its principal ID
+(`principal_<name>`), the password is the Docker secret `fabric_api_password_<name>`. The edge
+derives one account per mounted secret, so adding a principal means:
+
+1. add `<name>` to `deploy/compose/ensure-application-passwords.sh` and run it on the host,
+2. declare `fabric_api_password_<name>` in the Compose file and mount it into `fabric-edge`
+   (`bun run validate:deployment` checks both),
+3. add the principal (and its project/profiles) to the provisioning manifest.
+
+A rejected credential gets a 401 whose body explains the username format.
 
 ## Local development
 
@@ -79,6 +104,7 @@ The default test suite uses an in-memory store and fake clock. PostgreSQL and Mi
 | Worker manager | `apps/worker-manager/src/server.ts` | worker registration, mailbox, assignment claims |
 | Encrypted input broker | `apps/input-broker/src/index.ts` | transient ciphertext-only input handoff |
 | Local agent | `apps/local-agent/src/index.ts` | outbound-only interactive worker |
+| Agent CLI | `apps/cli/src/cli.ts` (`fabric`) | per-user loopback CDP endpoint, live view and MCP for a remote session or local Chrome |
 | Companion adapter | `apps/companion-adapter/src/index.ts` | session-scoped Companion lifecycle |
 
 `media-relay` and `media-playback` never create a browser lease. The former is a bounded immutable

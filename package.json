@@ -15,7 +15,7 @@
     "dev:gateway": "bun --watch apps/cdp-gateway/src/index.ts",
     "dev:worker-manager": "bun --watch apps/worker-manager/src/index.ts",
     "test": "bun test --timeout 30000",
-    "test:integration": "RUN_BROWSER_INTEGRATION=1 bun test tests/raw-cdp.integration.test.ts --timeout 120000",
+    "test:integration": "RUN_BROWSER_INTEGRATION=1 bun test tests/raw-cdp.integration.test.ts tests/fabric-cli-local.integration.test.ts --timeout 120000",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun run test && bun run validate:docker && bun run validate:deployment",
     "validate:docker": "bun scripts/validate-dockerfiles.ts",

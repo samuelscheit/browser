@@ -39,6 +39,14 @@ export function isMediaRuntime(value: string): value is MediaRuntimeFamily {
 }
 
 export const leaseModes = ["writer", "interactive", "clone"] as const;
+
+/**
+ * Simultaneous external CDP clients one session may allow. Chromium serves many DevTools clients
+ * natively and every client already holds the session's full raw-CDP authority, so this bounds
+ * resources rather than privilege: an agent shares one browser between an MCP, scripts, a live
+ * view and its keep-alive connection. Sessions default to one.
+ */
+export const MAX_EXTERNAL_CDP_CONNECTIONS = 8;
 export type LeaseMode = (typeof leaseModes)[number];
 
 export const browserSessionStatuses = [
@@ -117,6 +125,21 @@ export interface Principal {
   roles: readonly ("project_admin" | "project_operator" | "project_reader" | "fabric_admin")[];
   certificateFingerprint: string;
   createdAt: string;
+}
+
+/**
+ * `GET /v1/me`: what the calling principal may use, so a client can choose valid project,
+ * profile, recipe and policy refs without reading deployment files.
+ */
+export interface PrincipalCapabilities {
+  principal: PrincipalId;
+  roles: Principal["roles"];
+  projects: { id: ProjectId; name: string }[];
+  profiles: { ref: ProfileRef; ownerProject: ProjectId; grants: ProjectId[]; profileFamily: string; status: ProfileStatus }[];
+  /** Recipes at least one registered worker serves. `raw_cdp` recipes back browser sessions; the rest run typed jobs. */
+  recipes: { ref: RecipeRef; runtime: RuntimeFamily; mode: BrowserRecipe["mode"]; access: "raw_cdp" | "typed_job"; profileFamily: string }[];
+  egressPolicies: EgressPolicyRef[];
+  artifactPolicies: ArtifactPolicyRef[];
 }
 
 export interface Project {
@@ -292,8 +315,8 @@ export interface BrowserSessionCreateInput {
   leaseMode: LeaseMode;
   egressPolicyRef: EgressPolicyRef;
   artifactPolicyRef: ArtifactPolicyRef;
-  /** Maximum simultaneous external CDP clients for this session. Defaults to one. */
-  maxExternalConnections?: 1 | 2;
+  /** Maximum simultaneous external CDP clients for this session, 1 to MAX_EXTERNAL_CDP_CONNECTIONS. Defaults to one. */
+  maxExternalConnections?: number;
   metadata?: Record<string, string | number | boolean | null>;
   ttlSeconds: number;
 }
@@ -317,7 +340,7 @@ export interface BrowserSession {
   cdpEndpoint?: string;
   cdpInternalEndpoint?: string;
   cdpCapabilityExpiresAt?: string;
-  maxExternalConnections?: 1 | 2;
+  maxExternalConnections?: number;
   externalConnectionCount: number;
   reconnectGraceUntil?: string;
   expiresAt: string;
