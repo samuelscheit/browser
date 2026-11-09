@@ -138,7 +138,7 @@ export class RemoteBackend implements BrowserBackend {
         + (input.profileRef
           ? `The profile ${input.profileRef} is used by one session at a time and may be held by another machine, or every browser slot is busy. `
           : "Every browser slot may be busy. ")
-        + `Try \`fabric up --fresh\` or \`fabric up --local\`. (${error instanceof Error ? error.message : String(error)})`,
+        + `Try \`fabric up --remote --fresh\` or the local browser (\`fabric up\`). (${error instanceof Error ? error.message : String(error)})`,
       );
     }
     if (TERMINAL.has(ready.status)) {

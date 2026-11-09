@@ -36,41 +36,41 @@ run("fabric CLI with a local headless Chrome", () => {
   });
 
   test("up is idempotent and refuses a running browser with different settings", () => {
-    const started = JSON.parse(ok("up", "--local", "--headless", "--port", String(port), "--json"));
+    const started = JSON.parse(ok("up", "--headless", "--port", String(port), "--json"));
     expect(started).toMatchObject({ status: "ready", endpoint: `http://127.0.0.1:${port}`, request: { mode: "local", name: "local", headless: true } });
-    const again = JSON.parse(ok("up", "--local", "--headless", "--port", String(port), "--json"));
+    const again = JSON.parse(ok("up", "--headless", "--port", String(port), "--json"));
     expect(again.pid).toBe(started.pid);
-    const conflict = fabric("up", "--local", "--port", String(port));
+    const conflict = fabric("up", "--port", String(port));
     expect(conflict.code).toBe(1);
     expect(conflict.stderr).toContain("already running with other settings");
   });
 
   test("actions drive the current tab: goto, eval, tabs and screenshots", () => {
     const page = "data:text/html,<title>Fabric test</title><h1 style='height:3000px'>Hello</h1>";
-    expect(ok("goto", page, "--local")).toBe(`Fabric test\n${page}`);
-    expect(ok("eval", "--local", "document.querySelector('h1').textContent")).toBe("Hello");
-    expect(JSON.parse(ok("eval", "--local", "--json", "({ n: 1 + 1, list: [1, 'a'] })"))).toEqual({ n: 2, list: [1, "a"] });
-    const thrown = fabric("eval", "--local", "throw new Error('boom')");
+    expect(ok("goto", page)).toBe(`Fabric test\n${page}`);
+    expect(ok("eval", "document.querySelector('h1').textContent")).toBe("Hello");
+    expect(JSON.parse(ok("eval", "--json", "({ n: 1 + 1, list: [1, 'a'] })"))).toEqual({ n: 2, list: [1, "a"] });
+    const thrown = fabric("eval", "throw new Error('boom')");
     expect(thrown.code).toBe(1);
     expect(thrown.stderr).toContain("boom");
     const viewport = join(home, "viewport.png");
     const full = join(home, "full.png");
-    expect(ok("shot", viewport, "--local")).toBe(viewport);
-    expect(ok("shot", full, "--full", "--local")).toBe(full);
+    expect(ok("shot", viewport)).toBe(viewport);
+    expect(ok("shot", full, "--full")).toBe(full);
     const png = (path: string) => { const bytes = readFileSync(path); return { signature: bytes.subarray(1, 4).toString(), height: bytes.readUInt32BE(20) }; };
     expect(png(viewport).signature).toBe("PNG");
     expect(png(full).height).toBeGreaterThan(png(viewport).height);
-    const tabs = JSON.parse(ok("tabs", "--local", "--json")) as { targetId: string; title: string }[];
+    const tabs = JSON.parse(ok("tabs", "--json")) as { targetId: string; title: string }[];
     expect(tabs[0]!.title).toBe("Fabric test");
   });
 
   test("a new tab becomes current, and --tab switches back", async () => {
     await fetch(`http://127.0.0.1:${port}/json/new?data:text/html,<title>Second</title>`, { method: "PUT" });
     await Bun.sleep(300);
-    expect(ok("eval", "--local", "document.title")).toBe("Second");
-    expect(ok("eval", "--local", "--tab", "1", "document.title")).toBe("Fabric test");
-    expect(ok("eval", "--local", "document.title")).toBe("Fabric test");
-    expect(fabric("eval", "--local", "--tab", "9", "1").stderr).toContain("no tab 9");
+    expect(ok("eval", "document.title")).toBe("Second");
+    expect(ok("eval", "--tab", "1", "document.title")).toBe("Fabric test");
+    expect(ok("eval", "document.title")).toBe("Fabric test");
+    expect(fabric("eval", "--tab", "9", "1").stderr).toContain("no tab 9");
   });
 
   test("a login cookie set just before `down` survives in the persistent profile", async () => {
@@ -81,12 +81,12 @@ run("fabric CLI with a local headless Chrome", () => {
     try {
       const origin = `http://127.0.0.1:${sitePort}/`;
       for (let attempt = 0; attempt < 50 && !(await fetch(origin).then((response) => response.ok, () => false)); attempt += 1) await Bun.sleep(50);
-      ok("goto", origin, "--local");
-      expect(ok("eval", "--local", "document.cookie = 'session=fresh; max-age=86400; path=/'; document.cookie")).toBe("session=fresh");
+      ok("goto", origin);
+      expect(ok("eval", "document.cookie = 'session=fresh; max-age=86400; path=/'; document.cookie")).toBe("session=fresh");
       expect(ok("down", "local")).toBe("stopped local");
-      ok("up", "--local", "--headless", "--port", String(port));
-      ok("goto", origin, "--local");
-      expect(ok("eval", "--local", "document.cookie")).toBe("session=fresh");
+      ok("up", "--headless", "--port", String(port));
+      ok("goto", origin);
+      expect(ok("eval", "document.cookie")).toBe("session=fresh");
     } finally {
       site.kill();
     }
@@ -104,12 +104,39 @@ run("fabric CLI with a local headless Chrome", () => {
     expect(ok("down", "local")).toBe("local is not running");
   });
 
+  test("an MCP-style lazy start costs no browser until the first client, and up wakes it", async () => {
+    const lazyPort = await freePort();
+    const previousHome = process.env.FABRIC_HOME;
+    process.env.FABRIC_HOME = home;
+    process.env.FABRIC_CHROME = chrome;
+    try {
+      const { up } = await import("../apps/cli/src/commands");
+      const request = { name: "lazy", mode: "local" as const, port: lazyPort, fresh: false, ttlSeconds: 3600, idleMinutes: 10, headless: true };
+      const state = await up(request, { warm: false });
+      expect(state.status).toBe("idle");
+      const health = async () => (await (await fetch(`http://127.0.0.1:${lazyPort}/healthz`)).json()) as { detail: string };
+      expect((await health()).detail).toContain("not running");
+      // The first client starts Chrome.
+      expect(ok("eval", "--name", "lazy", "1 + 1")).toBe("2");
+      expect((await health()).detail).toMatch(/local Chrome pid \d+/);
+      expect(ok("down", "lazy")).toBe("stopped lazy");
+      // A warm `up` on a lazy daemon returns only once Chrome runs.
+      await up(request, { warm: false });
+      const woken = JSON.parse(ok("up", "--headless", "--name", "lazy", "--port", String(lazyPort), "--json"));
+      expect(woken.status).toBe("ready");
+      expect((await health()).detail).toMatch(/local Chrome pid \d+/);
+      expect(ok("down", "lazy")).toBe("stopped lazy");
+    } finally {
+      if (previousHome === undefined) delete process.env.FABRIC_HOME; else process.env.FABRIC_HOME = previousHome;
+    }
+  });
+
   test("a busy port fails fast with an actionable message", async () => {
     const busy = await freePort();
     const blocker: Server = createServer().listen(busy, "127.0.0.1");
     await new Promise((resolve) => blocker.once("listening", resolve));
     try {
-      const result = fabric("up", "--local", "--headless", "--name", "busy", "--port", String(busy));
+      const result = fabric("up", "--headless", "--name", "busy", "--port", String(busy));
       expect(result.code).toBe(1);
       expect(result.stderr).toContain(`Cannot listen on 127.0.0.1:${busy}`);
       expect(result.stderr).toContain("pass --port");

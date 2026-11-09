@@ -59,18 +59,25 @@ function tail(path: string, lines = 15): string {
  * Idempotent: an agent can call `fabric up` before every task. A running browser with the same
  * settings is reused (and shared by every client), so parallel agents never fight over a profile.
  */
-export async function up(request: BrowserRequest, options: { timeoutMs?: number } = {}): Promise<DaemonState> {
+/**
+ * `warm` (the default) returns once a browser is running; without it the endpoint is enough and
+ * the browser starts on its first client, so an unused MCP server costs no browser.
+ */
+export async function up(request: BrowserRequest, options: { timeoutMs?: number; warm?: boolean } = {}): Promise<DaemonState> {
+  const warm = options.warm ?? true;
   const running = liveState(request.name);
   if (running) {
     if (!sameRequest(running.request, request)) {
       throw new Error(`browser "${request.name}" is already running with other settings (${JSON.stringify(running.request)}). Run \`fabric down ${request.name}\` first, or use --name.`);
     }
-    if (running.status !== "starting") return running;
+    if (running.status === "ready" || (running.status === "idle" && !warm)) return running;
+    // Any /json request makes the endpoint start (or resume) its browser.
+    if (running.status === "idle") await fetch(`${endpointUrl(running.request.port)}/json/version`).catch(() => undefined);
   } else {
     removeState(request.name);
     mkdirSync(runDirectory(), { recursive: true, mode: 0o700 });
     const log = openSync(logPath(request.name), "a", 0o600);
-    const child = spawn(process.execPath, [CLI_ENTRY, "__daemon", JSON.stringify(request)], { detached: true, stdio: ["ignore", log, log], env: process.env });
+    const child = spawn(process.execPath, [CLI_ENTRY, "__daemon", JSON.stringify(request), warm ? "warm" : "lazy"], { detached: true, stdio: ["ignore", log, log], env: process.env });
     child.unref();
     closeSync(log);
   }
@@ -80,7 +87,7 @@ export async function up(request: BrowserRequest, options: { timeoutMs?: number 
     if (state?.status === "failed") {
       throw new Error(`${state.error ?? "browser failed to start"}\n--- ${logPath(request.name)} ---\n${tail(logPath(request.name))}`);
     }
-    if (state && (state.status === "ready" || state.status === "idle") && processAlive(state.pid)) return state;
+    if (state && (state.status === "ready" || (state.status === "idle" && !warm)) && processAlive(state.pid)) return state;
     if (state && !processAlive(state.pid)) throw new Error(`browser daemon exited during startup\n--- ${logPath(request.name)} ---\n${tail(logPath(request.name))}`);
     await Bun.sleep(150);
   }
@@ -121,7 +128,7 @@ export const MCP_SERVERS = {
 
 /** stdio MCP server: make sure the browser runs, then hand stdin/stdout to the MCP package. */
 export async function mcp(request: BrowserRequest, server: keyof typeof MCP_SERVERS, extra: readonly string[]): Promise<never> {
-  const state = await up(request);
+  const state = await up(request, { warm: false });
   const child = spawn("npx", [...MCP_SERVERS[server](endpointUrl(state.request.port)), ...extra], { stdio: "inherit" });
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => child.kill(signal));
   const code = await new Promise<number>((resolvePromise) => child.once("exit", (exitCode, signal) => resolvePromise(exitCode ?? (signal ? 1 : 0))));

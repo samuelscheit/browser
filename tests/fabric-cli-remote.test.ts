@@ -128,7 +128,7 @@ describe("remote backend", () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain("No remote browser became ready within 1 s");
     expect((error as Error).message).toContain("profile_agent is used by one session at a time");
-    expect((error as Error).message).toContain("fabric up --fresh");
+    expect((error as Error).message).toContain("fabric up --remote --fresh");
     expect(fabric.calls).toContain("POST /v1/browser-sessions/browser-session_1/cancel");
   });
 

@@ -7,8 +7,12 @@ import { fabricClient, RemoteBackend } from "./remote-backend";
 
 const liveViewHtml = () => readFileSync(new URL("./live-view.html", import.meta.url), "utf8");
 
-/** Long-running process behind `fabric up`; its stdout/stderr go to the browser's log file. */
-export async function runDaemon(request: BrowserRequest): Promise<void> {
+/**
+ * Long-running process behind `fabric up`; its stdout/stderr go to the browser's log file. With
+ * `warm`, the browser starts right away; otherwise (an MCP server that may never use it) the
+ * endpoint listens and the first CDP client starts the browser.
+ */
+export async function runDaemon(request: BrowserRequest, warm: boolean): Promise<void> {
   const log = (message: string) => console.log(`${new Date().toISOString()} ${message}`);
   const previous = readState(request.name);
   const state: DaemonState = { request, pid: process.pid, startedAt: new Date().toISOString(), status: "starting", updatedAt: new Date().toISOString() };
@@ -65,6 +69,10 @@ export async function runDaemon(request: BrowserRequest): Promise<void> {
     return;
   }
   log(`listening on http://127.0.0.1:${request.port}`);
+  if (!warm) {
+    publish({ status: "idle", browser: "starts on the first client" });
+    return;
+  }
   try {
     await server.warm();
   } catch (error) {
