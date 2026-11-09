@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { FabricError, parseBrowserSessionCreate, parseJobCreate, parseMediaManifest } from "@browser-fabric/contracts";
+import { FabricError, MAX_EXTERNAL_CDP_CONNECTIONS, parseBrowserSessionCreate, parseJobCreate, parseMediaManifest } from "@browser-fabric/contracts";
 import { assertDurablePayload, scalarMetadata } from "@browser-fabric/control-plane";
 import { builtInEgressPolicies, classifyTraffic, compileEgressManifest, decideEgress, parseProxyUrl, planChallenge } from "@browser-fabric/policy";
 import { builtInChallengeSets } from "@browser-fabric/policy";
@@ -20,7 +20,10 @@ describe("contracts and immutable policies", () => {
     expect(request.ttlSeconds).toBe(1800);
     expect(request.maxExternalConnections).toBe(1);
     expect(parseBrowserSessionCreate({ ...request, maxExternalConnections: 2 }).maxExternalConnections).toBe(2);
-    expect(() => parseBrowserSessionCreate({ ...request, maxExternalConnections: 3 })).toThrow(/maxExternalConnections/);
+    expect(parseBrowserSessionCreate({ ...request, maxExternalConnections: MAX_EXTERNAL_CDP_CONNECTIONS }).maxExternalConnections).toBe(8);
+    for (const invalid of [0, MAX_EXTERNAL_CDP_CONNECTIONS + 1, 2.5, "2", null]) {
+      expect(() => parseBrowserSessionCreate({ ...request, maxExternalConnections: invalid })).toThrow(/maxExternalConnections/);
+    }
     expect(() => parseBrowserSessionCreate({ ...request, project: "test" })).toThrow(FabricError);
     expect(() => parseJobCreate({ project: "project_test", idempotencyKey: "j", recipeRef: "recipe_social-insights@1", operation: {}, egressPolicyRef: "egress_social-proxy-fallback@1", artifactPolicyRef: "artifact-policy_standard-30-days@1", callback: { url: "http://insecure" } })).toThrow(/HTTPS/);
   });

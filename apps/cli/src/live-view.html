@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fabric live view</title>
+<style>
+  :root {
+    --bg: #f4f4f5; --surface: #ffffff; --border: #d4d4d8; --text: #18181b; --muted: #71717a;
+    --accent: #2563eb; --accent-text: #ffffff; --tab: #e4e4e7; --danger: #dc2626;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #09090b; --surface: #18181b; --border: #3f3f46; --text: #fafafa; --muted: #a1a1aa;
+      --accent: #3b82f6; --tab: #27272a; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 6px 8px 0; }
+  #tabs { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
+  .tab { display: flex; align-items: center; gap: 6px; max-width: 220px; min-width: 0; padding: 6px 8px; border-radius: 8px 8px 0 0;
+    background: var(--tab); color: var(--muted); border: 1px solid transparent; border-bottom: none; cursor: pointer; }
+  .tab.active { background: var(--bg); color: var(--text); border-color: var(--border); }
+  .tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab button, .icon { border: none; background: none; color: inherit; cursor: pointer; padding: 2px 6px; border-radius: 6px; font: inherit; }
+  .tab button:hover, .icon:hover { background: var(--border); }
+  nav { display: flex; gap: 4px; align-items: center; padding: 6px 8px; background: var(--bg); border-bottom: 1px solid var(--border); }
+  #url { flex: 1; min-width: 0; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; }
+  #url:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  main { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 8px; }
+  #screen { max-width: 100%; max-height: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    cursor: default; user-select: none; -webkit-user-drag: none; }
+  #screen:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+  footer { display: flex; justify-content: space-between; gap: 12px; padding: 4px 10px; color: var(--muted); border-top: 1px solid var(--border); background: var(--surface); }
+  #status.error { color: var(--danger); }
+</style>
+</head>
+<body>
+<header><div id="tabs" role="tablist" aria-label="Tabs"></div></header>
+<nav>
+  <button class="icon" id="back" title="Back" aria-label="Back">&#8592;</button>
+  <button class="icon" id="forward" title="Forward" aria-label="Forward">&#8594;</button>
+  <button class="icon" id="reload" title="Reload" aria-label="Reload">&#8635;</button>
+  <input id="url" type="text" spellcheck="false" autocomplete="off" placeholder="Type a URL and press Enter" aria-label="Address">
+  <button class="icon" id="new-tab" title="New tab" aria-label="New tab">&#65291;</button>
+</nav>
+<main><img id="screen" tabindex="0" alt="Live browser screen. Click to interact, type when focused."></main>
+<footer><span id="status">Connecting…</span><span id="hint">Click the page to control it. Keys and paste go to the page while it is focused.</span></footer>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const screen = $("screen"), urlInput = $("url"), tabsEl = $("tabs"), statusEl = $("status");
+const targets = new Map();
+let socket, nextId = 1, pending = new Map(), activeTarget, activeSession, metadata, remoteIsMac = false, discovered = false;
+
+function setStatus(text, error = false) { statusEl.textContent = text; statusEl.className = error ? "error" : ""; }
+
+function send(method, params = {}, sessionId) {
+  const id = nextId++;
+  socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject, method }));
+}
+
+function renderTabs() {
+  tabsEl.replaceChildren(...[...targets.values()].map((target) => {
+    const tab = document.createElement("div");
+    tab.className = "tab" + (target.targetId === activeTarget ? " active" : "");
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(target.targetId === activeTarget));
+    tab.title = target.url;
+    const label = document.createElement("span");
+    label.textContent = target.title || target.url || "New tab";
+    const close = document.createElement("button");
+    close.textContent = "×";
+    close.setAttribute("aria-label", "Close tab");
+    close.onclick = (event) => { event.stopPropagation(); send("Target.closeTarget", { targetId: target.targetId }); };
+    tab.append(label, close);
+    tab.onclick = () => select(target.targetId);
+    return tab;
+  }));
+  const active = targets.get(activeTarget);
+  if (active && document.activeElement !== urlInput) urlInput.value = active.url === "about:blank" ? "" : active.url;
+  document.title = active ? `${active.title || active.url} — Fabric live view` : "Fabric live view";
+}
+
+async function select(targetId) {
+  if (!targets.has(targetId)) return;
+  const previous = activeSession;
+  activeTarget = targetId;
+  activeSession = undefined;
+  renderTabs();
+  if (previous) send("Target.detachFromTarget", { sessionId: previous }).catch(() => {});
+  const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
+  if (activeTarget !== targetId) { send("Target.detachFromTarget", { sessionId }).catch(() => {}); return; }
+  activeSession = sessionId;
+  await send("Target.activateTarget", { targetId }).catch(() => {});
+  await send("Page.enable", {}, sessionId);
+  const box = screen.parentElement.getBoundingClientRect();
+  await send("Page.startScreencast", {
+    format: "jpeg", quality: 75,
+    maxWidth: Math.round(box.width * devicePixelRatio), maxHeight: Math.round(box.height * devicePixelRatio),
+  }, sessionId);
+  setStatus("Live");
+}
+
+function pickAnotherTab() {
+  const next = targets.keys().next().value;
+  if (next) select(next); else { activeTarget = undefined; activeSession = undefined; renderTabs(); screen.removeAttribute("src"); setStatus("No tabs open. Press ＋ to open one."); }
+}
+
+function handleEvent(message) {
+  const { method, params, sessionId } = message;
+  if (method === "Target.targetCreated" || method === "Target.targetInfoChanged") {
+    const info = params.targetInfo;
+    if (info.type !== "page" || info.url.startsWith("devtools://")) return;
+    const isNew = !targets.has(info.targetId);
+    targets.set(info.targetId, info);
+    // Follow tabs opened after the view connected, so you watch what the agent just opened.
+    if (isNew && method === "Target.targetCreated" && discovered) select(info.targetId); else renderTabs();
+  } else if (method === "Target.targetDestroyed") {
+    targets.delete(params.targetId);
+    if (params.targetId === activeTarget) pickAnotherTab(); else renderTabs();
+  } else if (method === "Page.screencastFrame" && sessionId === activeSession) {
+    metadata = params.metadata;
+    screen.src = "data:image/jpeg;base64," + params.data;
+    send("Page.screencastFrameAck", { sessionId: params.sessionId }, sessionId).catch(() => {});
+  } else if (method === "Target.detachedFromTarget" && params.sessionId === activeSession) {
+    activeSession = undefined;
+  }
+}
+
+function connect() {
+  socket = new WebSocket(`ws://${location.host}/devtools/browser/fabric`);
+  socket.onopen = async () => {
+    setStatus("Connected, starting browser…");
+    const version = await send("Browser.getVersion");
+    remoteIsMac = /Macintosh|Mac OS X/.test(version.userAgent);
+    discovered = false;
+    await send("Target.setDiscoverTargets", { discover: true });
+    discovered = true;
+    // Start on the tab used most recently (the endpoint orders /json/list like Chrome does).
+    const current = (await fetch("/json/list").then((response) => response.json())).find((target) => targets.has(target.id));
+    if (current) select(current.id);
+    else if (targets.size) select(targets.keys().next().value);
+    else send("Target.createTarget", { url: "about:blank" });
+  };
+  socket.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.id !== undefined) {
+      const request = pending.get(message.id);
+      pending.delete(message.id);
+      if (!request) return;
+      if (message.error) request.reject(new Error(`${request.method}: ${message.error.message}`)); else request.resolve(message.result);
+      return;
+    }
+    handleEvent(message);
+  };
+  socket.onclose = (event) => {
+    for (const request of pending.values()) request.reject(new Error("disconnected"));
+    pending.clear(); targets.clear(); activeTarget = undefined; activeSession = undefined; renderTabs();
+    setStatus(`Disconnected${event.reason ? `: ${event.reason}` : ""}. Reconnecting…`, true);
+    setTimeout(connect, 2000);
+  };
+}
+
+function modifiers(event, mapMetaToControl = false) {
+  const meta = event.metaKey && !mapMetaToControl;
+  const control = event.ctrlKey || (event.metaKey && mapMetaToControl);
+  return (event.altKey ? 1 : 0) | (control ? 2 : 0) | (meta ? 4 : 0) | (event.shiftKey ? 8 : 0);
+}
+
+function point(event) {
+  const rect = screen.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) / rect.width * (metadata?.deviceWidth ?? rect.width),
+    y: (event.clientY - rect.top) / rect.height * (metadata?.deviceHeight ?? rect.height),
+  };
+}
+
+const buttons = ["left", "middle", "right"];
+function mouse(type, event, extra = {}) {
+  if (!activeSession || !metadata) return;
+  send("Input.dispatchMouseEvent", { type, ...point(event), modifiers: modifiers(event), buttons: event.buttons, ...extra }, activeSession).catch(() => {});
+}
+screen.addEventListener("mousedown", (event) => { screen.focus(); event.preventDefault(); mouse("mousePressed", event, { button: buttons[event.button] ?? "left", clickCount: event.detail || 1 }); });
+screen.addEventListener("mouseup", (event) => mouse("mouseReleased", event, { button: buttons[event.button] ?? "left", clickCount: event.detail || 1 }));
+let moveQueued;
+screen.addEventListener("mousemove", (event) => {
+  if (moveQueued) return;
+  moveQueued = requestAnimationFrame(() => { moveQueued = undefined; mouse("mouseMoved", event, { button: event.buttons & 1 ? "left" : "none" }); });
+});
+screen.addEventListener("wheel", (event) => { event.preventDefault(); mouse("mouseWheel", event, { deltaX: event.deltaX, deltaY: event.deltaY }); }, { passive: false });
+screen.addEventListener("contextmenu", (event) => event.preventDefault());
+
+function key(type, event) {
+  if (!activeSession) return;
+  // A Linux browser expects Control where a Mac user presses Command (select all, copy, undo…).
+  const mapMeta = !remoteIsMac && event.metaKey;
+  const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey;
+  const text = type === "keyUp" ? undefined : printable ? event.key : event.key === "Enter" ? "\r" : undefined;
+  send("Input.dispatchKeyEvent", {
+    type: type === "keyUp" ? "keyUp" : text ? "keyDown" : "rawKeyDown",
+    key: event.key, code: event.code, windowsVirtualKeyCode: event.keyCode, nativeVirtualKeyCode: event.keyCode,
+    modifiers: modifiers(event, mapMeta), autoRepeat: event.repeat,
+    ...(text ? { text, unmodifiedText: text } : {}),
+  }, activeSession).catch(() => {});
+}
+screen.addEventListener("keydown", (event) => {
+  // Let the browser fire a paste event; it carries the clipboard text to the page.
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "v") return;
+  event.preventDefault();
+  key("keyDown", event);
+});
+screen.addEventListener("keyup", (event) => { event.preventDefault(); key("keyUp", event); });
+document.addEventListener("paste", (event) => {
+  if (document.activeElement !== screen || !activeSession) return;
+  event.preventDefault();
+  send("Input.insertText", { text: event.clipboardData.getData("text") }, activeSession).catch(() => {});
+});
+
+async function history(delta) {
+  if (!activeSession) return;
+  const { currentIndex, entries } = await send("Page.getNavigationHistory", {}, activeSession);
+  const entry = entries[currentIndex + delta];
+  if (entry) await send("Page.navigateToHistoryEntry", { entryId: entry.id }, activeSession);
+}
+$("back").onclick = () => history(-1).catch((error) => setStatus(error.message, true));
+$("forward").onclick = () => history(1).catch((error) => setStatus(error.message, true));
+$("reload").onclick = () => activeSession && send("Page.reload", {}, activeSession);
+$("new-tab").onclick = () => send("Target.createTarget", { url: "about:blank" }).then(({ targetId }) => setTimeout(() => select(targetId), 100));
+urlInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || !activeSession) return;
+  const raw = urlInput.value.trim();
+  if (!raw) return;
+  const url = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : raw.includes(".") && !raw.includes(" ") ? `https://${raw}` : `https://duckduckgo.com/?q=${encodeURIComponent(raw)}`;
+  send("Page.navigate", { url }, activeSession).catch((error) => setStatus(error.message, true));
+  screen.focus();
+});
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => activeTarget && select(activeTarget), 300); });
+connect();
+</script>
+</body>
+</html>

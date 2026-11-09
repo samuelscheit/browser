@@ -1,4 +1,4 @@
-import { createId, FabricError, isMediaRuntime, type Artifact, type ArtifactPolicy, type AuditEvent, type BrowserLease, type BrowserRecipe, type BrowserSession, type BrowserSessionCreateInput, type BrowserSessionId, type BrowserSessionResponse, type EgressPolicy, type EphemeralInputRequest, type FabricEvent, type Job, type JobId, type JobResponse, type JobStatus, type LeaseMode, type Principal, type Profile, type ProfileClone, type ProjectId, type Worker, type WorkerAssignment } from "@browser-fabric/contracts";
+import { createId, FabricError, MAX_EXTERNAL_CDP_CONNECTIONS, isMediaRuntime, type Artifact, type ArtifactPolicy, type AuditEvent, type BrowserLease, type BrowserRecipe, type BrowserSession, type BrowserSessionCreateInput, type BrowserSessionId, type BrowserSessionResponse, type EgressPolicy, type EphemeralInputRequest, type FabricEvent, type Job, type JobId, type JobResponse, type JobStatus, type LeaseMode, type Principal, type Profile, type ProfileClone, type ProjectId, type Worker, type WorkerAssignment } from "@browser-fabric/contracts";
 import { assertRuntimePolicyCompatibility, egressSidecarListenerForPolicy } from "@browser-fabric/policy";
 import { RecipeRegistry, type RecipeDefinition } from "@browser-fabric/recipes";
 import { CapabilitySigner } from "./capability";
@@ -23,7 +23,6 @@ export interface SchedulerKernelOptions {
   recipes: RecipeRegistry;
   maxActiveBrowserLeases: number;
   reconnectGraceSeconds: number;
-  maxExternalCdpConnections: number;
   assignmentClaimTimeoutSeconds: number;
   ephemeralInputVault?: EphemeralInputVault;
 }
@@ -35,7 +34,6 @@ export class SchedulerKernel {
   readonly #recipes: RecipeRegistry;
   readonly #maxActiveBrowserLeases: number;
   readonly #reconnectGraceSeconds: number;
-  readonly #maxExternalCdpConnections: number;
   readonly #assignmentClaimTimeoutSeconds: number;
   readonly #ephemeralInputVault?: EphemeralInputVault;
 
@@ -45,14 +43,14 @@ export class SchedulerKernel {
     this.#recipes = options.recipes;
     this.#maxActiveBrowserLeases = options.maxActiveBrowserLeases;
     this.#reconnectGraceSeconds = options.reconnectGraceSeconds;
-    this.#maxExternalCdpConnections = options.maxExternalCdpConnections;
     this.#assignmentClaimTimeoutSeconds = options.assignmentClaimTimeoutSeconds;
     this.#ephemeralInputVault = options.ephemeralInputVault;
   }
 
   public validateSessionInput(state: FabricState, input: BrowserSessionCreateInput): void {
-    if (input.maxExternalConnections !== undefined && input.maxExternalConnections !== 1 && input.maxExternalConnections !== 2) {
-      throw new FabricError("validation_failed", "maxExternalConnections must be 1 or 2", 400);
+    const connections = input.maxExternalConnections;
+    if (connections !== undefined && (!Number.isInteger(connections) || connections < 1 || connections > MAX_EXTERNAL_CDP_CONNECTIONS)) {
+      throw new FabricError("validation_failed", `maxExternalConnections must be an integer from 1 to ${MAX_EXTERNAL_CDP_CONNECTIONS}`, 400);
     }
     const recipe = this.recipe(state, input.browserRecipeRef) as RecipeDefinition;
     if (recipe.access !== "raw_cdp") throw new FabricError("validation_failed", `${recipe.ref} only supports typed jobs`, 400);

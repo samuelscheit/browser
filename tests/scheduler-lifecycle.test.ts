@@ -41,7 +41,7 @@ describe("scheduler lifecycle, leases, and recovery", () => {
     const replay = await scheduler.createBrowserSession(input, TEST_PRINCIPAL);
     expect(replay.id).toBe(first.id);
     await expect(scheduler.createBrowserSession({ ...input, ttlSeconds: 601 }, TEST_PRINCIPAL)).rejects.toThrow();
-    await expect(scheduler.createBrowserSession({ ...input, idempotencyKey: "invalid-client-limit", maxExternalConnections: 3 } as never, TEST_PRINCIPAL)).rejects.toThrow(/maxExternalConnections/);
+    await expect(scheduler.createBrowserSession({ ...input, idempotencyKey: "invalid-client-limit", maxExternalConnections: 9 } as never, TEST_PRINCIPAL)).rejects.toThrow(/maxExternalConnections/);
   });
 
   test("clone leases are isolated and destroyed on release", async () => {

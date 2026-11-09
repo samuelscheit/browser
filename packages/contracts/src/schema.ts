@@ -9,7 +9,7 @@ import {
   type RuntimeFamily
 } from "./model";
 import type { ArtifactPolicyRef, EgressPolicyRef, ProfileRef, ProjectId, RecipeRef, WorkerId } from "./ids";
-import type { Profile } from "./model";
+import { MAX_EXTERNAL_CDP_CONNECTIONS, type Profile } from "./model";
 
 export type JsonObject = Record<string, unknown>;
 
@@ -103,11 +103,7 @@ export function parseBrowserSessionCreate(value: unknown): BrowserSessionCreateI
     leaseMode: enumValue(input.leaseMode, "leaseMode", leaseModes) as LeaseMode,
     egressPolicyRef: id<EgressPolicyRef>(input.egressPolicyRef, "egressPolicyRef", "egress"),
     artifactPolicyRef: id<ArtifactPolicyRef>(input.artifactPolicyRef, "artifactPolicyRef", "artifact-policy"),
-    maxExternalConnections: input.maxExternalConnections === undefined
-      ? 1
-      : input.maxExternalConnections === 1 || input.maxExternalConnections === 2
-        ? input.maxExternalConnections
-        : (() => { throw new FabricError("validation_failed", "maxExternalConnections must be 1 or 2", 400); })(),
+    maxExternalConnections: input.maxExternalConnections === undefined ? 1 : positiveInt(input.maxExternalConnections, "maxExternalConnections", 1, MAX_EXTERNAL_CDP_CONNECTIONS),
     ...(metadata === undefined ? {} : { metadata }),
     ttlSeconds: input.ttlSeconds === undefined ? 1_800 : positiveInt(input.ttlSeconds, "ttlSeconds", 60, 14_400)
   };

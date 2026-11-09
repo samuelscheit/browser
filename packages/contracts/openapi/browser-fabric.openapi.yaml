@@ -4,12 +4,21 @@ info:
   version: 0.1.0
   description: |
     Private Browser Fabric API. Calls require a per-principal Basic credential at the ingress and a project-scoped principal.
+    The Basic username is the principal ID itself (for example `principal_agent`), not a bare name.
+    Start with `GET /me` to discover the projects, profiles, recipes and policy refs the caller may use.
     Raw CDP endpoints are short-lived signed capabilities scoped to exactly one browser session.
 servers:
   - url: https://fabric.internal.example/v1
 security:
   - fabricBasicAuth: []
 paths:
+  /me:
+    get:
+      operationId: describePrincipal
+      summary: What the calling principal may use (projects, profiles, served recipes, egress and artifact policies).
+      responses:
+        '200': { description: Principal capabilities, content: { application/json: { schema: { $ref: '#/components/schemas/PrincipalCapabilities' } } } }
+        default: { $ref: '#/components/responses/Problem' }
   /browser-sessions:
     post:
       operationId: createBrowserSession
@@ -345,8 +354,30 @@ components:
         leaseMode: { type: string, enum: [writer, interactive, clone] }
         egressPolicyRef: { type: string, pattern: '^egress_' }
         artifactPolicyRef: { type: string, pattern: '^artifact-policy_' }
+        maxExternalConnections: { type: integer, minimum: 1, maximum: 8, default: 1, description: Simultaneous external CDP clients this session allows. }
         metadata: { type: object, additionalProperties: { type: [string, number, boolean, 'null'] } }
         ttlSeconds: { type: integer, minimum: 60, maximum: 14400 }
+    PrincipalCapabilities:
+      type: object
+      required: [principal, roles, projects, profiles, recipes, egressPolicies, artifactPolicies]
+      properties:
+        principal: { type: string, pattern: '^principal_' }
+        roles: { type: array, items: { type: string } }
+        projects: { type: array, items: { type: object, required: [id, name], properties: { id: { type: string }, name: { type: string } } } }
+        profiles:
+          type: array
+          items:
+            type: object
+            required: [ref, ownerProject, grants, profileFamily, status]
+            properties: { ref: { type: string }, ownerProject: { type: string }, grants: { type: array, items: { type: string } }, profileFamily: { type: string }, status: { type: string } }
+        recipes:
+          type: array
+          items:
+            type: object
+            required: [ref, runtime, mode, access, profileFamily]
+            properties: { ref: { type: string }, runtime: { type: string }, mode: { type: string }, access: { type: string, enum: [raw_cdp, typed_job] }, profileFamily: { type: string } }
+        egressPolicies: { type: array, items: { type: string } }
+        artifactPolicies: { type: array, items: { type: string } }
     BrowserSession:
       type: object
       required: [id, status, expiresAt]

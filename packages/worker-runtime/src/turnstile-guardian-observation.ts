@@ -275,17 +275,3 @@ export function turnstileGeometryKey(box: TurnstileChallengeBox): string {
   return `${Math.round((box.x + box.width / 2) / 4)}\u0000${Math.round((box.y + box.height / 2) / 4)}\u0000${Math.round(box.width / 4)}\u0000${Math.round(box.height / 4)}`;
 }
 
-export function parseJsonMessage(event: any): Record<string, any> | undefined {
-  const raw = typeof event?.data === "string"
-    ? event.data
-    : event?.data instanceof ArrayBuffer
-      ? new TextDecoder().decode(event.data)
-      : undefined;
-  if (!raw) return undefined;
-  try {
-    const value = JSON.parse(raw);
-    return value && typeof value === "object" ? value as Record<string, any> : undefined;
-  } catch {
-    return undefined;
-  }
-}

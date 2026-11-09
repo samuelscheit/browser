@@ -1,0 +1,13 @@
+{
+  "name": "@browser-fabric/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "fabric": "./src/cli.ts"
+  },
+  "dependencies": {
+    "@browser-fabric/client": "workspace:*",
+    "@browser-fabric/contracts": "workspace:*",
+    "@browser-fabric/worker-runtime": "workspace:*"
+  }
+}

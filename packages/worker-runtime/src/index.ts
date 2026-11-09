@@ -216,5 +216,6 @@ export * from "./captcha-solvers/registry";
 export * from "./captcha-solvers/death-by-captcha";
 export * from "./captcha-solvers/anticaptcha";
 export * from "./captcha-solvers/recaptcha-page";
+export * from "./cdp-connection";
 export * from "./chromium";
 export * from "./turnstile-guardian";

@@ -8,7 +8,7 @@ import {
   WEBGL_VENDOR,
   TurnstileGuardian,
   defaultTurnstileGuardianSpec,
-  resolveTurnstileGuardianWebSocketEndpoint,
+  resolveBrowserWebSocketEndpoint,
   turnstileGuardianSpecFromEnvironment,
   type BrowserContainerSpec,
   type CdpTransport,
@@ -174,7 +174,7 @@ function buttonEvents(transport: FakeCdpTransport): Command[] {
 
 describe("Fabric Turnstile guardian", () => {
   test("normalizes a container-private browser endpoint before opening its guardian CDP connection", async () => {
-    const endpoint = await resolveTurnstileGuardianWebSocketEndpoint("http://fabric-browser-lease:9222", {
+    const endpoint = await resolveBrowserWebSocketEndpoint("http://fabric-browser-lease:9222", {
       fetcher: async (input) => {
         expect(String(input)).toBe("http://fabric-browser-lease:9222/json/version");
         return new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/opaque-browser-id" }), { status: 200 });
@@ -489,7 +489,7 @@ describe("Fabric Turnstile guardian", () => {
   });
 
   test("rejects browser endpoints containing credentials", async () => {
-    await expect(resolveTurnstileGuardianWebSocketEndpoint("http://user:password@browser.test:9222")).rejects.toThrow(/credentials/);
+    await expect(resolveBrowserWebSocketEndpoint("http://user:password@browser.test:9222")).rejects.toThrow(/credentials/);
   });
 
   test("fails its health snapshot closed when the guardian CDP channel disappears", async () => {

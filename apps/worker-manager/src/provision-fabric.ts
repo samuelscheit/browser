@@ -49,6 +49,8 @@ export interface ProvisionPlan {
   workersToEnableInteractive: readonly Worker["id"][];
   /** Narrow, quiescent migration from Chromium's legacy raw DevTools port to the Fabric bridge. */
   workersToMigrateCdpBridge: readonly Worker["id"][];
+  /** Quiescent change of a managed worker's browser capacity and per-browser resource limits. */
+  workersToResize: readonly Worker["id"][];
   profilesToCreate: readonly Profile["ref"][];
 }
 
@@ -202,16 +204,18 @@ function staticWorkerEqual(left: Worker, right: ProvisionWorker): boolean {
   return canonicalJson(staticWorkerIdentity(left)) === canonicalJson(staticWorkerIdentity(right));
 }
 
-type ManagedWorkerUpgrade = { enableInteractive: boolean; migrateCdpBridge: boolean };
+type ManagedWorkerUpgrade = { enableInteractive: boolean; migrateCdpBridge: boolean; resize: boolean };
 
 /**
  * The provisioner normally treats every worker field as immutable. There are
- * two reviewed, monotonic managed-worker upgrades: enabling interactive mode,
- * and moving the direct Chromium DevTools endpoint from 9222 to Fabric's
- * loopback-backed private bridge on 9223. Normalize only those requested
- * transitions back to their current values, then require every remaining
- * static identity field to match exactly. This allows both upgrades in one
- * idle rollout without admitting any generic worker mutation.
+ * three reviewed managed-worker upgrades: enabling interactive mode, moving the
+ * direct Chromium DevTools endpoint from 9222 to Fabric's loopback-backed
+ * private bridge on 9223, and resizing browser capacity with its resource
+ * limits. Normalize only those requested transitions back to their current
+ * values, then require every remaining static identity field to match exactly.
+ * This allows the upgrades in one idle rollout without admitting any generic
+ * worker mutation (identity, endpoints, recipes, profile families and volumes
+ * stay immutable).
  */
 function managedWorkerUpgrade(existing: Worker, desired: ProvisionWorker): ManagedWorkerUpgrade | undefined {
   if (existing.isLocal || desired.isLocal) return undefined;
@@ -219,14 +223,16 @@ function managedWorkerUpgrade(existing: Worker, desired: ProvisionWorker): Manag
   if (existing.capabilities.supportsInteractive !== desired.capabilities.supportsInteractive && !enableInteractive) return undefined;
   const migrateCdpBridge = existing.cdpRelayEndpoint === "http://fabric-browser-{leaseId}:9222" && desired.cdpRelayEndpoint === "http://fabric-browser-{leaseId}:9223";
   if (existing.cdpRelayEndpoint !== desired.cdpRelayEndpoint && !migrateCdpBridge) return undefined;
-  if (!enableInteractive && !migrateCdpBridge) return undefined;
+  const resize = existing.capacity !== desired.capacity || canonicalJson(existing.resourceLimits) !== canonicalJson(desired.resourceLimits);
+  if (!enableInteractive && !migrateCdpBridge && !resize) return undefined;
   const normalized = {
     ...desired,
+    ...(resize ? { capacity: existing.capacity, resourceLimits: existing.resourceLimits } : {}),
     ...(migrateCdpBridge ? { cdpRelayEndpoint: existing.cdpRelayEndpoint } : {}),
     ...(enableInteractive ? { capabilities: { ...desired.capabilities, supportsInteractive: existing.capabilities.supportsInteractive } } : {}),
   } satisfies ProvisionWorker;
   return canonicalJson(staticWorkerIdentity(existing)) === canonicalJson(staticWorkerIdentity(normalized))
-    ? { enableInteractive, migrateCdpBridge }
+    ? { enableInteractive, migrateCdpBridge, resize }
     : undefined;
 }
 
@@ -264,6 +270,7 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
   const workersToCreate: Worker["id"][] = [];
   const workersToEnableInteractive: Worker["id"][] = [];
   const workersToMigrateCdpBridge: Worker["id"][] = [];
+  const workersToResize: Worker["id"][] = [];
   const profilesToCreate: Profile["ref"][] = [];
   for (const project of manifest.projects) {
     const existing = state.projects.get(project.id);
@@ -284,6 +291,7 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
       if (!upgrade || workerHasActiveLease(state, worker.id)) throw new FabricError("conflict", `existing worker ${worker.id} differs from provisioning manifest`, 409);
       if (upgrade.enableInteractive) workersToEnableInteractive.push(worker.id);
       if (upgrade.migrateCdpBridge) workersToMigrateCdpBridge.push(worker.id);
+      if (upgrade.resize) workersToResize.push(worker.id);
     }
   }
   for (const profile of manifest.profiles) {
@@ -291,7 +299,7 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
     if (!existing) profilesToCreate.push(profile.ref);
     else if (!staticProfileEqual(existing, profile)) throw new FabricError("conflict", `existing profile ${profile.ref} differs from provisioning manifest`, 409);
   }
-  const plan: ProvisionPlan = { projectsToCreate, principalsToCreate, workersToCreate, workersToEnableInteractive, workersToMigrateCdpBridge, profilesToCreate };
+  const plan: ProvisionPlan = { projectsToCreate, principalsToCreate, workersToCreate, workersToEnableInteractive, workersToMigrateCdpBridge, workersToResize, profilesToCreate };
   if (dryRun) return plan;
   // Creation order is important: projects -> principals -> workers -> profiles. Refresh a snapshot
   // between stages because every method intentionally uses a serialized transaction.
@@ -305,6 +313,9 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
   }
   for (const workerId of workersToMigrateCdpBridge) {
     await runtime.scheduler.migrateManagedWorkerCdpBridgeEndpoint(workerId, bootstrapAdmin);
+  }
+  for (const worker of manifest.workers) {
+    if (workersToResize.includes(worker.id)) await runtime.scheduler.resizeManagedWorker(worker.id, { capacity: worker.capacity, resourceLimits: worker.resourceLimits }, bootstrapAdmin);
   }
   for (const profile of manifest.profiles) {
     if (profilesToCreate.includes(profile.ref)) await runtime.scheduler.createProfile(profile, bootstrapAdmin);

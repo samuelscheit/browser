@@ -28,6 +28,7 @@ import {
   type JobStatus,
   type LeaseMode,
   type Principal,
+  type PrincipalCapabilities,
   type Profile,
   type ProfileClone,
   type ProjectId,
@@ -57,7 +58,6 @@ export interface BrowserSchedulerOptions {
   recipes?: RecipeRegistry;
   maxActiveBrowserLeases?: number;
   reconnectGraceSeconds?: number;
-  maxExternalCdpConnections?: number;
   assignmentClaimTimeoutSeconds?: number;
   /** Production should inject a worker-local/E2E encrypted channel; memory is for local tests. */
   ephemeralInputVault?: EphemeralInputVault;
@@ -304,7 +304,6 @@ export class BrowserScheduler {
   readonly #recipes: RecipeRegistry;
   readonly #maxActiveBrowserLeases: number;
   readonly #reconnectGraceSeconds: number;
-  readonly #maxExternalCdpConnections: number;
   readonly #assignmentClaimTimeoutSeconds: number;
   /** Ephemeral values live only in process memory and never enter FabricState. */
   readonly #ephemeralInputVault: EphemeralInputVault;
@@ -318,9 +317,6 @@ export class BrowserScheduler {
     this.#recipes = options.recipes ?? new RecipeRegistry();
     this.#maxActiveBrowserLeases = options.maxActiveBrowserLeases ?? 4;
     this.#reconnectGraceSeconds = options.reconnectGraceSeconds ?? 60;
-    // Per-session limits remain one by default. This global ceiling permits the
-    // explicitly requested recorder + automation pair without widening legacy sessions.
-    this.#maxExternalCdpConnections = options.maxExternalCdpConnections ?? 2;
     this.#assignmentClaimTimeoutSeconds = options.assignmentClaimTimeoutSeconds ?? 30;
     this.#ephemeralInputVault = options.ephemeralInputVault ?? new EncryptedInputRouter();
     this.#allowPlaintextEphemeralInputs = options.allowPlaintextEphemeralInputs ?? false;
@@ -334,7 +330,6 @@ export class BrowserScheduler {
       recipes: this.#recipes,
       maxActiveBrowserLeases: this.#maxActiveBrowserLeases,
       reconnectGraceSeconds: this.#reconnectGraceSeconds,
-      maxExternalCdpConnections: this.#maxExternalCdpConnections,
       assignmentClaimTimeoutSeconds: this.#assignmentClaimTimeoutSeconds,
       ephemeralInputVault: this.#ephemeralInputVault
     });
@@ -403,6 +398,32 @@ export class BrowserScheduler {
 
   public async listProfiles(project: ProjectId, actor?: Principal): Promise<Profile[]> {
     return adminListProfiles({ store: this.#store, clock: this.#clock, kernel: this.#kernel }, project, actor);
+  }
+
+  /** What `actor` may use: its projects, their profiles, served recipes and policy refs. */
+  public async describePrincipal(actor: Principal): Promise<PrincipalCapabilities> {
+    const state = await this.#store.snapshot();
+    const principal = this.#kernel.authorizeIdentity(state, actor, "describe_principal", actor.id) ?? actor;
+    const admin = principal.roles.includes("fabric_admin");
+    const projects = [...state.projects.values()].filter((project) => project.active && (admin || principal.projectGrants.includes(project.id)));
+    const projectIds = new Set<string>(projects.map((project) => project.id));
+    const served = new Set<string>([...state.workers.values()].flatMap((worker) => worker.capabilities.recipeRefs));
+    const byRef = <T extends { ref: string }>(left: T, right: T) => left.ref.localeCompare(right.ref);
+    return {
+      principal: principal.id,
+      roles: [...principal.roles],
+      projects: projects.map((project) => ({ id: project.id, name: project.name })).sort((left, right) => left.id.localeCompare(right.id)),
+      profiles: [...state.profiles.values()]
+        .filter((profile) => profile.status !== "revoked" && (projectIds.has(profile.ownerProject) || profile.grants.some((grant) => projectIds.has(grant))))
+        .map((profile) => ({ ref: profile.ref, ownerProject: profile.ownerProject, grants: [...profile.grants], profileFamily: profile.profileFamily, status: profile.status }))
+        .sort(byRef),
+      recipes: [...state.recipes.values()]
+        .filter((recipe) => served.has(recipe.ref))
+        .map((recipe) => ({ ref: recipe.ref, runtime: recipe.runtime, mode: recipe.mode, access: (recipe as RecipeDefinition).access, profileFamily: recipe.profileFamily }))
+        .sort(byRef),
+      egressPolicies: [...state.egressPolicies.keys()].sort() as PrincipalCapabilities["egressPolicies"],
+      artifactPolicies: [...state.artifactPolicies.keys()].sort() as PrincipalCapabilities["artifactPolicies"],
+    };
   }
 
   public async listWorkers(actor?: Principal): Promise<Worker[]> {
@@ -602,6 +623,36 @@ export class BrowserScheduler {
       state.workers.set(worker.id, worker);
       this.#kernel.event(state, undefined, { kind: "worker", id: worker.id }, "worker.cdp_bridge_migrated", {});
       this.#kernel.audit(state, actor, undefined, "worker.cdp_bridge_migrated", { kind: "worker", id: worker.id }, "succeeded", {});
+      return structuredClone(worker);
+    });
+  }
+
+  /**
+   * Resize an idle managed worker: how many browsers it hosts and the limits each one gets. A
+   * running browser keeps the limits it started with, so the worker must be idle; identity,
+   * endpoints, recipes, profile families and volumes stay immutable.
+   */
+  public async resizeManagedWorker(workerId: Worker["id"], size: Pick<Worker, "capacity" | "resourceLimits">, actor?: Principal): Promise<Worker> {
+    return this.#store.transact((state) => {
+      this.#kernel.authorizeFabricAdmin(state, actor, "resize_managed_worker", workerId);
+      const worker = this.#kernel.worker(state, workerId);
+      if (worker.isLocal) throw new FabricError("validation_failed", "the federated local worker hosts exactly one browser", 400);
+      const { capacity, resourceLimits } = size;
+      if (!Number.isInteger(capacity) || capacity < 1 || capacity > 3 || capacity > resourceLimits.maxBrowserLeases) {
+        throw new FabricError("validation_failed", "worker capacity must be 1 to 3 and within its browser resource limit", 400);
+      }
+      if (worker.capacity === capacity && canonicalJson(worker.resourceLimits) === canonicalJson(resourceLimits)) return structuredClone(worker);
+      if ([...state.leases.values()].some((lease) => lease.workerId === worker.id && lease.status === "active")) {
+        throw new FabricError("conflict", "cannot resize a worker while it has an active lease", 409);
+      }
+      const previous = { capacity: worker.capacity, maxBrowserLeases: worker.resourceLimits.maxBrowserLeases };
+      worker.capacity = capacity;
+      worker.resourceLimits = structuredClone(resourceLimits);
+      worker.updatedAt = now(this.#clock);
+      state.workers.set(worker.id, worker);
+      const details = { previousCapacity: previous.capacity, capacity, previousMaxBrowserLeases: previous.maxBrowserLeases, maxBrowserLeases: resourceLimits.maxBrowserLeases };
+      this.#kernel.event(state, undefined, { kind: "worker", id: worker.id }, "worker.resized", details);
+      this.#kernel.audit(state, actor, undefined, "worker.resized", { kind: "worker", id: worker.id }, "succeeded", details);
       return structuredClone(worker);
     });
   }
@@ -1402,7 +1453,7 @@ export class BrowserScheduler {
       if (!session.workerId) throw new FabricError("invalid_state", "session does not have an allocated worker", 409);
       this.#capabilitySigner.verify(capability, { sessionId, project: session.project, profileRef: session.profileRef, workerId: session.workerId });
       if (!(session.status === "ready" || session.status === "active")) throw new FabricError("invalid_state", "CDP is unavailable for this session", 409);
-      const connectionLimit = Math.min(session.maxExternalConnections ?? 1, this.#maxExternalCdpConnections);
+      const connectionLimit = session.maxExternalConnections ?? 1;
       if (session.externalConnectionCount >= connectionLimit) {
         throw new FabricError("conflict", `this session allows at most ${connectionLimit} external CDP connection${connectionLimit === 1 ? "" : "s"}`, 409);
       }
