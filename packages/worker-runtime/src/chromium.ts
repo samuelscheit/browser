@@ -5,6 +5,7 @@ import type { BrowserContainerSpec } from "./index";
 import type { TokenCaptchaSolver } from "./captcha-solvers/types";
 import { FabricError } from "@browser-fabric/contracts";
 import { assertFailClosedPac } from "@browser-fabric/policy";
+import { closeBrowserGracefully } from "./cdp-connection";
 import {
   assertTurnstileGuardianSpec,
   defaultTurnstileGuardianFactory,
@@ -73,6 +74,8 @@ export class ChromiumProcessSupervisor {
   /** Cooperative cancellation for a stop racing browser/guardian startup. */
   readonly #cancelled = new Set<string>();
   readonly #guardians = new Map<string, TurnstileGuardianHandle>();
+  readonly #browserEndpoints = new Map<string, string>();
+  readonly #closeBrowser: typeof closeBrowserGracefully;
   readonly #spawner: ChromiumSpawner;
   readonly #guardianFactory: TurnstileGuardianFactory;
   readonly #tokenSolverFor?: (handlers: BrowserContainerSpec["challengeHandlers"]) => TokenCaptchaSolver | undefined;
@@ -90,11 +93,14 @@ export class ChromiumProcessSupervisor {
     executablePath?: string;
     profileRoot?: string;
     turnstileGuardianFactory?: TurnstileGuardianFactory;
+    /** Orderly browser shutdown before signals. Tests inject a fake. */
+    closeBrowser?: typeof closeBrowserGracefully;
     /** Resolves a recipe's token solver for a locally supervised browser. Absent means no solver. */
     tokenSolverFor?: (handlers: BrowserContainerSpec["challengeHandlers"]) => TokenCaptchaSolver | undefined;
   } = {}) {
     this.#spawner = options.spawner ?? defaultSpawner;
     this.#guardianFactory = options.turnstileGuardianFactory ?? defaultTurnstileGuardianFactory;
+    this.#closeBrowser = options.closeBrowser ?? closeBrowserGracefully;
     this.#tokenSolverFor = options.tokenSolverFor;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#cwd = options.cwd ?? "/tmp";
@@ -167,6 +173,7 @@ export class ChromiumProcessSupervisor {
         // Register before awaiting startup so a browser exit or a concurrent
         // stop can always find and close the companion connection.
         this.#guardians.set(processId, guardian);
+        this.#browserEndpoints.set(processId, version.webSocketDebuggerUrl);
         await guardian.start();
         this.#throwIfCancelled(processId);
         if (this.#processes.get(processId) !== child || this.#guardians.get(processId) !== guardian) {
@@ -192,12 +199,18 @@ export class ChromiumProcessSupervisor {
     const guardian = this.#guardians.get(processId);
     this.#guardians.delete(processId);
     await guardian?.stop().catch(() => undefined);
+    const browserEndpoint = this.#browserEndpoints.get(processId);
+    this.#browserEndpoints.delete(processId);
     if (!child) return;
     this.#processes.delete(processId);
     // Register before signaling: a minimal/local process implementation can
     // emit exit synchronously from kill, and must not leave us waiting for a
     // listener installed too late.
     const exited = waitForExit(child);
+    // SIGTERM skips Chromium's cookie flush; close it through CDP first so the profile keeps logins.
+    if (browserEndpoint && await this.#closeBrowser(browserEndpoint, { timeoutMs: 5_000 })) {
+      await Promise.race([exited, Bun.sleep(5_000)]);
+    }
     if (!child.kill("SIGTERM")) return;
     // Give Chromium a short graceful window, then terminate to avoid leaked profile locks.
     await Promise.race([exited, Bun.sleep(2_000)]);

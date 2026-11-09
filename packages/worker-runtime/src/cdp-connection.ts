@@ -221,3 +221,37 @@ export class CdpConnection {
     this.#closeListeners.clear();
   }
 }
+
+/**
+ * Close Chromium the orderly way before its process or container is stopped. On SIGTERM Chromium
+ * takes its "session ending" fast path, which skips flushing the cookie store (written lazily,
+ * about every 30 s), so a login made just before release would vanish from a persistent profile.
+ * `Browser.close` runs the normal shutdown and writes everything to the profile. Returns whether
+ * the browser closed within `timeoutMs`; callers still signal/stop afterwards as a fallback.
+ */
+export async function closeBrowserGracefully(endpoint: string, options: { timeoutMs?: number; headers?: Readonly<Record<string, string>>; transportFactory?: CdpTransportFactory; fetcher?: CdpFetcher } = {}): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const deadline = Date.now() + timeoutMs;
+  let connection: CdpConnection;
+  try {
+    connection = await CdpConnection.connect({
+      endpoint,
+      timeoutMs: Math.min(timeoutMs, DEFAULT_CDP_CONNECT_TIMEOUT_MS),
+      ...(options.headers ? { headers: options.headers } : {}),
+      ...(options.transportFactory ? { transportFactory: options.transportFactory } : {}),
+      ...(options.fetcher ? { fetcher: options.fetcher } : {}),
+    });
+  } catch {
+    return false;
+  }
+  const disconnected = new Promise<boolean>((resolve) => {
+    if (connection.closed) resolve(true);
+    connection.onClose(() => resolve(true));
+    setTimeout(() => resolve(false), Math.max(0, deadline - Date.now()));
+  });
+  // Chromium usually drops the socket before it answers; the disconnect is the signal that matters.
+  connection.send("Browser.close", {}, undefined, Math.max(1, deadline - Date.now())).catch(() => undefined);
+  const closed = await disconnected;
+  connection.close();
+  return closed;
+}

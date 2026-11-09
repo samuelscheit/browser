@@ -133,6 +133,8 @@ class FakeCdpTransport implements CdpTransport {
 
 class FakeChromiumProcess {
   public readonly pid = 4242;
+  /** What ended the process: a signal name, or "closed" when Chromium exited after Browser.close. */
+  public exitedBy?: string;
   #listeners = new Map<string, Array<(...args: unknown[]) => void>>();
   #exited = false;
 
@@ -143,9 +145,18 @@ class FakeChromiumProcess {
     return this;
   }
 
-  public kill(): boolean {
+  /** Chromium exiting by itself, as it does after a CDP Browser.close. */
+  public exit(): void {
+    if (this.#exited) return;
+    this.#exited = true;
+    this.exitedBy = "closed";
+    for (const listener of this.#listeners.get("exit") ?? []) listener();
+  }
+
+  public kill(signal: string = "SIGTERM"): boolean {
     if (this.#exited) return false;
     this.#exited = true;
+    this.exitedBy = signal;
     for (const listener of this.#listeners.get("exit") ?? []) listener();
     return true;
   }
@@ -514,6 +525,7 @@ describe("Fabric Turnstile guardian", () => {
     const process = new FakeChromiumProcess();
     const guardian = new FakeGuardian();
     const factoryInputs: Array<{ endpoint: string; enabled: boolean }> = [];
+    const closed: string[] = [];
     const supervisor = new ChromiumProcessSupervisor({
       executablePath: "/usr/bin/chromium",
       startupTimeoutMs: 1_000,
@@ -523,6 +535,8 @@ describe("Fabric Turnstile guardian", () => {
         factoryInputs.push({ endpoint, enabled: spec.enabled });
         return guardian;
       },
+      // Browser.close makes Chromium exit on its own, so no signal is needed.
+      closeBrowser: async (endpoint) => { closed.push(endpoint); process.exit(); return true; },
     });
     const spec: BrowserContainerSpec = {
       workerId: "worker_local_test" as never,
@@ -545,6 +559,30 @@ describe("Fabric Turnstile guardian", () => {
     expect(supervisor.isRunning(started.processId)).toBe(true);
     await supervisor.stop(started.processId);
     expect(guardian.stops).toBe(1);
+    expect(closed).toEqual([started.cdpBrowserEndpoint]);
+    expect(process.exitedBy).toBe("closed");
+    expect(supervisor.isRunning(started.processId)).toBe(false);
+  });
+
+  test("local Chromium supervision falls back to signals when the browser cannot be closed through CDP", async () => {
+    const process = new FakeChromiumProcess();
+    const supervisor = new ChromiumProcessSupervisor({
+      executablePath: "/usr/bin/chromium",
+      startupTimeoutMs: 1_000,
+      spawner: { spawn: () => process },
+      fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/local" })),
+      turnstileGuardianFactory: () => new FakeGuardian(),
+      closeBrowser: async () => false,
+    });
+    const started = await supervisor.start({
+      workerId: "worker_local_test" as never, leaseId: "browser-lease_local_fallback" as never, image: "integration", browserVersion: "system-test",
+      command: ["/usr/bin/chromium", "--headless=new"], environment: {}, volumes: [], networks: [],
+      limits: { maxBrowserLeases: 1, cpuMilli: 1_000, memoryMiB: 512, pids: 64, shmMiB: 64, temporaryStorageMiB: 128 },
+      security: { dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false },
+      cdpBind: { host: "127.0.0.1", port: 9222 }, turnstileGuardian: defaultTurnstileGuardianSpec(),
+    });
+    await supervisor.stop(started.processId);
+    expect(process.exitedBy).toBe("SIGTERM");
     expect(supervisor.isRunning(started.processId)).toBe(false);
   });
 });

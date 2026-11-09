@@ -64,6 +64,21 @@ bounds resources, not privilege. The value is persisted and enforced by PostgreS
 1–8 are rejected by the public contract, and opting one session in does not widen any other session.
 A session is released 60 seconds after its last external client disconnects.
 
+## Browser capacity
+
+`FABRIC_MAX_ACTIVE_BROWSER_LEASES` caps concurrent browser leases across the deployment (default
+4, at most `MAX_ACTIVE_BROWSER_LEASES` = 8, enforced by the scheduler and the `fabric_capacity`
+check). Each worker additionally limits its own browsers (`capacity`, 1–3, with per-browser
+`resourceLimits`); an idle worker is resized by changing it in the provisioning manifest. Every
+Fabric service validates the cap at startup, so a value outside 1–8 stops the stack from booting.
+
+## Stopping browsers keeps their profile
+
+Fabric closes Chromium through CDP `Browser.close` before it signals the process or stops the
+container (Docker executor, local supervisor and the `fabric` CLI alike). SIGTERM makes Chromium
+skip its cookie flush (cookies are written about every 30 seconds), which used to drop logins made
+shortly before a session was released.
+
 ## Discovering what a principal may use
 
 `GET /v1/me` returns the caller's projects, the profiles it may lease, the recipes a registered

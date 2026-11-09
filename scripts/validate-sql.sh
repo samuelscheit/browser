@@ -110,4 +110,29 @@ BEGIN
   END IF;
 END $$;
 SQL
-echo "SQL validation passed ($count tables; legacy media-artifact and media-playback upgrades verified)"
+# The deployment-wide lease counter originally carried an anonymous `BETWEEN 0 AND 4` check that
+# CREATE TABLE IF NOT EXISTS never revisits. Recreate it, apply 012, and prove the raised bound
+# holds (6 accepted, 9 rejected) on both a fresh and an upgraded schema.
+psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$UPGRADE_DB_NAME" <<'SQL' >/dev/null
+ALTER TABLE fabric_capacity DROP CONSTRAINT fabric_capacity_active_browser_leases_check;
+ALTER TABLE fabric_capacity ADD CHECK (active_browser_leases BETWEEN 0 AND 4);
+SQL
+psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$UPGRADE_DB_NAME" --file deploy/postgres/012_browser_lease_capacity.sql >/dev/null
+for database in "$DB_NAME" "$UPGRADE_DB_NAME"; do
+  psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$database" <<'SQL' >/dev/null
+DO $$
+BEGIN
+  UPDATE fabric_capacity SET active_browser_leases = 6 WHERE id = 1;
+  BEGIN
+    UPDATE fabric_capacity SET active_browser_leases = 9 WHERE id = 1;
+    RAISE EXCEPTION 'fabric_capacity accepted more than eight active browser leases';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  IF (SELECT count(*) FROM pg_constraint WHERE conrelid = 'fabric_capacity'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%active_browser_leases%') <> 1 THEN
+    RAISE EXCEPTION 'fabric_capacity must carry exactly one lease-count check';
+  END IF;
+  UPDATE fabric_capacity SET active_browser_leases = 0 WHERE id = 1;
+END $$;
+SQL
+done
+echo "SQL validation passed ($count tables; legacy media-artifact, media-playback and lease-capacity upgrades verified)"

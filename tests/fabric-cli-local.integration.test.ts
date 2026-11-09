@@ -73,6 +73,25 @@ run("fabric CLI with a local headless Chrome", () => {
     expect(fabric("eval", "--local", "--tab", "9", "1").stderr).toContain("no tab 9");
   });
 
+  test("a login cookie set just before `down` survives in the persistent profile", async () => {
+    // A tiny HTTP origin (cookies need a real scheme and host) in its own process: the CLI runs
+    // through spawnSync, which blocks this test's event loop.
+    const sitePort = await freePort();
+    const site = Bun.spawn([process.execPath, "-e", `Bun.serve({ hostname: "127.0.0.1", port: ${sitePort}, fetch: () => new Response("<title>site</title>", { headers: { "content-type": "text/html" } }) })`]);
+    try {
+      const origin = `http://127.0.0.1:${sitePort}/`;
+      for (let attempt = 0; attempt < 50 && !(await fetch(origin).then((response) => response.ok, () => false)); attempt += 1) await Bun.sleep(50);
+      ok("goto", origin, "--local");
+      expect(ok("eval", "--local", "document.cookie = 'session=fresh; max-age=86400; path=/'; document.cookie")).toBe("session=fresh");
+      expect(ok("down", "local")).toBe("stopped local");
+      ok("up", "--local", "--headless", "--port", String(port));
+      ok("goto", origin, "--local");
+      expect(ok("eval", "--local", "document.cookie")).toBe("session=fresh");
+    } finally {
+      site.kill();
+    }
+  });
+
   test("status lists the browser; down stops Chrome and frees the port", async () => {
     expect(ok("status")).toContain(`CDP endpoint  http://127.0.0.1:${port}`);
     const health = await (await fetch(`http://127.0.0.1:${port}/healthz`)).json() as { detail: string };

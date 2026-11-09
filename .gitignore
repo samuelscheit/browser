@@ -10,3 +10,4 @@ dist/
 artifacts/
 __pycache__/
 *.py[cod]
+.playwright-mcp/
