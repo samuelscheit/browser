@@ -4,6 +4,7 @@ import { FabricError, MEDIA_SOURCE_MAX_BYTES, type ChallengeHandler } from "@bro
 import { assertFailClosedPac, internalEgressProxyUrl } from "@browser-fabric/policy";
 import {
   assertTurnstileGuardianSpec,
+  closeBrowserGracefully,
   defaultTurnstileGuardianFactory,
   type TokenCaptchaSolver,
   type TurnstileGuardianFactory,
@@ -78,6 +79,8 @@ export interface DockerContainerExecutorOptions {
   requireBrowserSeccompProfile?: boolean;
   /** Factory boundary for the mandatory browser-level companion; production uses real CDP. */
   turnstileGuardianFactory?: TurnstileGuardianFactory;
+  /** Orderly browser shutdown before Docker stops the container. Tests inject a fake. */
+  closeBrowser?: typeof closeBrowserGracefully;
   /**
    * Resolves the token solver for one browser from its recipe's challenge handler set. Absent in tests and
    * in deployments without solver credentials; a recipe then never solves tokens.
@@ -231,6 +234,8 @@ export class DockerContainerExecutor implements Executor {
   readonly #containers = new Map<string, string>();
   readonly #starting = new Map<string, Promise<{ processId: string; cdpBrowserEndpoint?: string }>>();
   readonly #guardians = new Map<string, TurnstileGuardianHandle>();
+  readonly #browserEndpoints = new Map<string, string>();
+  readonly #closeBrowser: typeof closeBrowserGracefully;
   readonly #temporaryVolumesByContainer = new Map<string, { workerId: string; volumes: string[] }>();
   readonly #turnstileGuardianFactory: TurnstileGuardianFactory;
 
@@ -238,6 +243,7 @@ export class DockerContainerExecutor implements Executor {
     this.#command = options.command ?? new ChildProcessDockerCommand();
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#turnstileGuardianFactory = options.turnstileGuardianFactory ?? defaultTurnstileGuardianFactory;
+    this.#closeBrowser = options.closeBrowser ?? closeBrowserGracefully;
     this.#options = {
       browserNetworks: options.browserNetworks ?? ["browser-fabric-workers"],
       containerPrefix: options.containerPrefix ?? "fabric-browser",
@@ -319,6 +325,7 @@ export class DockerContainerExecutor implements Executor {
         const tokenSolver = this.#options.tokenSolverFor?.(spec.container.challengeHandlers);
         const guardian = this.#turnstileGuardianFactory({ endpoint: browserEndpoint, spec: guardianSpec, ...(tokenSolver ? { tokenSolver } : {}) });
         this.#guardians.set(name, guardian);
+        this.#browserEndpoints.set(name, browserEndpoint);
         await guardian.start();
         if (this.#containers.get(identity) !== name || this.#guardians.get(name) !== guardian) {
           await guardian.stop().catch(() => undefined);
@@ -402,6 +409,10 @@ export class DockerContainerExecutor implements Executor {
     const guardian = this.#guardians.get(processId);
     this.#guardians.delete(processId);
     await guardian?.stop().catch(() => undefined);
+    const browserEndpoint = this.#browserEndpoints.get(processId);
+    this.#browserEndpoints.delete(processId);
+    // Let Chromium write its profile (cookies especially) before Docker signals the container.
+    if (browserEndpoint) await this.#closeBrowser(browserEndpoint, { timeoutMs: 8_000 }).catch(() => false);
     try {
       const stopped = await this.#command.run(["container", "stop", "--time", "10", processId], { timeoutMs: this.#options.stopTimeoutMs ?? 20_000 });
       if (stopped.exitCode !== 0 && !/no such container|is not running/i.test(stopped.stderr)) {

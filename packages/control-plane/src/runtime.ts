@@ -1,3 +1,4 @@
+import { DEFAULT_ACTIVE_BROWSER_LEASES, MAX_ACTIVE_BROWSER_LEASES } from "@browser-fabric/contracts";
 import { Pool } from "pg";
 import { CapabilitySigner } from "./capability";
 import { BrowserScheduler } from "./scheduler";
@@ -24,11 +25,12 @@ export interface PostgresSchedulerOptions {
  * workers, gateways, and the standalone scheduler cannot quietly use different capacities.
  */
 export function maxActiveBrowserLeasesFromEnvironment(environment: Readonly<Record<string, string | undefined>> = process.env): number {
-  const configured = environment.FABRIC_MAX_ACTIVE_BROWSER_LEASES;
-  if (configured === undefined || configured.trim() === "") return 4;
-  if (!/^\d+$/.test(configured.trim())) throw new Error("FABRIC_MAX_ACTIVE_BROWSER_LEASES must be an integer from one to four");
-  const value = Number(configured.trim());
-  if (!Number.isInteger(value) || value < 1 || value > 4) throw new Error("FABRIC_MAX_ACTIVE_BROWSER_LEASES must be an integer from one to four");
+  const configured = environment.FABRIC_MAX_ACTIVE_BROWSER_LEASES?.trim();
+  if (configured === undefined || configured === "") return DEFAULT_ACTIVE_BROWSER_LEASES;
+  const value = Number(configured);
+  if (!/^\d+$/.test(configured) || value < 1 || value > MAX_ACTIVE_BROWSER_LEASES) {
+    throw new Error(`FABRIC_MAX_ACTIVE_BROWSER_LEASES must be an integer from 1 to ${MAX_ACTIVE_BROWSER_LEASES}`);
+  }
   return value;
 }
 

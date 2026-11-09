@@ -75,6 +75,7 @@ describe("managed browser guardians", () => {
         return new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" }));
       },
       turnstileGuardianFactory: guardianFactory,
+      closeBrowser: async (endpoint) => { command.calls.push(["cdp", "Browser.close", endpoint]); return true; },
       requireImmutableImages: false,
       browserSeccompProfile: "/etc/compose/browser-fabric-seccomp/chromium-userns.json",
       requireBrowserSeccompProfile: true,
@@ -108,7 +109,16 @@ describe("managed browser guardians", () => {
 
     await executor.stop(started.processId);
     expect(guardian.stops).toBe(1);
+    // Chromium closes through CDP (flushing cookies to the profile) before Docker signals it.
+    const closeIndex = command.calls.findIndex((args) => args[0] === "cdp");
+    const stopIndex = command.calls.findIndex((args) => args[0] === "container" && args[1] === "stop" && args.includes(started.processId));
+    expect(command.calls[closeIndex]).toEqual(["cdp", "Browser.close", started.cdpBrowserEndpoint!]);
+    expect(closeIndex).toBeGreaterThan(-1);
+    expect(closeIndex).toBeLessThan(stopIndex);
     expect(command.calls.some((args) => args[0] === "container" && args[1] === "rm" && args.includes(started.processId))).toBe(true);
+    // A second stop does not close the (already gone) browser again.
+    await executor.stop(started.processId);
+    expect(command.calls.filter((args) => args[0] === "cdp")).toHaveLength(1);
   });
 
   test("re-owns a cloned profile for the unprivileged browser after copying from a root-owned source", async () => {
@@ -161,6 +171,8 @@ describe("managed browser guardians", () => {
       command,
       fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" })),
       turnstileGuardianFactory: guardianFactory,
+      // An unreachable browser cannot close itself; Docker removal still follows.
+      closeBrowser: async () => false,
       requireImmutableImages: false,
     });
 

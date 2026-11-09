@@ -29,6 +29,8 @@ import {
   type LeaseMode,
   type Principal,
   type PrincipalCapabilities,
+  DEFAULT_ACTIVE_BROWSER_LEASES,
+  MAX_ACTIVE_BROWSER_LEASES,
   type Profile,
   type ProfileClone,
   type ProjectId,
@@ -315,13 +317,13 @@ export class BrowserScheduler {
     this.#clock = options.clock ?? new SystemClock();
     this.#capabilitySigner = options.capabilitySigner ?? new CapabilitySigner({ secret: "development-only-capability-secret-change-me", clock: this.#clock });
     this.#recipes = options.recipes ?? new RecipeRegistry();
-    this.#maxActiveBrowserLeases = options.maxActiveBrowserLeases ?? 4;
+    this.#maxActiveBrowserLeases = options.maxActiveBrowserLeases ?? DEFAULT_ACTIVE_BROWSER_LEASES;
     this.#reconnectGraceSeconds = options.reconnectGraceSeconds ?? 60;
     this.#assignmentClaimTimeoutSeconds = options.assignmentClaimTimeoutSeconds ?? 30;
     this.#ephemeralInputVault = options.ephemeralInputVault ?? new EncryptedInputRouter();
     this.#allowPlaintextEphemeralInputs = options.allowPlaintextEphemeralInputs ?? false;
-    if (!Number.isInteger(this.#maxActiveBrowserLeases) || this.#maxActiveBrowserLeases < 1 || this.#maxActiveBrowserLeases > 4) {
-      throw new Error("Browser Fabric global browser capacity must be an integer from one to four");
+    if (!Number.isInteger(this.#maxActiveBrowserLeases) || this.#maxActiveBrowserLeases < 1 || this.#maxActiveBrowserLeases > MAX_ACTIVE_BROWSER_LEASES) {
+      throw new Error(`Browser Fabric global browser capacity must be an integer from 1 to ${MAX_ACTIVE_BROWSER_LEASES}`);
     }
     if (!Number.isInteger(this.#assignmentClaimTimeoutSeconds) || this.#assignmentClaimTimeoutSeconds < 5 || this.#assignmentClaimTimeoutSeconds > 300) throw new Error("assignment claim timeout must be between 5 and 300 seconds");
     this.#kernel = new SchedulerKernel({

@@ -47,6 +47,14 @@ export const leaseModes = ["writer", "interactive", "clone"] as const;
  * view and its keep-alive connection. Sessions default to one.
  */
 export const MAX_EXTERNAL_CDP_CONNECTIONS = 8;
+
+/**
+ * Upper bound for a deployment's concurrent browser leases (`FABRIC_MAX_ACTIVE_BROWSER_LEASES`),
+ * enforced by the scheduler and by the `fabric_capacity` CHECK. A deployment picks its own cap
+ * within it; without one the scheduler uses DEFAULT_ACTIVE_BROWSER_LEASES.
+ */
+export const MAX_ACTIVE_BROWSER_LEASES = 8;
+export const DEFAULT_ACTIVE_BROWSER_LEASES = 4;
 export type LeaseMode = (typeof leaseModes)[number];
 
 export const browserSessionStatuses = [

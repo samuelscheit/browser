@@ -20,6 +20,9 @@ export class FakeCdpBrowser {
   #discovering = new Set<Socket>();
   #nextTarget = 1;
 
+  /** When false, Browser.close is acknowledged but the browser keeps running (a hung shutdown). */
+  closesOnBrowserClose = true;
+
   public constructor(initial: Partial<FakeTarget>[] = [{ url: "about:blank" }]) {
     for (const target of initial) this.addTarget(target);
   }
@@ -89,6 +92,12 @@ export class FakeCdpBrowser {
     const fail = (text: string): void => { socket.send(JSON.stringify({ id: message.id, error: { code: -32000, message: text }, ...(message.sessionId ? { sessionId: message.sessionId } : {}) })); };
     const params = message.params ?? {};
     switch (message.method) {
+      case "Fake.neverAnswered":
+        return;
+      case "Browser.close":
+        if (!this.closesOnBrowserClose) return reply({});
+        for (const open of this.sockets) open.close(1000, "browser closed");
+        return;
       case "Browser.getVersion":
         return reply({ product: "FakeChrome/1.0", protocolVersion: "1.3", userAgent: "FakeAgent", jsVersion: "1.0", revision: "@fake" });
       case "Target.setDiscoverTargets":
