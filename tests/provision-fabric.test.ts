@@ -21,7 +21,7 @@ async function holdActiveLease(runtime: Awaited<ReturnType<typeof provisionRunti
     browserRecipeRef: worker.capabilities.recipeRefs[0]!,
     profileRef: profile.ref,
     leaseMode: "writer",
-    egressPolicyRef: "egress_direct-egress@1" as never,
+    egressPolicyRef: "egress_direct@1" as never,
     artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
     ttlSeconds: 600,
   }, manifest.principals[0]!);
@@ -49,9 +49,7 @@ describe("Fabric provisioning manifests", () => {
       projectsToCreate: [manifest.projects[0]!.id],
       principalsToCreate: [manifest.principals[0]!.id],
       workersToCreate: [manifest.workers[0]!.id],
-      workersToEnableInteractive: [],
-      workersToMigrateCdpBridge: [],
-      workersToResize: [],
+      workersToReconfigure: [],
       profilesToCreate: [manifest.profiles[0]!.ref]
     });
     expect(JSON.stringify(plan)).not.toContain("enrollmentTokenHash");
@@ -76,13 +74,13 @@ describe("Fabric provisioning manifests", () => {
     expect(first.profilesToCreate).toEqual([manifest.profiles[0]!.ref]);
 
     const snapshot = await runtime.scheduler.store.snapshot();
-    expect(snapshot.projects.get(manifest.projects[0]!.id)?.name).toBe("Reporting Support");
+    expect(snapshot.projects.get(manifest.projects[0]!.id)?.name).toBe("Default");
     expect(snapshot.principals.get(manifest.principals[0]!.id)?.roles).toContain("fabric_admin");
     expect(snapshot.workers.get(manifest.workers[0]!.id)?.volumeNames).toContain(manifest.profiles[0]!.volumeName);
     expect(snapshot.profiles.get(manifest.profiles[0]!.ref)?.workerId).toBe(manifest.workers[0]!.id);
 
     const replay = await provisionManifest(runtime, manifest);
-    expect(replay).toEqual({ projectsToCreate: [], principalsToCreate: [], workersToCreate: [], workersToEnableInteractive: [], workersToMigrateCdpBridge: [], workersToResize: [], profilesToCreate: [] });
+    expect(replay).toEqual({ projectsToCreate: [], principalsToCreate: [], workersToCreate: [], workersToReconfigure: [], profilesToCreate: [] });
   });
 
   test("detects static worker endpoint drift instead of overwriting a provisioned worker", async () => {
@@ -108,7 +106,7 @@ describe("Fabric provisioning manifests", () => {
       runtimeFamilies: ["media-playback"],
       recipeRefs: ["recipe_media-playback@1" as never],
       // Keep the published fixture's profile valid; media playback itself never acquires it.
-      supportedProfileFamilies: ["reporting-reporting", "media"],
+      supportedProfileFamilies: ["default", "media"],
     };
     worker.mediaCapacity = 1;
     worker.mediaPlaybackEndpoint = "http://fabric-worker-media:8084";
@@ -134,78 +132,43 @@ describe("Fabric provisioning manifests", () => {
     expect((await provisionManifest(runtime, replay)).principalsToCreate).toEqual([]);
   });
 
-  test("enables managed interactive capability only as an idle, otherwise identical worker upgrade", async () => {
+  test("never upgrades a provisioned worker's runtimes, interactivity or endpoints", async () => {
     const manifest = await exampleManifest();
     const runtime = await provisionRuntime();
     await provisionManifest(runtime, manifest);
-
-    const upgraded = structuredClone(manifest);
-    upgraded.workers[0]!.capabilities = { ...upgraded.workers[0]!.capabilities, supportsInteractive: true };
-
-    const plan = await provisionManifest(runtime, upgraded, true);
-    expect(plan.workersToEnableInteractive).toEqual([upgraded.workers[0]!.id]);
-    await provisionManifest(runtime, upgraded);
-    expect((await runtime.scheduler.store.snapshot()).workers.get(upgraded.workers[0]!.id)?.capabilities.supportsInteractive).toBe(true);
-    expect((await provisionManifest(runtime, upgraded)).workersToEnableInteractive).toEqual([]);
+    for (const mutate of [
+      (worker: ProvisionManifest["workers"][number]) => { worker.capabilities = { ...worker.capabilities, supportsInteractive: !worker.capabilities.supportsInteractive }; },
+      (worker: ProvisionManifest["workers"][number]) => { worker.capabilities = { ...worker.capabilities, runtimeFamilies: [...worker.capabilities.runtimeFamilies, "patchright"] }; },
+      (worker: ProvisionManifest["workers"][number]) => { worker.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9222"; },
+    ]) {
+      const changed = structuredClone(manifest);
+      mutate(changed.workers[0]!);
+      await expect(provisionManifest(runtime, changed)).rejects.toMatchObject({ code: "conflict", status: 409 });
+    }
   });
 
-  test("refuses the managed interactive capability upgrade while the worker owns an active lease", async () => {
+  test("enables a catalog recipe and its profile family on an idle provisioned worker", async () => {
     const manifest = await exampleManifest();
     const runtime = await provisionRuntime();
     await provisionManifest(runtime, manifest);
-    await holdActiveLease(runtime, manifest, "interactive-upgrade-active-lease");
-
-    const upgraded = structuredClone(manifest);
-    upgraded.workers[0]!.capabilities = { ...upgraded.workers[0]!.capabilities, supportsInteractive: true };
-    await expect(provisionManifest(runtime, upgraded)).rejects.toMatchObject({ code: "conflict", status: 409 });
+    const extended = structuredClone(manifest);
+    const worker = extended.workers[0]!;
+    worker.capabilities = {
+      ...worker.capabilities,
+      recipeRefs: [...worker.capabilities.recipeRefs, "recipe_example-fetch@1" as never],
+      supportedProfileFamilies: [...worker.capabilities.supportedProfileFamilies, "research"],
+    };
+    expect((await provisionManifest(runtime, extended, true)).workersToReconfigure).toEqual([worker.id]);
+    await provisionManifest(runtime, extended);
+    const stored = (await runtime.scheduler.store.snapshot()).workers.get(worker.id)!;
+    expect(stored.capabilities.recipeRefs).toContain("recipe_example-fetch@1" as never);
+    expect(stored.capabilities.supportedProfileFamilies).toContain("research");
+    expect((await provisionManifest(runtime, extended)).workersToReconfigure).toEqual([]);
+    // Removing it again is the same reviewed transition.
+    expect((await provisionManifest(runtime, manifest)).workersToReconfigure).toEqual([worker.id]);
   });
 
-  test("migrates only an idle managed worker from the reviewed legacy CDP endpoint", async () => {
-    const manifest = await exampleManifest();
-    const runtime = await provisionRuntime();
-    manifest.workers[0]!.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9222";
-    await provisionManifest(runtime, manifest);
-
-    const upgraded = structuredClone(manifest);
-    upgraded.workers[0]!.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9223";
-    expect((await provisionManifest(runtime, upgraded, true)).workersToMigrateCdpBridge).toEqual([upgraded.workers[0]!.id]);
-    await provisionManifest(runtime, upgraded);
-    expect((await runtime.scheduler.store.snapshot()).workers.get(upgraded.workers[0]!.id)?.cdpRelayEndpoint).toBe("http://fabric-browser-{leaseId}:9223");
-  });
-
-  test("refuses the managed CDP bridge migration while the worker owns an active lease", async () => {
-    const manifest = await exampleManifest();
-    const runtime = await provisionRuntime();
-    manifest.workers[0]!.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9222";
-    await provisionManifest(runtime, manifest);
-    await holdActiveLease(runtime, manifest, "cdp-bridge-upgrade-active-lease");
-
-    const upgraded = structuredClone(manifest);
-    upgraded.workers[0]!.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9223";
-    await expect(provisionManifest(runtime, upgraded)).rejects.toMatchObject({ code: "conflict", status: 409 });
-  });
-
-  test("applies the two reviewed managed-worker upgrades together while idle", async () => {
-    const manifest = await exampleManifest();
-    const runtime = await provisionRuntime();
-    manifest.workers[0]!.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9222";
-    manifest.workers[0]!.capabilities = { ...manifest.workers[0]!.capabilities, supportsInteractive: false };
-    await provisionManifest(runtime, manifest);
-
-    const upgraded = structuredClone(manifest);
-    upgraded.workers[0]!.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9223";
-    upgraded.workers[0]!.capabilities = { ...upgraded.workers[0]!.capabilities, supportsInteractive: true };
-    expect(await provisionManifest(runtime, upgraded, true)).toMatchObject({
-      workersToEnableInteractive: [upgraded.workers[0]!.id],
-      workersToMigrateCdpBridge: [upgraded.workers[0]!.id],
-    });
-    await provisionManifest(runtime, upgraded);
-    const worker = (await runtime.scheduler.store.snapshot()).workers.get(upgraded.workers[0]!.id)!;
-    expect(worker.capabilities.supportsInteractive).toBe(true);
-    expect(worker.cdpRelayEndpoint).toBe("http://fabric-browser-{leaseId}:9223");
-  });
-
-  test("resizes an idle managed worker's capacity and resource limits, idempotently", async () => {
+  test("reconfigures an idle managed worker's capacity and resource limits, idempotently", async () => {
     const manifest = await exampleManifest();
     manifest.workers[0]!.capacity = 1;
     manifest.workers[0]!.resourceLimits = { ...manifest.workers[0]!.resourceLimits, maxBrowserLeases: 1, memoryMiB: 4_096 };
@@ -215,21 +178,21 @@ describe("Fabric provisioning manifests", () => {
     const resized = structuredClone(manifest);
     resized.workers[0]!.capacity = 3;
     resized.workers[0]!.resourceLimits = { ...resized.workers[0]!.resourceLimits, maxBrowserLeases: 3, memoryMiB: 2_048 };
-    expect((await provisionManifest(runtime, resized, true)).workersToResize).toEqual([resized.workers[0]!.id]);
+    expect((await provisionManifest(runtime, resized, true)).workersToReconfigure).toEqual([resized.workers[0]!.id]);
     await provisionManifest(runtime, resized);
     const state = await runtime.scheduler.store.snapshot();
     const worker = state.workers.get(resized.workers[0]!.id)!;
     expect(worker.capacity).toBe(3);
     expect(worker.resourceLimits).toEqual(resized.workers[0]!.resourceLimits);
-    expect([...state.events.values()].find((event) => event.type === "worker.resized")?.payload).toEqual({ previousCapacity: 1, capacity: 3, previousMaxBrowserLeases: 1, maxBrowserLeases: 3 });
-    expect((await provisionManifest(runtime, resized)).workersToResize).toEqual([]);
+    expect([...state.events.values()].find((event) => event.type === "worker.reconfigured")?.payload).toEqual({ previousCapacity: 1, capacity: 3, previousMaxBrowserLeases: 1, maxBrowserLeases: 3, recipes: 2, profileFamilies: 2 });
+    expect((await provisionManifest(runtime, resized)).workersToReconfigure).toEqual([]);
 
     // Shrinking back is the same reviewed transition.
-    expect((await provisionManifest(runtime, manifest)).workersToResize).toEqual([manifest.workers[0]!.id]);
+    expect((await provisionManifest(runtime, manifest)).workersToReconfigure).toEqual([manifest.workers[0]!.id]);
     expect((await runtime.scheduler.store.snapshot()).workers.get(manifest.workers[0]!.id)!.capacity).toBe(1);
   });
 
-  test("refuses a resize while the worker owns an active lease", async () => {
+  test("refuses a reconfiguration while the worker owns an active lease", async () => {
     const manifest = await exampleManifest();
     const runtime = await provisionRuntime();
     await provisionManifest(runtime, manifest);
@@ -240,7 +203,7 @@ describe("Fabric provisioning manifests", () => {
     await expect(provisionManifest(runtime, resized)).rejects.toMatchObject({ code: "conflict", status: 409 });
   });
 
-  test("a resize does not smuggle in other worker changes", async () => {
+  test("a reconfiguration does not smuggle in other worker changes", async () => {
     const manifest = await exampleManifest();
     const runtime = await provisionRuntime();
     await provisionManifest(runtime, manifest);
@@ -250,7 +213,7 @@ describe("Fabric provisioning manifests", () => {
     await expect(provisionManifest(runtime, changed)).rejects.toMatchObject({ code: "conflict", status: 409 });
   });
 
-  test("the scheduler bounds a resize and reserves it for fabric admins", async () => {
+  test("the scheduler bounds a reconfiguration and reserves it for fabric admins", async () => {
     const manifest = await exampleManifest();
     const runtime = await provisionRuntime();
     await provisionManifest(runtime, manifest);
@@ -259,9 +222,18 @@ describe("Fabric provisioning manifests", () => {
     const operator = { ...admin, id: "principal_operator" as never, roles: ["project_operator" as const], certificateFingerprint: "operator-cert" };
     await runtime.scheduler.registerPrincipal(operator);
     const limits = { ...worker.resourceLimits, maxBrowserLeases: 2 };
-    await expect(runtime.scheduler.resizeManagedWorker(worker.id, { capacity: 3, resourceLimits: limits }, admin)).rejects.toMatchObject({ code: "validation_failed" });
-    await expect(runtime.scheduler.resizeManagedWorker(worker.id, { capacity: 0, resourceLimits: limits }, admin)).rejects.toMatchObject({ code: "validation_failed" });
-    await expect(runtime.scheduler.resizeManagedWorker(worker.id, { capacity: 2, resourceLimits: limits }, operator)).rejects.toMatchObject({ code: "authorization_denied" });
-    expect((await runtime.scheduler.resizeManagedWorker(worker.id, { capacity: 2, resourceLimits: limits }, admin)).capacity).toBe(2);
+    const change = (capacity: number, extra: Partial<{ recipeRefs: string[]; supportedProfileFamilies: string[] }> = {}) => ({
+      capacity,
+      resourceLimits: limits,
+      recipeRefs: (extra.recipeRefs ?? worker.capabilities.recipeRefs) as never,
+      supportedProfileFamilies: extra.supportedProfileFamilies ?? worker.capabilities.supportedProfileFamilies,
+    });
+    await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(3), admin)).rejects.toMatchObject({ code: "validation_failed" });
+    await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(5), admin)).rejects.toMatchObject({ code: "validation_failed" });
+    await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(2, { recipeRefs: ["not-a-recipe"] }), admin)).rejects.toMatchObject({ code: "validation_failed" });
+    await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(2, { supportedProfileFamilies: ["default", "default"] }), admin)).rejects.toMatchObject({ code: "validation_failed" });
+    await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(2), operator)).rejects.toMatchObject({ code: "authorization_denied" });
+    expect((await runtime.scheduler.reconfigureManagedWorker(worker.id, change(2), admin)).capacity).toBe(2);
+    expect((await runtime.scheduler.reconfigureManagedWorker(worker.id, change(0), admin)).capacity).toBe(0);
   });
 });

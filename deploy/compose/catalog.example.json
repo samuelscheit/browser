@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "project_research",
+      "name": "Research"
+    }
+  ],
+  "challengeSets": [
+    {
+      "name": "solver-anticaptcha-only",
+      "handlers": [
+        {
+          "id": "guardian",
+          "kind": "guardian",
+          "mode": "automatic",
+          "configuration": {
+            "turnstile": true,
+            "datadome": true
+          }
+        },
+        {
+          "id": "anticaptcha",
+          "kind": "anticaptcha",
+          "mode": "automatic"
+        }
+      ]
+    }
+  ],
+  "egressPolicies": [
+    {
+      "name": "proxy-static-direct",
+      "routes": {
+        "document": {
+          "kind": "proxy",
+          "proxyRef": "default",
+          "protocol": "http"
+        },
+        "api": {
+          "kind": "proxy",
+          "proxyRef": "default",
+          "protocol": "http"
+        },
+        "websocket": {
+          "kind": "proxy",
+          "proxyRef": "default",
+          "protocol": "http"
+        },
+        "browser_download": {
+          "kind": "proxy",
+          "proxyRef": "default",
+          "protocol": "http"
+        },
+        "static_asset": {
+          "kind": "direct"
+        },
+        "direct_exception": {
+          "kind": "direct"
+        }
+      },
+      "constraints": {
+        "preserveProxyAffinity": true,
+        "disableServiceWorkersInProxyMode": true
+      },
+      "sidecar": {
+        "listener": {
+          "id": "proxy",
+          "port": 11001
+        },
+        "directListener": {
+          "id": "direct",
+          "port": 11000
+        }
+      },
+      "directExceptionHostnames": [
+        "cdn.example.com"
+      ]
+    }
+  ],
+  "recipes": [
+    {
+      "name": "chromium-de",
+      "runtime": "chromium-cdp",
+      "profileFamily": "default",
+      "mode": "headless",
+      "access": "raw_cdp",
+      "challengeHandlerSetRef": "challenge_solver-anticaptcha-only@1",
+      "launch": {
+        "locale": "de-DE",
+        "timezone": "Europe/Berlin",
+        "viewport": {
+          "width": 1366,
+          "height": 768
+        }
+      }
+    }
+  ]
+}

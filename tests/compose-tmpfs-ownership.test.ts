@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 import { tmpfsOwnershipViolations } from "../scripts/compose-tmpfs-ownership";
 
-const composePath = new URL("../deploy/compose/browser-fabric.compose.yml", import.meta.url);
+const composePath = new URL("../deploy/compose/compose.yml", import.meta.url);
 
 function service(body: string): string {
   return `services:\n  probe:\n    image: example@sha256:${"a".repeat(64)}\n${body}`;
@@ -14,25 +14,18 @@ describe("Compose tmpfs ownership", () => {
     expect(tmpfsOwnershipViolations(await readFile(composePath, "utf8"))).toEqual([]);
   });
 
-  test("the pre-fix deployment is rejected for exactly the non-root services that had no writable /tmp", async () => {
-    // Rebuild what production ran when the Social worker's Playwright driver failed with EACCES
-    // creating /tmp/playwright-artifacts-*: no tmpfs owners and implicit image-default users.
-    const original = (await readFile(composePath, "utf8"))
-      .replaceAll(/,uid=\d+,gid=\d+$/gm, "")
-      .replace(/^    # Pins the image default user[^\n]*\n    user: '10001:10001'\n/m, "")
-      .replace(/^    # The upstream Companion image runs as root[^\n]*\n    user: '0:0'\n/m, "");
-    const violations = tmpfsOwnershipViolations(original);
-    const unowned = violations.filter((violation) => violation.includes("must be owned by its service user 10001:10001")).map((violation) => violation.split(" ")[0]).sort();
+  test("stripping the tmpfs owners makes every non-root service of the deployment a violation", async () => {
+    // Docker mounts tmpfs as root:root: without uid=/gid= a non-root service has no writable /tmp.
+    const stripped = (await readFile(composePath, "utf8")).replaceAll(/,uid=\d+,gid=\d+$/gm, "");
+    const unowned = tmpfsOwnershipViolations(stripped)
+      .filter((violation) => violation.includes("must be owned by its service user 10001:10001"))
+      .map((violation) => violation.split(" ")[0])
+      .sort();
     expect(unowned).toEqual([
-      "fabric-api", "fabric-cdp-gateway", "fabric-cdp-relay-chat", "fabric-cdp-relay-reporting", "fabric-egress-sidecar",
-      "fabric-input-broker", "fabric-media-playback-gateway", "fabric-provisioner", "fabric-scheduler", "fabric-companion-adapter",
-      "fabric-worker-chromium", "fabric-worker-media", "fabric-worker-patchright", "fabric-worker-rebrowser", "fabric-worker-companion",
-      "fabric-worker-social",
+      "fabric-api", "fabric-cdp-gateway", "fabric-egress-sidecar", "fabric-input-broker", "fabric-media-playback-gateway",
+      "fabric-observability", "fabric-provisioner", "fabric-scheduler", "fabric-worker-chromium", "fabric-worker-media",
+      "fabric-worker-patchright", "fabric-worker-rebrowser",
     ]);
-    // Image-default users (observability's 10001, Companion's root) were implicit before the fix.
-    expect(violations).toContain("fabric-observability has a restricted tmpfs and must declare an explicit numeric user");
-    expect(violations).toContain("fabric-companion has a restricted tmpfs and must declare an explicit numeric user");
-    expect(violations).toHaveLength(18);
   });
 
   test("every restricted mount of a non-root service is checked, including /data", () => {

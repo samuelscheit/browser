@@ -1,6 +1,6 @@
 # Required dashboards and alerts
 
-- **Capacity:** active browser leases (global hard cap 4), per-worker active/capacity, queue age by recipe/runtime.
+- **Capacity:** active browser leases against `FABRIC_MAX_ACTIVE_BROWSER_LEASES`, per-worker active/capacity, queue age by recipe/runtime.
 - **Lifecycle:** sessions/jobs by state, timeout/cancellation rate, reconnect-grace releases, orphaned leases.
 - **Workers:** heartbeat age, crash/restart count, CPU/memory/PID/shm/temp usage, profile affinity errors.
 - **Egress/challenges:** policy route decisions, blocked direct retries, challenge outcomes by versioned handler set (never record secret values).

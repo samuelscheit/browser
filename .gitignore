@@ -12,3 +12,6 @@ __pycache__/
 *.py[cod]
 .playwright-mcp/
 .pytest_cache/
+# Self-hosting state generated next to deploy/compose/compose.yml
+deploy/compose/secrets/
+deploy/compose/catalog.json

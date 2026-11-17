@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "listeners": [
+    { "id": "direct", "port": 11000, "mode": "direct" },
+    { "id": "proxy", "port": 11001, "mode": "proxy", "upstreamSecretFile": "/run/secrets/egress_proxy_upstreams", "optional": true },
+    { "id": "tor", "port": 11002, "mode": "proxy", "upstreamUrls": ["socks5h://fabric-tor:9050"] },
+    { "id": "captcha-solver", "port": 11003, "mode": "direct", "allowedHostnameSuffixes": ["dbcapi.me", "anti-captcha.com"] }
+  ],
+  "policies": [
+    { "ref": "egress_direct@1", "defaultListenerId": "direct" },
+    { "ref": "egress_proxy@1", "defaultListenerId": "proxy" },
+    { "ref": "egress_tor@1", "defaultListenerId": "tor" }
+  ]
+}

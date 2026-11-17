@@ -1,7 +1,8 @@
 # Local interactive worker
 
-The federated worker is an outbound-only process. It is intended for the operator's Mac and is
-not a Docker service on `fabric-host`.
+The federated worker is an outbound-only process that serves interactive leases from a machine
+outside the Fabric host (for example an operator's workstation). It is not part of the Compose
+stack and never accepts inbound connections.
 
 1. Provision `workers/local-interactive/config/worker.json` in the Fabric control plane with the
    actual certificate fingerprint, profile grants, and named profile-volume mappings.
@@ -9,8 +10,8 @@ not a Docker service on `fabric-host`.
    the repository.
 3. Start a loopback-only Fabric egress sidecar **before** the agent. Copy
    `egress-config.example.json` outside the repository, reference an owner-only proxy-secret file,
-   and use the actual reviewed Signup/CHAT policy endpoints. Do not place proxy userinfo in the
-   worker configuration or environment.
+   and declare a policy entry for every egress policy the worker's recipes may use. Do not place
+   proxy userinfo in the worker configuration or environment.
 
 ```sh
 FABRIC_EGRESS_LOCAL_MODE=1 \
@@ -24,8 +25,8 @@ bun apps/egress-sidecar/src/server.ts
 
 ```sh
 FABRIC_WORKER_CONFIG_FILE=/absolute/path/to/worker.json \
-FABRIC_WORKER_MANAGER_URL=https://fabric.internal.example \
-FABRIC_CDP_RELAY_URL=wss://fabric.internal.example/v1/worker-relay/{workerId}/{leaseId} \
+FABRIC_WORKER_MANAGER_URL=https://fabric.example.com \
+FABRIC_CDP_RELAY_URL=wss://fabric.example.com/v1/worker-relay/{workerId}/{leaseId} \
 FABRIC_EGRESS_PAC_BASE_URL=http://127.0.0.1:8080 \
 FABRIC_CHROMIUM_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
 FABRIC_LOCAL_PROFILE_ROOT="$HOME/Library/Application Support/BrowserFabric/profiles" \

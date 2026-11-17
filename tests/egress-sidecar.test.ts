@@ -5,6 +5,7 @@ import { loadListenerEndpoints, parseEgressConfig, parseProxyEndpoint } from "..
 import { selectDialAddress, startProxyListener, type ProxyListener } from "../apps/egress-sidecar/src/proxy";
 import { pac } from "../apps/egress-sidecar/src/server";
 import { builtInEgressPolicies, egressSidecarListeners, internalEgressProxyUrl } from "@browser-fabric/policy";
+import { exampleCatalog } from "@browser-fabric/testkit";
 
 const nextPort = (() => {
   let value = 24_000 + Math.floor(Math.random() * 1_000);
@@ -65,7 +66,7 @@ describe("Fabric egress sidecar", () => {
     expect(parseProxyEndpoint("socks5h://user:pass@proxy.example:1234", true)).toMatchObject({ protocol: "socks5h", host: "proxy.example", port: 1234, username: "user", password: "pass" });
   });
 
-  test("allows an optional workload credential to be provisioned after sidecar startup", async () => {
+  test("allows an optional upstream credential to be provisioned after sidecar startup", async () => {
     const config = parseEgressConfig({
       version: 1,
       listeners: [
@@ -81,39 +82,41 @@ describe("Fabric egress sidecar", () => {
     await closeProxy(fallback);
   });
 
-  test("deploys a sidecar listener for every reviewed policy route without mounting solver API keys", async () => {
+  test("the compose sidecar serves a listener and PAC policy for every built-in egress policy, without solver keys", async () => {
     const config = parseEgressConfig(await Bun.file(new URL("../deploy/compose/egress-sidecar.json", import.meta.url)).json());
-    const listenerIds = new Set(config.listeners.map((listener) => listener.id));
+    const listeners = new Map(config.listeners.map((listener) => [listener.id, listener]));
     for (const policy of builtInEgressPolicies) {
       const url = new URL(internalEgressProxyUrl(policy));
-      const listener = Object.values(egressSidecarListeners).find((candidate) => candidate.port === Number(url.port));
-      expect(listener).toBeDefined();
-      expect(listenerIds.has(listener!.id)).toBe(true);
+      const listener = listeners.get(policy.sidecar.listener.id);
+      expect(listener?.port).toBe(Number(url.port));
+      expect(config.policies.find((entry) => entry.ref === policy.ref)?.defaultListenerId).toBe(policy.sidecar.listener.id);
     }
-    expect(config.policies.some((policy) => policy.ref.includes("reporting"))).toBe(false);
-    expect(config.listeners.some((listener) => listener.id.includes("reporting"))).toBe(false);
-    // The residential capture exit is a fixed, credential-free hop to the Fabric-owned
-    // VPN node; it never falls back to direct egress, which would expose the server.
-    const macExit = config.listeners.find((listener) => listener.id === "home-exit")!;
-    expect(macExit).toMatchObject({ port: 11_006, mode: "proxy", upstreamUrls: ["socks5h://fabric-home-exit:1055"] });
-    expect(macExit.fallbackToDirect).toBeUndefined();
-    expect(macExit.upstreamSecretFile).toBeUndefined();
-    expect(config.policies.find((policy) => policy.ref === "egress_home-exit@1")?.defaultListenerId).toBe("home-exit");
-    const media = config.policies.find((policy) => policy.ref === "egress_media-proxy-affinity@1")!;
-    // Media's Cloudflare zone blocks the host's IPv4 address, so its default route is a direct
-    // listener that prefers IPv6 on the IPv6-enabled external egress network.
-    expect(media.defaultListenerId).toBe("media-ipv6");
-    expect(config.listeners.find((listener) => listener.id === "media-ipv6")).toEqual({ id: "media-ipv6", port: 11_003, mode: "direct", preferredAddressFamily: 6 });
-    expect(media.rules?.[0]?.listenerId).toBe("media-direct");
-    expect(config.listeners.find((listener) => listener.id === "media-direct")?.allowedHostnameSuffixes).toEqual(["cdn-a.example", "cdn-b.example"]);
-    const stack = await Bun.file(new URL("../deploy/compose/browser-fabric.compose.yml", import.meta.url)).text();
+    for (const listener of Object.values(egressSidecarListeners)) expect(listeners.get(listener.id)?.port).toBe(listener.port);
+    // The proxy listener's upstream URL lives only in a Docker secret and stays fail-closed until set.
+    expect(listeners.get("proxy")).toMatchObject({ mode: "proxy", upstreamSecretFile: "/run/secrets/egress_proxy_upstreams", optional: true });
+    expect(listeners.get("proxy")?.fallbackToDirect).toBeUndefined();
+    expect(listeners.get("tor")).toMatchObject({ mode: "proxy", upstreamUrls: ["socks5h://fabric-tor:9050"] });
+    expect(listeners.get("captcha-solver")?.allowedHostnameSuffixes).toEqual(["dbcapi.me", "anti-captcha.com"]);
+    const stack = await Bun.file(new URL("../deploy/compose/compose.yml", import.meta.url)).text();
     const egressBlock = stack.slice(stack.indexOf("  fabric-egress-sidecar:"), stack.indexOf("\n  fabric-tor:"));
+    expect(egressBlock).toContain("egress_proxy_upstreams");
     // The solver listener is credential-free: provider keys are mounted only into the manager.
     for (const solverSecret of ["deathbycaptcha_username", "deathbycaptcha_password", "anticaptcha_client_key"]) {
       expect(egressBlock).not.toContain(solverSecret);
     }
-    const externalNetwork = stack.slice(stack.indexOf("\n  fabric-egress-external:\n"), stack.indexOf("\nvolumes:"));
-    expect(externalNetwork).toContain("enable_ipv6: true");
+  });
+
+  test("routes a native worker through a policy's direct listener for direct routes and exception hosts only", () => {
+    const affinity = exampleCatalog.egressPolicies.find((policy) => policy.family === "example-affinity")!;
+    expect(internalEgressProxyUrl(affinity, { trafficClass: "media_range" })).toBe("http://fabric-egress-sidecar:11010");
+    expect(internalEgressProxyUrl(affinity, { trafficClass: "direct_exception" })).toBe("http://fabric-egress-sidecar:11000");
+    expect(internalEgressProxyUrl(affinity, { trafficClass: "media_range", targetUrl: "https://cdn.direct.example/a.ts" })).toBe("http://fabric-egress-sidecar:11000");
+    expect(internalEgressProxyUrl(affinity, { trafficClass: "media_range", targetUrl: "https://direct.example.evil.test/a.ts" })).toBe("http://fabric-egress-sidecar:11010");
+    const staticDirect = exampleCatalog.egressPolicies.find((policy) => policy.family === "example-static-direct")!;
+    expect(internalEgressProxyUrl(staticDirect, { trafficClass: "static_asset" })).toBe("http://fabric-egress-sidecar:11000");
+    expect(internalEgressProxyUrl(staticDirect, { trafficClass: "document" })).toBe("http://fabric-egress-sidecar:11001");
+    expect(() => internalEgressProxyUrl(staticDirect, { host: "bad host" })).toThrow(/host is invalid/);
+    expect(() => internalEgressProxyUrl({ ...staticDirect, sidecar: { listener: { id: "proxy", port: 80 } } })).toThrow(/no valid Fabric sidecar listener/);
   });
 
   test("validates a direct listener's preferred address family and dials it when published", () => {
@@ -265,7 +268,7 @@ describe("Fabric egress sidecar", () => {
       expect(await request(affinityA)).toContain("second");
       expect(await request(affinityB)).toContain("first");
       // A returns to its established second-upstream affinity despite sharing the same source
-      // address as B. This is what ties Media's signed handshake to the media relay path.
+      // address as B. This is what ties a provider handshake to the later media relay path.
       expect(await request(affinityA)).toContain("second");
       expect(firstConnects).toBe(1);
       expect(secondConnects).toBe(2);

@@ -1,5 +1,5 @@
 # Never send local installs, VCS state, credentials, artifacts, or generated caches to the Docker
-# daemon. Every runtime image restores dependencies from the committed Bun/Python lockfiles.
+# daemon. Every runtime image restores dependencies from the committed Bun lockfile.
 .git
 .gitignore
 node_modules
@@ -8,6 +8,8 @@ node_modules
 .env
 .env.*
 !.env.example
+deploy/compose/secrets
+deploy/compose/.env
 coverage
 dist
 artifacts
@@ -18,5 +20,3 @@ __pycache__
 .DS_Store
 tests
 docs
-PLAN.md
-PROGRESS.md

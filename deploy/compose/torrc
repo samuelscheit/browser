@@ -1,0 +1,8 @@
+# Fabric-owned Tor client. It is reachable only on the egress network and has no published port.
+SocksPort 0.0.0.0:9050
+DataDirectory /tmp/tor-data
+PidFile /tmp/tor.pid
+RunAsDaemon 0
+ClientOnly 1
+AvoidDiskWrites 1
+Log notice stderr

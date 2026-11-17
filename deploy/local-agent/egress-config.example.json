@@ -3,24 +3,15 @@
   "listeners": [
     { "id": "direct", "port": 11000, "bindHost": "127.0.0.1", "mode": "direct" },
     {
-      "id": "signup-proxy",
+      "id": "proxy",
       "port": 11001,
       "bindHost": "127.0.0.1",
       "mode": "proxy",
-      "upstreamSecretFile": "/absolute/path/outside/repository/signup-proxy-url"
+      "upstreamSecretFile": "/absolute/path/outside/repository/proxy-url"
     }
   ],
   "policies": [
-    {
-      "ref": "egress_esim-direct-assets@1",
-      "defaultListenerId": "signup-proxy",
-      "rules": [
-        {
-          "listenerId": "direct",
-          "pathExtensions": [".css", ".gif", ".ico", ".jpeg", ".jpg", ".js", ".map", ".png", ".svg", ".webp", ".woff", ".woff2"],
-          "pathContains": ["/static/", "/assets/"]
-        }
-      ]
-    }
+    { "ref": "egress_direct@1", "defaultListenerId": "direct" },
+    { "ref": "egress_proxy@1", "defaultListenerId": "proxy" }
   ]
 }
