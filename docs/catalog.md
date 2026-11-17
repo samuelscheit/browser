@@ -127,7 +127,9 @@ docker compose up -d --force-recreate  # services reload the catalog; the provis
 recipe is offered by the Chrome worker, together with its profile family. The provisioner applies that as an idle-only worker
 reconfiguration; a worker that holds an active lease refuses it until the lease ends. Durable
 profiles for a new profile family are added to the provisioning step and to the
-`fabric-volume-bootstrap` service in `compose.yml`.
+`fabric-volume-bootstrap` service in `compose.yml`; the same idle-only reconfiguration adds their
+volume to an existing worker. A volume leaves a worker only once no profile, clone, volume
+generation or unfinished lease uses it.
 
 `typed_job` browser recipes need an executor that runs their operation (see
 `packages/recipes/src/runner.ts`); raw-CDP recipes need nothing beyond the catalog entry.

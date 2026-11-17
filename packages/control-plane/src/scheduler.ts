@@ -67,15 +67,35 @@ export interface BrowserSchedulerOptions {
 }
 
 /**
- * The reviewed managed-worker change: browser capacity and limits, and which recipes and profile
- * families it serves (so a catalog recipe can be enabled on an existing worker). Identity,
- * endpoints, runtimes, interactivity and volumes stay immutable.
+ * The reviewed managed-worker change: browser capacity and limits, which recipes and profile
+ * families it serves (so a catalog recipe can be enabled on an existing worker), and its profile
+ * volumes: new ones can be added, and one nothing references any more can be removed. Identity,
+ * endpoints, runtimes and interactivity stay immutable.
  */
 export interface ManagedWorkerReconfiguration {
   capacity: number;
   resourceLimits: Worker["resourceLimits"];
   recipeRefs: Worker["capabilities"]["recipeRefs"];
   supportedProfileFamilies: Worker["capabilities"]["supportedProfileFamilies"];
+  volumeNames: Worker["volumeNames"];
+}
+
+/**
+ * What still uses a worker volume: a profile on it (whatever its status), a volume generation that
+ * is not retired, a profile clone not yet destroyed, or the disposable volume of a lease that has
+ * not finished releasing.
+ */
+function volumeReferences(state: FabricState, workerId: Worker["id"], volume: string): string[] {
+  const references: string[] = [];
+  for (const profile of state.profiles.values()) if (profile.workerId === workerId && profile.volumeName === volume) references.push(`profile ${profile.ref}`);
+  for (const generation of state.volumeGenerations.values()) {
+    if (generation.workerId === workerId && generation.volumeName === volume && generation.status !== "retired") references.push(`volume generation ${generation.id}`);
+  }
+  for (const clone of state.clones.values()) if (clone.workerId === workerId && clone.volumeName === volume && clone.status !== "destroyed") references.push(`clone ${clone.id}`);
+  for (const lease of state.leases.values()) {
+    if (lease.workerId === workerId && lease.ephemeralVolumeName === volume && (lease.status === "active" || lease.status === "releasing")) references.push(`lease ${lease.id}`);
+  }
+  return references;
 }
 
 export interface ArtifactInput {
@@ -485,7 +505,7 @@ export class BrowserScheduler {
       this.#kernel.authorizeFabricAdmin(state, actor, "reconfigure_managed_worker", workerId);
       const worker = this.#kernel.worker(state, workerId);
       if (worker.isLocal) throw new FabricError("validation_failed", "the federated local worker hosts exactly one browser", 400);
-      const { capacity, resourceLimits, recipeRefs, supportedProfileFamilies } = change;
+      const { capacity, resourceLimits, recipeRefs, supportedProfileFamilies, volumeNames } = change;
       if (!Number.isInteger(capacity) || capacity < 0 || capacity > MAX_WORKER_BROWSER_LEASES || capacity > resourceLimits.maxBrowserLeases) {
         throw new FabricError("validation_failed", `worker capacity must be 0 to ${MAX_WORKER_BROWSER_LEASES} and within its browser resource limit`, 400);
       }
@@ -495,15 +515,25 @@ export class BrowserScheduler {
       if (supportedProfileFamilies.some((family) => !/^[a-z0-9][a-z0-9-]{0,62}$/.test(family)) || new Set(supportedProfileFamilies).size !== supportedProfileFamilies.length) {
         throw new FabricError("validation_failed", "worker profile families must be unique names", 400);
       }
-      const current = { capacity: worker.capacity, resourceLimits: worker.resourceLimits, recipeRefs: [...worker.capabilities.recipeRefs].sort(), supportedProfileFamilies: [...worker.capabilities.supportedProfileFamilies].sort() };
-      const desired = { capacity, resourceLimits, recipeRefs: [...recipeRefs].sort(), supportedProfileFamilies: [...supportedProfileFamilies].sort() };
+      if (!volumeNames.every(isSafeDockerVolumeName) || new Set(volumeNames).size !== volumeNames.length) {
+        throw new FabricError("validation_failed", "worker volumes must be unique safe Docker volume names", 400);
+      }
+      const current = { capacity: worker.capacity, resourceLimits: worker.resourceLimits, recipeRefs: [...worker.capabilities.recipeRefs].sort(), supportedProfileFamilies: [...worker.capabilities.supportedProfileFamilies].sort(), volumeNames: [...worker.volumeNames].sort() };
+      const desired = { capacity, resourceLimits, recipeRefs: [...recipeRefs].sort(), supportedProfileFamilies: [...supportedProfileFamilies].sort(), volumeNames: [...volumeNames].sort() };
       if (canonicalJson(current) === canonicalJson(desired)) return structuredClone(worker);
       if ([...state.leases.values()].some((lease) => lease.workerId === worker.id && lease.status === "active")) {
         throw new FabricError("conflict", "cannot reconfigure a worker while it has an active lease", 409);
       }
+      const volumesAdded = desired.volumeNames.filter((volume) => !current.volumeNames.includes(volume));
+      const volumesRemoved = current.volumeNames.filter((volume) => !desired.volumeNames.includes(volume));
+      for (const volume of volumesRemoved) {
+        const references = volumeReferences(state, worker.id, volume);
+        if (references.length > 0) throw new FabricError("conflict", `cannot remove worker volume ${volume}: still used by ${references.join(", ")}`, 409);
+      }
       worker.capacity = capacity;
       worker.resourceLimits = structuredClone(resourceLimits);
       worker.capabilities = { ...worker.capabilities, recipeRefs: [...recipeRefs], supportedProfileFamilies: [...supportedProfileFamilies] };
+      worker.volumeNames = [...volumeNames];
       worker.updatedAt = now(this.#clock);
       state.workers.set(worker.id, worker);
       const details = {
@@ -513,6 +543,8 @@ export class BrowserScheduler {
         maxBrowserLeases: resourceLimits.maxBrowserLeases,
         recipes: recipeRefs.length,
         profileFamilies: supportedProfileFamilies.length,
+        volumesAdded: volumesAdded.join(","),
+        volumesRemoved: volumesRemoved.join(","),
       };
       this.#kernel.event(state, undefined, { kind: "worker", id: worker.id }, "worker.reconfigured", details);
       this.#kernel.audit(state, actor, undefined, "worker.reconfigured", { kind: "worker", id: worker.id }, "succeeded", details);

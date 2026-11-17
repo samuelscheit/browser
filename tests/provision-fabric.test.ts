@@ -161,7 +161,7 @@ describe("Fabric provisioning manifests", () => {
     const worker = state.workers.get(resized.workers[0]!.id)!;
     expect(worker.capacity).toBe(3);
     expect(worker.resourceLimits).toEqual(resized.workers[0]!.resourceLimits);
-    expect([...state.events.values()].find((event) => event.type === "worker.reconfigured")?.payload).toEqual({ previousCapacity: 1, capacity: 3, previousMaxBrowserLeases: 1, maxBrowserLeases: 3, recipes: 2, profileFamilies: 1 });
+    expect([...state.events.values()].find((event) => event.type === "worker.reconfigured")?.payload).toEqual({ previousCapacity: 1, capacity: 3, previousMaxBrowserLeases: 1, maxBrowserLeases: 3, recipes: 2, profileFamilies: 1, volumesAdded: "", volumesRemoved: "" });
     expect((await provisionManifest(runtime, resized)).workersToReconfigure).toEqual([]);
 
     // Shrinking back is the same reviewed transition.
@@ -186,8 +186,55 @@ describe("Fabric provisioning manifests", () => {
     await provisionManifest(runtime, manifest);
     const changed = structuredClone(manifest);
     changed.workers[0]!.resourceLimits = { ...changed.workers[0]!.resourceLimits, memoryMiB: changed.workers[0]!.resourceLimits.memoryMiB + 512 };
-    changed.workers[0]!.volumeNames = [...changed.workers[0]!.volumeNames, "profile_smuggled"];
+    changed.workers[0]!.volumeNames = [...changed.workers[0]!.volumeNames, "profile_added"];
+    changed.workers[0]!.endpoint = "https://elsewhere.internal";
     await expect(provisionManifest(runtime, changed)).rejects.toMatchObject({ code: "conflict", status: 409 });
+    expect((await runtime.scheduler.store.snapshot()).workers.get(manifest.workers[0]!.id)!.volumeNames).toEqual(manifest.workers[0]!.volumeNames);
+  });
+
+  test("adds a profile volume to an existing worker, and a profile on it, in one manifest", async () => {
+    const manifest = await exampleManifest();
+    const runtime = await provisionRuntime();
+    await provisionManifest(runtime, manifest);
+    const cloned = structuredClone(manifest);
+    const grown: ProvisionManifest = { ...cloned, profiles: [...cloned.profiles, { ...cloned.profiles[0]!, ref: "profile_shop" as never, volumeName: "profile_shop" }] };
+    grown.workers[0]!.volumeNames = [...grown.workers[0]!.volumeNames, "profile_shop"];
+    expect(await provisionManifest(runtime, grown, true)).toMatchObject({ workersToReconfigure: [grown.workers[0]!.id], profilesToCreate: ["profile_shop"] });
+    await provisionManifest(runtime, grown);
+    const state = await runtime.scheduler.store.snapshot();
+    expect([...state.workers.get(grown.workers[0]!.id)!.volumeNames].sort()).toEqual(["profile_default", "profile_shop"]);
+    expect(state.profiles.get("profile_shop")?.volumeName).toBe("profile_shop");
+    expect([...state.events.values()].filter((event) => event.type === "worker.reconfigured").at(-1)?.payload).toMatchObject({ volumesAdded: "profile_shop", volumesRemoved: "" });
+    // Replaying the same manifest changes nothing.
+    expect(await provisionManifest(runtime, grown)).toMatchObject({ workersToReconfigure: [], profilesToCreate: [] });
+  });
+
+  test("removes a volume nothing uses, and refuses to remove one a profile lives on", async () => {
+    const manifest = await exampleManifest();
+    manifest.workers[0]!.volumeNames = [...manifest.workers[0]!.volumeNames, "profile_spare"];
+    const runtime = await provisionRuntime();
+    await provisionManifest(runtime, manifest);
+    const admin = manifest.principals.find((principal) => principal.roles.includes("fabric_admin"))!;
+    const worker = manifest.workers[0]!;
+    const change = (volumeNames: string[]) => ({ capacity: worker.capacity, resourceLimits: worker.resourceLimits, recipeRefs: worker.capabilities.recipeRefs, supportedProfileFamilies: worker.capabilities.supportedProfileFamilies, volumeNames });
+
+    await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change([]), admin))
+      .rejects.toMatchObject({ code: "conflict", message: expect.stringMatching(/^cannot remove worker volume profile_default: still used by profile profile_default, volume generation volume-generation_\w+$/) });
+    const shrunk = structuredClone(manifest);
+    shrunk.workers[0]!.volumeNames = ["profile_default"];
+    expect((await provisionManifest(runtime, shrunk)).workersToReconfigure).toEqual([worker.id]);
+    expect((await runtime.scheduler.store.snapshot()).workers.get(worker.id)!.volumeNames).toEqual(["profile_default"]);
+  });
+
+  test("a volume change waits for the worker to be idle, like every reconfiguration", async () => {
+    const manifest = await exampleManifest();
+    const runtime = await provisionRuntime();
+    await provisionManifest(runtime, manifest);
+    await holdActiveLease(runtime, manifest, "add-volume-active-lease");
+    const grown = structuredClone(manifest);
+    grown.workers[0]!.volumeNames = [...grown.workers[0]!.volumeNames, "profile_later"];
+    await expect(provisionManifest(runtime, grown)).rejects.toMatchObject({ code: "conflict", status: 409 });
+    expect((await runtime.scheduler.store.snapshot()).workers.get(grown.workers[0]!.id)!.volumeNames).toEqual(manifest.workers[0]!.volumeNames);
   });
 
   test("the scheduler bounds a reconfiguration and reserves it for fabric admins", async () => {
@@ -199,16 +246,19 @@ describe("Fabric provisioning manifests", () => {
     const operator = { ...admin, id: "principal_operator" as never, roles: ["project_operator" as const], certificateFingerprint: "operator-cert" };
     await runtime.scheduler.registerPrincipal(operator);
     const limits = { ...worker.resourceLimits, maxBrowserLeases: 2 };
-    const change = (capacity: number, extra: Partial<{ recipeRefs: string[]; supportedProfileFamilies: string[] }> = {}) => ({
+    const change = (capacity: number, extra: Partial<{ recipeRefs: string[]; supportedProfileFamilies: string[]; volumeNames: string[] }> = {}) => ({
       capacity,
       resourceLimits: limits,
       recipeRefs: (extra.recipeRefs ?? worker.capabilities.recipeRefs) as never,
       supportedProfileFamilies: extra.supportedProfileFamilies ?? worker.capabilities.supportedProfileFamilies,
+      volumeNames: extra.volumeNames ?? worker.volumeNames,
     });
     await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(3), admin)).rejects.toMatchObject({ code: "validation_failed" });
     await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(5), admin)).rejects.toMatchObject({ code: "validation_failed" });
     await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(2, { recipeRefs: ["not-a-recipe"] }), admin)).rejects.toMatchObject({ code: "validation_failed" });
     await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(2, { supportedProfileFamilies: ["default", "default"] }), admin)).rejects.toMatchObject({ code: "validation_failed" });
+    await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(2, { volumeNames: [...worker.volumeNames, "../escape"] }), admin)).rejects.toMatchObject({ code: "validation_failed" });
+    await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(2, { volumeNames: [...worker.volumeNames, ...worker.volumeNames] }), admin)).rejects.toMatchObject({ code: "validation_failed" });
     await expect(runtime.scheduler.reconfigureManagedWorker(worker.id, change(2), operator)).rejects.toMatchObject({ code: "authorization_denied" });
     expect((await runtime.scheduler.reconfigureManagedWorker(worker.id, change(2), admin)).capacity).toBe(2);
     expect((await runtime.scheduler.reconfigureManagedWorker(worker.id, change(0), admin)).capacity).toBe(0);

@@ -196,10 +196,11 @@ function staticWorkerEqual(left: Worker, right: ProvisionWorker): boolean {
 
 /**
  * The provisioner treats every worker field as immutable except one reviewed managed-worker
- * change (BrowserScheduler.reconfigureManagedWorker): capacity, resource limits, served recipes and
- * profile families. Normalize only those fields back to the current values, then require every
- * remaining static identity field to match exactly, so identity, endpoints, runtimes,
- * interactivity and volumes stay immutable.
+ * change (BrowserScheduler.reconfigureManagedWorker): capacity, resource limits, served recipes,
+ * profile families and profile volumes (whose removal the scheduler refuses while anything uses
+ * them). Normalize only those fields back to the current values, then require every remaining
+ * static identity field to match exactly, so identity, endpoints, runtimes and interactivity stay
+ * immutable.
  */
 function isManagedWorkerReconfiguration(existing: Worker, desired: ProvisionWorker): boolean {
   if (existing.isLocal || desired.isLocal) return false;
@@ -207,6 +208,7 @@ function isManagedWorkerReconfiguration(existing: Worker, desired: ProvisionWork
     ...desired,
     capacity: existing.capacity,
     resourceLimits: existing.resourceLimits,
+    volumeNames: existing.volumeNames,
     capabilities: { ...desired.capabilities, recipeRefs: existing.capabilities.recipeRefs, supportedProfileFamilies: existing.capabilities.supportedProfileFamilies },
   } satisfies ProvisionWorker;
   return canonicalJson(staticWorkerIdentity(existing)) === canonicalJson(staticWorkerIdentity(normalized));
@@ -286,6 +288,7 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
         resourceLimits: worker.resourceLimits,
         recipeRefs: worker.capabilities.recipeRefs,
         supportedProfileFamilies: worker.capabilities.supportedProfileFamilies,
+        volumeNames: worker.volumeNames,
       }, bootstrapAdmin);
     }
   }
