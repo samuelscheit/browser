@@ -86,7 +86,6 @@ paths:
         required: true
         content:
           application/octet-stream: { schema: { type: string, format: binary, maxLength: 33554432 } }
-          application/vnd.browser-fabric.media-manifest+json: { schema: { type: string, format: binary, maxLength: 65536 } }
       responses:
         '201': { description: Immutable artifact created, content: { application/json: { schema: { $ref: '#/components/schemas/Artifact' } } } }
         default: { $ref: '#/components/responses/Problem' }
@@ -156,20 +155,8 @@ paths:
         required: true
         content:
           application/octet-stream: { schema: { type: string, format: binary, maxLength: 33554432 } }
-          application/vnd.browser-fabric.media-manifest+json: { schema: { type: string, format: binary, maxLength: 65536 } }
       responses:
         '201': { description: Immutable artifact created, content: { application/json: { schema: { $ref: '#/components/schemas/Artifact' } } } }
-        default: { $ref: '#/components/responses/Problem' }
-  /jobs/{jobId}/media-playback:
-    parameters: [ { $ref: '#/components/parameters/JobId' } ]
-    post:
-      operationId: issueMediaPlaybackEndpoint
-      description: |
-        Issue short-lived opaque HLS and direct-media URLs for a ready `media-playback` job.
-        The caller must be authorized for the project. The returned capability is bound to the
-        exact active worker attempt and contains no provider URL, cookie, or request headers.
-      responses:
-        '201': { description: Playback capability issued, content: { application/json: { schema: { $ref: '#/components/schemas/MediaPlaybackEndpoint' } } } }
         default: { $ref: '#/components/responses/Problem' }
   /jobs/{jobId}/input-requests:
     parameters: [ { $ref: '#/components/parameters/JobId' } ]
@@ -178,61 +165,6 @@ paths:
       description: List non-secret input request metadata and worker public keys for the job.
       responses:
         '200': { description: Input requests, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/InputRequest' } } } } }
-        default: { $ref: '#/components/responses/Problem' }
-  /media-playback/{jobId}/master.m3u8:
-    parameters:
-      - { $ref: '#/components/parameters/JobId' }
-      - { name: cap, in: query, required: true, schema: { type: string }, description: Opaque attempt-scoped playback capability. }
-    get:
-      operationId: getMediaPlaybackMaster
-      security: []
-      responses:
-        '200': { description: Capability-gated HLS master playlist }
-        default: { $ref: '#/components/responses/Problem' }
-  /media-playback/{jobId}/media:
-    parameters:
-      - { $ref: '#/components/parameters/JobId' }
-      - { name: cap, in: query, required: true, schema: { type: string }, description: Opaque attempt-scoped playback capability. }
-      - { name: Range, in: header, required: false, schema: { type: string } }
-    get:
-      operationId: getMediaPlaybackDirectMedia
-      security: []
-      responses:
-        '200': { description: Full direct-media response }
-        '206': { description: Byte-ranged direct-media response }
-        default: { $ref: '#/components/responses/Problem' }
-  /media-playback/{jobId}/resource/{resource}:
-    parameters:
-      - { $ref: '#/components/parameters/JobId' }
-      - { name: resource, in: path, required: true, schema: { type: string, pattern: '^[A-Za-z0-9_-]+\.(m3u8|ts|key|mp4)$' } }
-      - { name: cap, in: query, required: true, schema: { type: string }, description: Opaque attempt-scoped playback capability. }
-      - { name: Range, in: header, required: false, schema: { type: string } }
-    get:
-      operationId: getMediaPlaybackResource
-      security: []
-      responses:
-        '200': { description: Capability-gated HLS resource }
-        '206': { description: Byte-ranged cached HLS resource }
-        default: { $ref: '#/components/responses/Problem' }
-  /projects/{projectId}/media-manifests:
-    parameters:
-      - { name: projectId, in: path, required: true, schema: { type: string, pattern: '^project_' } }
-      - { $ref: '#/components/parameters/ArtifactKind' }
-      - { $ref: '#/components/parameters/ArtifactLabel' }
-      - { $ref: '#/components/parameters/ArtifactPolicyRef' }
-    post:
-      operationId: uploadMediaManifest
-      description: |
-        Create a project-scoped immutable media_manifest before its consuming media-only job exists.
-        This is the sole ownerless artifact form; provider URLs are parsed and validated before
-        storage, and the response never includes an object-store key.
-      requestBody:
-        required: true
-        content:
-          application/vnd.browser-fabric.media-manifest+json:
-            schema: { type: string, format: binary, maxLength: 65536 }
-      responses:
-        '201': { description: Immutable media manifest created, content: { application/json: { schema: { $ref: '#/components/schemas/Artifact' } } } }
         default: { $ref: '#/components/responses/Problem' }
   /profiles:
     post:
@@ -335,9 +267,8 @@ components:
     IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 255 } }
     SessionId: { name: sessionId, in: path, required: true, schema: { type: string, pattern: '^browser-session_' } }
     JobId: { name: jobId, in: path, required: true, schema: { type: string, pattern: '^job_' } }
-    ArtifactKind: { name: X-Fabric-Artifact-Kind, in: header, required: true, schema: { type: string, enum: [screenshot, mhtml, trace, har, download, video, log, media_manifest] } }
+    ArtifactKind: { name: X-Fabric-Artifact-Kind, in: header, required: true, schema: { type: string, enum: [screenshot, mhtml, trace, har, download, video, log] } }
     ArtifactLabel: { name: X-Fabric-Artifact-Label, in: header, required: false, schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$' } }
-    ArtifactPolicyRef: { name: X-Fabric-Artifact-Policy-Ref, in: header, required: false, schema: { type: string, pattern: '^artifact-policy_' }, description: Defaults to artifact-policy_standard-30-days@1. }
   responses:
     Problem:
       description: RFC 9457 problem response
@@ -349,7 +280,7 @@ components:
       properties:
         project: { type: string, pattern: '^project_' }
         idempotencyKey: { type: string }
-        runtime: { type: string, enum: [chromium-cdp, patchright, rebrowser-puppeteer, media-relay, media-playback] }
+        runtime: { type: string, enum: [chrome] }
         browserRecipeRef: { type: string, pattern: '^recipe_' }
         profileRef: { type: string, pattern: '^profile_' }
         leaseMode: { type: string, enum: [writer, interactive, clone] }
@@ -414,13 +345,6 @@ components:
         workerId: { type: string, pattern: '^worker_' }
         result: { type: object }
         failureReason: { type: string }
-    MediaPlaybackEndpoint:
-      type: object
-      required: [masterUrl, mediaUrl, expiresAt]
-      properties:
-        masterUrl: { type: string, format: uri, description: Use when the encrypted source declared HLS delivery. }
-        mediaUrl: { type: string, format: uri, description: Use when the encrypted source declared direct MP4/media delivery. }
-        expiresAt: { type: string, format: date-time }
     Artifact:
       type: object
       required: [id, project, kind, sha256, mimeType, sizeBytes, createdAt, expiresAt]
@@ -430,7 +354,7 @@ components:
         sessionId: { type: string, pattern: '^browser-session_' }
         jobId: { type: string, pattern: '^job_' }
         profileRef: { type: string, pattern: '^profile_' }
-        kind: { type: string, enum: [screenshot, mhtml, trace, har, download, video, log, media_manifest] }
+        kind: { type: string, enum: [screenshot, mhtml, trace, har, download, video, log] }
         sha256: { type: string, pattern: '^sha256:[A-Fa-f0-9]{64}$' }
         mimeType: { type: string }
         sizeBytes: { type: integer, minimum: 0 }
@@ -477,8 +401,7 @@ components:
         id: { type: string, pattern: '^worker_' }
         endpoint: { type: string, format: uri }
         cdpRelayEndpoint: { type: string, format: uri }
-        mediaPlaybackEndpoint: { type: string, format: uri, description: Private worker relay endpoint; never returned by public job responses. }
-        capacity: { type: integer, minimum: 0, maximum: 3 }
+        capacity: { type: integer, minimum: 0, maximum: 4 }
         health: { type: string, enum: [healthy, degraded, offline, draining] }
         isLocal: { type: boolean }
         capabilities: { type: object }
@@ -490,9 +413,8 @@ components:
         id: { type: string, pattern: '^input-request_' }
         project: { type: string, pattern: '^project_' }
         leaseId: { type: string, pattern: '^browser-lease_' }
-        mediaAttemptId: { type: string, pattern: '^attempt_', description: Present only for encrypted media-playback source handoffs. }
         field: { type: string }
-        fieldType: { type: string, enum: [password, otp, captcha_provider_credential, proxy_credential, form_value, media_playback_source] }
+        fieldType: { type: string, enum: [password, otp, captcha_provider_credential, proxy_credential, form_value] }
         status: { type: string, enum: [pending, supplied, consumed, expired, cancelled] }
         expiresAt: { type: string, format: date-time }
         workerId: { type: string, pattern: '^worker_' }

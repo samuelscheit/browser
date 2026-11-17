@@ -1,0 +1,41 @@
+{
+  "id": "worker_chrome",
+  "certificateFingerprint": "configure-worker-chrome-certificate-fingerprint",
+  "endpoint": "https://worker-agent.internal",
+  "cdpRelayEndpoint": "http://fabric-browser-{leaseId}:9223",
+  "capabilities": {
+    "runtimeFamilies": [
+      "chrome"
+    ],
+    "recipeRefs": [
+      "recipe_chrome@1",
+      "recipe_chrome-headless@1"
+    ],
+    "browserVersions": {
+      "chrome": "pinned"
+    },
+    "supportsInteractive": true,
+    "supportedProfileFamilies": [
+      "default"
+    ]
+  },
+  "capacity": 4,
+  "activeLeases": 0,
+  "health": "healthy",
+  "isLocal": false,
+  "volumeNames": [
+    "profile_default",
+    "profile_default-g2"
+  ],
+  "resourceLimits": {
+    "maxBrowserLeases": 4,
+    "cpuMilli": 2000,
+    "memoryMiB": 4096,
+    "pids": 512,
+    "shmMiB": 1024,
+    "temporaryStorageMiB": 4096
+  },
+  "lastHeartbeatAt": "1970-01-01T00:00:00.000Z",
+  "createdAt": "1970-01-01T00:00:00.000Z",
+  "updatedAt": "1970-01-01T00:00:00.000Z"
+}

@@ -69,7 +69,7 @@ export function makeRecipe(input: RecipeDefinitionInput): RecipeDefinition {
     version,
     runtime: input.runtime,
     immutableHash: `sha256:${createHash("sha256").update(canonicalJson(base)).digest("hex")}`,
-    browserImage: input.browserImage ?? `ghcr.io/browser-fabric/${input.runtime}:1`,
+    browserImage: input.browserImage ?? "browser-fabric-browser:local",
     browserVersion: "chromium-pinned",
     mode: input.mode,
     profileFamily: input.profileFamily,
@@ -85,46 +85,21 @@ export function makeRecipe(input: RecipeDefinitionInput): RecipeDefinition {
 }
 
 /**
- * Built-in recipes: one raw-CDP recipe per browser runtime, an interactive (headful, live-view)
- * Chromium, and the two media recipes. Deployments add their own through the catalog file.
- * Browser recipes enable the captcha-solver challenge set; it solves only through providers whose
- * credential the deployment configured.
+ * Built-in recipes: Fabric's Chrome, headful on a private X display (live view and takeover work,
+ * and sites see an ordinary desktop browser) or headless. Both use the `default` profile family,
+ * so one profile serves either. Deployments add their own through the catalog file. Both enable the
+ * captcha-solver challenge set; it solves only through providers whose credential is configured.
  */
 export const builtInRecipes: readonly RecipeDefinition[] = [
-  makeRecipe({ name: "chromium-cdp", runtime: "chromium-cdp", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" }),
-  makeRecipe({ name: "interactive-chromium", runtime: "chromium-cdp", profileFamily: "interactive", mode: "interactive", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" }),
-  makeRecipe({ name: "patchright", runtime: "patchright", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" }),
-  makeRecipe({ name: "rebrowser-puppeteer", runtime: "rebrowser-puppeteer", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" }),
-  makeRecipe({
-    name: "media-relay",
-    runtime: "media-relay",
-    profileFamily: "media",
-    mode: "headless",
-    access: "typed_job",
-    typedOperations: [{ name: "relay", requiredFields: ["manifestRef"], allowedFields: ["manifestRef", "range"], secretInputFields: [] }],
-    // The artifact handoff is immutable/idempotent, so one infrastructure retry is safe after a
-    // manager/worker failure without creating a second object.
-    maxAttempts: 2
-  }),
-  // Streaming playback is deliberately separate from the bounded immutable artifact relay. A
-  // provider's signed URL/cookie bundle arrives only through an encrypted one-shot input request
-  // after this media attempt has been assigned; it is never accepted in the durable job.
-  makeRecipe({
-    name: "media-playback",
-    runtime: "media-playback",
-    profileFamily: "media",
-    mode: "headless",
-    access: "typed_job",
-    typedOperations: [{ name: "playback", requiredFields: ["manifestRef"], allowedFields: ["manifestRef"], secretInputFields: ["media_source"] }],
-    maxAttempts: 2
-  })
+  makeRecipe({ name: "chrome", runtime: "chrome", profileFamily: "default", mode: "interactive", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" }),
+  makeRecipe({ name: "chrome-headless", runtime: "chrome", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" })
 ];
 
 export const standardArtifactPolicies: readonly ArtifactPolicy[] = [
   {
     ref: "artifact-policy_standard-30-days@1" as ArtifactPolicy["ref"],
     retentionDays: 30,
-    allowedKinds: ["screenshot", "mhtml", "trace", "har", "download", "video", "log", "media_manifest"],
+    allowedKinds: ["screenshot", "mhtml", "trace", "har", "download", "video", "log"],
     createdAt
   }
 ];

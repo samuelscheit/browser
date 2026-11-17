@@ -112,12 +112,6 @@ export function buildJobRequest(options: JobRequestOptions): JobCreateInput {
   };
 }
 
-/** Operations of the built-in media recipes (`recipe_media-relay@1`, `recipe_media-playback@1`). */
-export const mediaOperations = {
-  relay: (manifestRef: string, range?: { start: number; end?: number }): Record<string, unknown> => ({ operation: "relay", manifestRef, ...(range === undefined ? {} : { range: { ...range } }) }),
-  playback: (manifestRef: string): Record<string, unknown> => ({ operation: "playback", manifestRef }),
-} as const;
-
 /** A client authenticated with FABRIC_API_URL, FABRIC_API_USERNAME (principal ID) and FABRIC_API_PASSWORD. */
 export function createFabricClientFromEnvironment(fetchImpl?: FetchLike): BrowserFabricClient {
   const baseUrl = globalThis.process?.env?.FABRIC_API_URL;

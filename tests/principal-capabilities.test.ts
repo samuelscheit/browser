@@ -24,17 +24,17 @@ async function setup() {
   const worker = makeWorker({
     id: "worker_chromium" as Worker["id"],
     capabilities: {
-      runtimeFamilies: ["chromium-cdp", "rebrowser-puppeteer"],
-      recipeRefs: ["recipe_interactive-chromium@1", "recipe_example-fetch@1"] as unknown as Worker["capabilities"]["recipeRefs"],
+      runtimeFamilies: ["chrome", "chrome"],
+      recipeRefs: ["recipe_chrome@1", "recipe_example-fetch@1"] as unknown as Worker["capabilities"]["recipeRefs"],
       browserVersions: { chromium: "stable" },
       supportsInteractive: true,
-      supportedProfileFamilies: ["interactive", "default"],
+      supportedProfileFamilies: ["default"],
     },
     volumeNames: ["v-agent", "v-old", "v-other", "v-shared"],
   });
   await context.scheduler.registerWorker(worker);
-  await context.scheduler.createProfile(makeProfile(worker, { ref: "profile_agent" as never, ownerProject: AGENT_PROJECT, grants: [AGENT_PROJECT], volumeName: "v-agent", profileFamily: "interactive" }));
-  await context.scheduler.createProfile(makeProfile(worker, { ref: "profile_old" as never, ownerProject: AGENT_PROJECT, grants: [AGENT_PROJECT], volumeName: "v-old", profileFamily: "interactive", status: "revoked" }));
+  await context.scheduler.createProfile(makeProfile(worker, { ref: "profile_agent" as never, ownerProject: AGENT_PROJECT, grants: [AGENT_PROJECT], volumeName: "v-agent", profileFamily: "default" }));
+  await context.scheduler.createProfile(makeProfile(worker, { ref: "profile_old" as never, ownerProject: AGENT_PROJECT, grants: [AGENT_PROJECT], volumeName: "v-old", profileFamily: "default", status: "revoked" }));
   await context.scheduler.createProfile(makeProfile(worker, { ref: "profile_other" as never, ownerProject: OTHER_PROJECT, grants: [OTHER_PROJECT], volumeName: "v-other" }));
   await context.scheduler.createProfile(makeProfile(worker, { ref: "profile_shared" as never, ownerProject: OTHER_PROJECT, grants: [OTHER_PROJECT, AGENT_PROJECT], volumeName: "v-shared" }));
   return context;
@@ -54,10 +54,10 @@ describe("GET /v1/me", () => {
     expect(body.projects).toEqual([{ id: AGENT_PROJECT, name: "Agent" }]);
     // Owned and granted profiles; neither a revoked one nor another project's private one.
     expect(body.profiles.map((profile) => profile.ref)).toEqual(["profile_agent", "profile_shared"] as never);
-    expect(body.profiles[0]).toEqual({ ref: "profile_agent", ownerProject: AGENT_PROJECT, grants: [AGENT_PROJECT], profileFamily: "interactive", status: "active" } as never);
+    expect(body.profiles[0]).toEqual({ ref: "profile_agent", ownerProject: AGENT_PROJECT, grants: [AGENT_PROJECT], profileFamily: "default", status: "active" } as never);
     expect(body.recipes).toEqual([
-      { ref: "recipe_example-fetch@1", runtime: "chromium-cdp", mode: "headless", access: "typed_job", profileFamily: "default" },
-      { ref: "recipe_interactive-chromium@1", runtime: "chromium-cdp", mode: "interactive", access: "raw_cdp", profileFamily: "interactive" },
+      { ref: "recipe_chrome@1", runtime: "chrome", mode: "interactive", access: "raw_cdp", profileFamily: "default" },
+      { ref: "recipe_example-fetch@1", runtime: "chrome", mode: "headless", access: "typed_job", profileFamily: "default" },
     ] as never);
     expect(body.egressPolicies).toContain("egress_direct@1" as never);
     expect([...body.egressPolicies].sort()).toEqual(body.egressPolicies);

@@ -5,27 +5,25 @@
   "cdpRelayEndpoint": "ws://127.0.0.1:9222",
   "capabilities": {
     "runtimeFamilies": [
-      "chromium-cdp"
+      "chrome"
     ],
     "recipeRefs": [
-      "recipe_interactive-chromium@1"
+      "recipe_chrome@1"
     ],
     "browserVersions": {
-      "chromium": "operator-configured"
+      "chrome": "operator-configured"
     },
     "supportsInteractive": true,
     "supportedProfileFamilies": [
-      "interactive"
+      "default"
     ]
   },
   "capacity": 1,
   "activeLeases": 0,
-  "mediaCapacity": 0,
-  "activeMediaTasks": 0,
   "health": "healthy",
   "isLocal": true,
   "volumeNames": [
-    "profile_interactive_local"
+    "profile_local"
   ],
   "resourceLimits": {
     "maxBrowserLeases": 1,

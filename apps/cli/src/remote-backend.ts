@@ -5,7 +5,7 @@ import { CdpConnection } from "@browser-fabric/worker-runtime";
 import type { BrowserBackend } from "./backend";
 import { basicAuthorization, type BrowserRequest, type Credentials } from "./config";
 
-export const DEFAULT_RECIPE = "recipe_interactive-chromium@1";
+export const DEFAULT_RECIPE = "recipe_chrome@1";
 export const DEFAULT_EGRESS = "egress_direct@1";
 const TERMINAL = new Set(["released", "cancelled", "failed", "timed_out"]);
 

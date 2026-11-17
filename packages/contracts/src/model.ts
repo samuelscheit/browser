@@ -20,22 +20,13 @@ import type {
   WorkerId
 } from "./ids";
 
-export const runtimeFamilies = [
-  "chromium-cdp",
-  "patchright",
-  "rebrowser-puppeteer",
-  /** One-shot immutable media artifact relay. It never creates a browser lease. */
-  "media-relay",
-  /** Persistent, capability-gated HLS/MP4 playback relay. It never creates a browser lease. */
-  "media-playback"
-] as const;
+/**
+ * The one browser runtime: Google Chrome stable (amd64) or Debian Chromium (arm64), always with its
+ * own Fabric-owned process, profile and guardian. Clients bring Playwright, Patchright, Puppeteer or
+ * raw CDP over the session's CDP endpoint; the client library is never a server-side runtime.
+ */
+export const runtimeFamilies = ["chrome"] as const;
 export type RuntimeFamily = (typeof runtimeFamilies)[number];
-export type MediaRuntimeFamily = "media-relay" | "media-playback";
-
-/** Media workers consume bounded media capacity independently from browser leases. */
-export function isMediaRuntime(value: string): value is MediaRuntimeFamily {
-  return value === "media-relay" || value === "media-playback";
-}
 
 export const leaseModes = ["writer", "interactive", "clone"] as const;
 
@@ -104,7 +95,7 @@ export type WorkerHealthState = (typeof workerHealthStates)[number];
 export const profileStatuses = ["active", "unhealthy", "relocating", "revoked"] as const;
 export type ProfileStatus = (typeof profileStatuses)[number];
 
-export const inputFieldTypes = ["password", "otp", "captcha_provider_credential", "proxy_credential", "form_value", "media_playback_source"] as const;
+export const inputFieldTypes = ["password", "otp", "captcha_provider_credential", "proxy_credential", "form_value"] as const;
 export type InputFieldType = (typeof inputFieldTypes)[number];
 
 export const trafficClasses = [
@@ -113,11 +104,6 @@ export const trafficClasses = [
   "websocket",
   "static_asset",
   "browser_download",
-  "media_manifest",
-  "media_key",
-  "media_segment",
-  "media_range",
-  "provider_handshake",
   "captcha_solver",
   "direct_exception"
 ] as const;
@@ -186,14 +172,9 @@ export interface Worker {
   inputEncryptionPublicKeyPem?: string;
   endpoint: string;
   cdpRelayEndpoint: string;
-  /** Private HTTP origin of a persistent capability-gated media playback worker, when supported. */
-  mediaPlaybackEndpoint?: string;
   capabilities: WorkerCapabilities;
   capacity: number;
   activeLeases: number;
-  /** Media tasks do not consume browser leases but still have a bounded worker queue. */
-  mediaCapacity?: number;
-  activeMediaTasks?: number;
   health: WorkerHealthState;
   isLocal: boolean;
   volumeNames: readonly string[];
@@ -211,7 +192,8 @@ export interface BrowserRecipe {
   immutableHash: string;
   browserImage: string;
   browserVersion: string;
-  mode: "headless" | "headful" | "interactive";
+  /** `interactive`: headful on a private X display (live view, takeover); `headless`: no display. */
+  mode: "headless" | "interactive";
   profileFamily: string;
   requiredCapabilities: readonly string[];
   launch: {
@@ -240,37 +222,18 @@ export interface BrowserRecipe {
   createdAt: string;
 }
 
+/**
+ * A versioned egress policy. The control plane selects it per session/job; the egress sidecar
+ * enforces it through the per-policy PAC (deploy/compose/egress-sidecar.json), which must implement
+ * these declared routes. Browsers can only reach the internet through that PAC.
+ */
 export interface EgressPolicy {
   ref: EgressPolicyRef;
   family: string;
   version: number;
   immutableHash: string;
   routes: Readonly<Partial<Record<TrafficClass, EgressRoute>>>;
-  /** Egress sidecar listeners that carry this policy's traffic from native (non-browser) workers. */
-  sidecar: EgressSidecarRouting;
-  /** Ordered proxy refs tried in turn when a proxied request fails with a retryable error. */
-  proxyFallbackRefs?: readonly string[];
-  /** Hostname suffixes that are explicitly allowed to bypass the proxy route. */
-  directExceptionHostnames?: readonly string[];
-  constraints: {
-    preserveProxyAffinity: boolean;
-    disableServiceWorkersInProxyMode: boolean;
-    allowDirectMediaRelay: boolean;
-  };
   createdAt: string;
-}
-
-/** A named listener of the deployment's egress sidecar (see deploy/compose/egress-sidecar.json). */
-export interface EgressSidecarListener {
-  id: string;
-  port: number;
-}
-
-export interface EgressSidecarRouting {
-  /** Listener for every route of the policy that is not `direct`. */
-  listener: EgressSidecarListener;
-  /** Listener for the policy's `direct` routes and direct-exception hostnames; defaults to `listener`. */
-  directListener?: EgressSidecarListener;
 }
 
 export interface ChallengeHandlerSet {
@@ -296,7 +259,7 @@ export interface ChallengeHandler {
 export interface ArtifactPolicy {
   ref: ArtifactPolicyRef;
   retentionDays: number;
-  allowedKinds: readonly ("screenshot" | "mhtml" | "trace" | "har" | "download" | "video" | "log" | "media_manifest")[];
+  allowedKinds: readonly Artifact["kind"][];
   createdAt: string;
 }
 
@@ -448,21 +411,6 @@ export interface Job {
   updatedAt: string;
   expiresAt: string;
   assignmentClaimedAt?: string;
-  /** Reserved once for a one-shot media output so immutable retries keep the same object metadata. */
-  mediaArtifactExpiresAt?: string;
-  /** Active media-only attempt that authorizes exactly one result capability. */
-  mediaAttemptId?: AttemptId;
-  /**
-   * Non-secret identity of the exact encrypted source request that the active playback relay must
-   * consume before it can be marked ready. This prevents an older consumed source from satisfying
-   * a later provider-refresh request on the same attempt.
-   */
-  mediaPlaybackSourceRequestId?: InputRequestId;
-  /**
-   * Set only after an assigned encrypted playback-source worker has bound its private relay.
-   * The provider URL, cookies, and public playback capability deliberately never enter this row.
-   */
-  mediaPlaybackReadyAt?: string;
 }
 
 export interface JobAttempt {
@@ -489,12 +437,11 @@ export interface FabricEvent {
 export interface Artifact {
   id: ArtifactId;
   project: ProjectId;
-  /** Browser/job outputs have exactly one owner. A media_manifest is intentionally project-scoped
-   * so an application can submit it before the media job that will consume it exists. */
+  /** Every artifact has exactly one owner: a browser session or a job. */
   sessionId?: BrowserSessionId;
   jobId?: JobId;
   profileRef?: ProfileRef;
-  kind: "screenshot" | "mhtml" | "trace" | "har" | "download" | "video" | "log" | "media_manifest";
+  kind: "screenshot" | "mhtml" | "trace" | "har" | "download" | "video" | "log";
   objectKey: string;
   sha256: string;
   mimeType: string;
@@ -542,9 +489,7 @@ export interface EphemeralInputRequest {
   project: ProjectId;
   sessionId?: BrowserSessionId;
   jobId?: JobId;
-  /** Browser/session work uses a lease; media playback source handoffs bind to an attempt instead. */
-  leaseId?: BrowserLeaseId;
-  mediaAttemptId?: AttemptId;
+  leaseId: BrowserLeaseId;
   workerId?: WorkerId;
   /** Public key is safe to return to the application; the corresponding private key stays on the worker. */
   workerInputEncryptionPublicKeyPem?: string;
@@ -596,12 +541,6 @@ export interface JobResponse {
   failureReason?: string;
 }
 
-/** A short-lived bearer endpoint for an active Fabric-owned media playback relay. */
-export interface MediaPlaybackEndpoint {
-  endpoint: string;
-  expiresAt: string;
-}
-
 export interface CdpCapabilityClaims {
   version: 1;
   sessionId: BrowserSessionId;
@@ -613,8 +552,7 @@ export interface CdpCapabilityClaims {
 }
 
 export interface WorkerAssignment {
-  /** Media-only recipes deliberately have no BrowserLease. */
-  lease?: BrowserLease;
+  lease: BrowserLease;
   session?: BrowserSession;
   job?: Job;
   recipe: BrowserRecipe;

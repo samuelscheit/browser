@@ -48,12 +48,9 @@ export class LocalAgentHttpTransport implements LocalAgentTransport {
 
   public async claimAssignment(workerId: WorkerId, assignment: WorkerAssignment): Promise<WorkerAssignment> {
     this.#assertWorker(workerId);
-    const leaseId = assignment.lease?.id;
-    const jobId = leaseId === undefined ? assignment.job?.id : undefined;
-    if (!leaseId && !jobId) throw new Error("assignment has neither a lease nor a media job");
     const response = await this.#request(`/v1/workers/${encodeURIComponent(workerId)}/claim`, {
       method: "POST",
-      body: { ...(leaseId === undefined ? {} : { leaseId }), ...(jobId === undefined ? {} : { jobId }) }
+      body: { leaseId: assignment.lease.id }
     });
     if (!response || typeof response !== "object" || !("signature" in response)) throw new Error("worker-manager returned an unsigned claimed assignment");
     return this.#verifier.verify(response as never, workerId);

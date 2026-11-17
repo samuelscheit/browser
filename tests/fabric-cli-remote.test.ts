@@ -78,7 +78,7 @@ describe("remote backend", () => {
     expect(fabric.created).toHaveLength(1);
     const { body, idempotencyKey } = fabric.created[0]!;
     expect(idempotencyKey).toBe(body.idempotencyKey);
-    expect(body).toMatchObject({ project: "project_agent", profileRef: "profile_agent", browserRecipeRef: "recipe_interactive-chromium@1", leaseMode: "interactive", maxExternalConnections: 8, ttlSeconds: 14_400 });
+    expect(body).toMatchObject({ project: "project_agent", profileRef: "profile_agent", browserRecipeRef: "recipe_chrome@1", leaseMode: "interactive", maxExternalConnections: 8, ttlSeconds: 14_400 });
     const second = await backend.endpoint();
     expect(fabric.created).toHaveLength(1);
     // Each connection reads the session again, so it gets the current short-lived capability.

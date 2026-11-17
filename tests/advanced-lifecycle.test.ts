@@ -8,7 +8,7 @@ import type { JobId, Worker } from "@browser-fabric/contracts";
 describe("advanced lifecycle boundaries", () => {
   test("assignment envelopes are signed and addressed to one worker", async () => {
     const signer = AssignmentSigner.generate();
-    const assignment = { recipe: {} as never, egressPolicy: {} as never, artifactPolicy: {} as never };
+    const assignment = { lease: {} as never, recipe: {} as never, egressPolicy: {} as never, artifactPolicy: {} as never };
     const envelope = signer.issue("worker_a" as Worker["id"], assignment);
     expect(signer.verifier().verify(envelope, "worker_a" as Worker["id"])).toEqual(assignment);
     expect(() => signer.verifier().verify({ ...envelope, workerId: "worker_b" as Worker["id"] }, "worker_a" as Worker["id"])).toThrow();
@@ -85,7 +85,7 @@ test("scheduler accepts ciphertext-only input envelopes and returns no plaintext
   await scheduler.bootstrap({ projects: [{ id: TEST_PROJECT, name: "Test" }], principals: [TEST_PRINCIPAL] });
   await scheduler.registerWorker(worker);
   const profile = await scheduler.createProfile(makeProfile(worker), TEST_PRINCIPAL);
-  const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "encrypted-input", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+  const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "encrypted-input", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
   const [assignment] = await scheduler.dispatch();
   const request = await scheduler.requestEphemeralInput({ sessionId: session.id as never, leaseId: assignment!.lease!.id, field: "password", fieldType: "password" }, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
   const envelope = encryptEphemeralInput({ request: request.request, workerId: worker.id, workerPublicKeyPem: keys.publicKeyPem, value: "ciphertext-only-secret", now: clock.now() });

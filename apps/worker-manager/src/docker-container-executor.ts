@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { isIP } from "node:net";
-import { FabricError, MEDIA_SOURCE_MAX_BYTES, type ChallengeHandler } from "@browser-fabric/contracts";
-import { assertFailClosedPac, internalEgressProxyUrl } from "@browser-fabric/policy";
+import { FabricError, type ChallengeHandler } from "@browser-fabric/contracts";
+import { assertFailClosedPac } from "@browser-fabric/policy";
 import {
   assertTurnstileGuardianSpec,
   closeBrowserGracefully,
@@ -10,7 +10,7 @@ import {
   type TurnstileGuardianFactory,
   type TurnstileGuardianHandle,
 } from "@browser-fabric/worker-runtime";
-import type { BrowserProcessSpec, Executor, MediaExecutor } from "./index";
+import type { BrowserProcessSpec, Executor } from "./index";
 
 /** Narrow, argv-only boundary around the privileged Docker CLI. */
 export interface DockerCommand {
@@ -149,15 +149,12 @@ function assertSpec(spec: BrowserProcessSpec, allowedEnvironmentKeys: ReadonlySe
   if (!spec.container.networks.includes("fabric-workers") || spec.container.networks.some((network) => network !== "fabric-workers" && network !== "fabric-egress")) {
     throw new FabricError("validation_failed", "browser container may join only Fabric worker and egress networks", 400);
   }
-  if (spec.container.cdpBind.host === "127.0.0.1" && spec.container.cdpBind.port === 0) throw new FabricError("validation_failed", "browser CDP port is invalid", 400);
-  if (spec.container.cdpBind.port !== 0 && (spec.container.cdpBind.host !== "private-overlay" || spec.container.cdpBind.port < 1024 || spec.container.cdpBind.port > 65_535)) {
+  if (spec.container.cdpBind.host !== "private-overlay" || spec.container.cdpBind.port < 1024 || spec.container.cdpBind.port > 65_535) {
     throw new FabricError("validation_failed", "browser CDP must bind to a private worker network port", 400);
   }
-  if (spec.container.cdpBind.port !== 0) {
-    if (!spec.container.turnstileGuardian) throw new FabricError("validation_failed", "every Fabric browser must declare the Turnstile guardian", 400);
-    try { assertTurnstileGuardianSpec(spec.container.turnstileGuardian); }
-    catch (error) { throw new FabricError("validation_failed", error instanceof Error ? error.message : "invalid Turnstile guardian", 400); }
-  }
+  if (!spec.container.turnstileGuardian) throw new FabricError("validation_failed", "every Fabric browser must declare the Turnstile guardian", 400);
+  try { assertTurnstileGuardianSpec(spec.container.turnstileGuardian); }
+  catch (error) { throw new FabricError("validation_failed", error instanceof Error ? error.message : "invalid Turnstile guardian", 400); }
   if (spec.container.command.length < 1 || spec.container.command.length > 64 || spec.container.command.some((arg) => arg.length > 4_096 || /[\0\r\n]/.test(arg) || forbiddenArg.test(arg))) {
     throw new FabricError("validation_failed", "browser command contains a forbidden or malformed argument", 400);
   }
@@ -200,7 +197,7 @@ function createArgs(spec: BrowserProcessSpec, name: string, primaryNetwork: stri
     "--restart", "no",
     "--stop-timeout", "10",
     "--label", "com.browser-fabric.managed=true",
-    "--label", `com.browser-fabric.kind=${container.cdpBind.port === 0 ? "media" : "browser"}`,
+    "--label", "com.browser-fabric.kind=browser",
     "--label", `com.browser-fabric.worker-id=${container.workerId}`,
     ...(temporary === undefined ? [] : ["--label", `com.browser-fabric.temporary-volumes=${temporary}`]),
     ...(container.leaseId ? ["--label", `com.browser-fabric.lease-id=${container.leaseId}`] : []),
@@ -208,7 +205,7 @@ function createArgs(spec: BrowserProcessSpec, name: string, primaryNetwork: stri
     "--read-only",
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges:true",
-    ...(container.cdpBind.port === 0 || !browserSeccompProfile ? [] : ["--security-opt", `seccomp=${browserSeccompProfile}`]),
+    ...(browserSeccompProfile ? ["--security-opt", `seccomp=${browserSeccompProfile}`] : []),
     "--cpus", String(Math.max(0.1, container.limits.cpuMilli / 1_000)),
     "--memory", `${container.limits.memoryMiB}m`,
     "--pids-limit", String(container.limits.pids),
@@ -216,7 +213,7 @@ function createArgs(spec: BrowserProcessSpec, name: string, primaryNetwork: stri
     // Unix-domain socket directory. No executable temp files or host paths are
     // permitted.
     "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=1073741824,mode=1777",
-    ...(container.cdpBind.port === 0 ? [] : ["--tmpfs", "/tmp/.X11-unix:rw,nosuid,nodev,size=1048576,mode=1777"]),
+    "--tmpfs", "/tmp/.X11-unix:rw,nosuid,nodev,size=1048576,mode=1777",
     "--shm-size", `${container.limits.shmMiB}m`,
   ];
   for (const volume of container.volumes) {
@@ -269,14 +266,12 @@ export class DockerContainerExecutor implements Executor {
     }
     const effectiveSpec = override ? { ...spec, container: { ...spec.container, image: override } } : spec;
     assertSpec(effectiveSpec, new Set(this.#options.allowedEnvironmentKeys ?? []));
-    if (effectiveSpec.container.cdpBind.port !== 0) {
-      assertBrowserSeccompProfile(this.#options.browserSeccompProfile, this.#options.requireBrowserSeccompProfile === true);
-    }
+    assertBrowserSeccompProfile(this.#options.browserSeccompProfile, this.#options.requireBrowserSeccompProfile === true);
     assertImage(effectiveSpec.container.image, {
       requireImmutable: this.#options.requireImmutableImages,
       allowLocalBuildImages: this.#options.allowLocalBuildImages,
     });
-    if (this.#options.verifyEgressReady && effectiveSpec.container.cdpBind.port !== 0) {
+    if (this.#options.verifyEgressReady) {
       await this.#verifyEgressReady(effectiveSpec, this.#options.egressReadyTimeoutMs ?? this.#options.startupTimeoutMs ?? 30_000);
     }
     const identity = effectiveSpec.container.leaseId ?? effectiveSpec.container.jobId;
@@ -314,30 +309,28 @@ export class DockerContainerExecutor implements Executor {
       this.#containers.set(identity, name);
       this.#temporaryVolumesByContainer.set(name, { workerId: spec.container.workerId, volumes: temporaryVolumes });
 
-      if (spec.container.cdpBind.port !== 0) {
-        // The manager itself is also on the egress network, so Docker's
-        // container-name DNS can resolve a dynamic browser to its egress IP.
-        // Resolve the exact address assigned on the fixed worker network
-        // instead. The browser bridge is deliberately bound to this address;
-        // the CDP gateway retains the worker-owned hostname route separately.
-        browserEndpoint = await this.#browserEndpointOnNetwork(name, spec.container.cdpBind.port, primaryNetwork);
-        await this.#waitForBrowserReady(browserEndpoint, this.#options.browserReadyTimeoutMs ?? this.#options.startupTimeoutMs ?? 30_000);
-        if (this.#containers.get(identity) !== name) throw new FabricError("worker_unavailable", "browser container was stopped while becoming ready", 503);
-        const guardianSpec = spec.container.turnstileGuardian;
-        if (!guardianSpec) throw new Error("Fabric browser has no Turnstile guardian specification");
-        // The recipe's challenge handler set decides whether this browser may solve tokens. Credentials
-        // come only from the manager's secret-backed solver factory, never from a browser environment.
-        const tokenSolver = this.#options.tokenSolverFor?.(spec.container.challengeHandlers);
-        const guardian = this.#turnstileGuardianFactory({ endpoint: browserEndpoint, spec: guardianSpec, ...(tokenSolver ? { tokenSolver } : {}) });
-        this.#guardians.set(name, guardian);
-        this.#browserEndpoints.set(name, browserEndpoint);
-        await guardian.start();
-        if (this.#containers.get(identity) !== name || this.#guardians.get(name) !== guardian) {
-          await guardian.stop().catch(() => undefined);
-          throw new FabricError("worker_unavailable", "browser container was stopped while its Turnstile guardian was starting", 503);
-        }
-        if (!guardian.snapshot.running) throw new FabricError("worker_unavailable", "Turnstile guardian did not become ready", 503);
+      // The manager itself is also on the egress network, so Docker's
+      // container-name DNS can resolve a dynamic browser to its egress IP.
+      // Resolve the exact address assigned on the fixed worker network
+      // instead. The browser bridge is deliberately bound to this address;
+      // the CDP gateway retains the worker-owned hostname route separately.
+      browserEndpoint = await this.#browserEndpointOnNetwork(name, spec.container.cdpBind.port, primaryNetwork);
+      await this.#waitForBrowserReady(browserEndpoint, this.#options.browserReadyTimeoutMs ?? this.#options.startupTimeoutMs ?? 30_000);
+      if (this.#containers.get(identity) !== name) throw new FabricError("worker_unavailable", "browser container was stopped while becoming ready", 503);
+      const guardianSpec = spec.container.turnstileGuardian;
+      if (!guardianSpec) throw new Error("Fabric browser has no Turnstile guardian specification");
+      // The recipe's challenge handler set decides whether this browser may solve tokens. Credentials
+      // come only from the manager's secret-backed solver factory, never from a browser environment.
+      const tokenSolver = this.#options.tokenSolverFor?.(spec.container.challengeHandlers);
+      const guardian = this.#turnstileGuardianFactory({ endpoint: browserEndpoint, spec: guardianSpec, ...(tokenSolver ? { tokenSolver } : {}) });
+      this.#guardians.set(name, guardian);
+      this.#browserEndpoints.set(name, browserEndpoint);
+      await guardian.start();
+      if (this.#containers.get(identity) !== name || this.#guardians.get(name) !== guardian) {
+        await guardian.stop().catch(() => undefined);
+        throw new FabricError("worker_unavailable", "browser container was stopped while its Turnstile guardian was starting", 503);
       }
+      if (!guardian.snapshot.running) throw new FabricError("worker_unavailable", "Turnstile guardian did not become ready", 503);
     } catch (error) {
       if (created) await this.#stopContainer(name, { workerId: spec.container.workerId, volumes: temporaryVolumes }).catch(() => undefined);
       else await this.#removeTemporaryVolumes(temporaryVolumes).catch(() => undefined);
@@ -659,118 +652,5 @@ export class DockerContainerExecutor implements Executor {
         throw new FabricError("worker_unavailable", `Docker could not remove temporary profile volume (${removed.stderr.slice(0, 500)})`, 503);
       }
     }
-  }
-}
-
-/** Docker-container implementation for bounded one-shot media relay work. */
-export class DockerMediaContainerExecutor implements MediaExecutor {
-  readonly #command: DockerCommand;
-  readonly #containerExecutor: DockerContainerExecutor;
-  readonly #waitTimeoutMs: number;
-
-  public constructor(options: DockerContainerExecutorOptions = {}) {
-    this.#command = options.command ?? new ChildProcessDockerCommand();
-    this.#waitTimeoutMs = Math.max(1_000, Math.min(15 * 60_000, options.startupTimeoutMs ?? 60_000));
-    this.#containerExecutor = new DockerContainerExecutor({ ...options, command: this.#command, containerPrefix: options.containerPrefix ?? "fabric-media" });
-  }
-
-  public async start(input: Parameters<MediaExecutor["start"]>[0]): Promise<{ processId: string }> {
-    if (!input.assignment.job || input.assignment.lease) throw new FabricError("validation_failed", "invalid media assignment", 400);
-    const serializedSource = JSON.stringify(input.relay.source);
-    if (new TextEncoder().encode(serializedSource).byteLength > MEDIA_SOURCE_MAX_BYTES) throw new FabricError("validation_failed", "media manifest exceeds the worker environment limit", 400);
-    let resultEndpoint: URL;
-    try { resultEndpoint = new URL(input.relay.resultEndpoint); }
-    catch { throw new FabricError("validation_failed", "media result endpoint is invalid", 400); }
-    if ((resultEndpoint.protocol !== "http:" && resultEndpoint.protocol !== "https:") || !resultEndpoint.hostname || resultEndpoint.username || resultEndpoint.password || resultEndpoint.search || resultEndpoint.hash) {
-      throw new FabricError("validation_failed", "media result endpoint must be a credential-free HTTP(S) URL", 400);
-    }
-    if (!/^[A-Za-z0-9_.-]{32,8192}$/.test(input.relay.resultCapability)) throw new FabricError("validation_failed", "media result capability is invalid", 400);
-    const container = {
-      workerId: input.worker.id,
-      jobId: input.assignment.job.id,
-      image: input.assignment.recipe.browserImage,
-      browserVersion: "none",
-      command: ["/usr/local/bin/fabric-media-relay"],
-      environment: {
-        FABRIC_WORKER_ID: input.worker.id,
-        FABRIC_JOB_ID: input.assignment.job.id,
-        FABRIC_EGRESS_POLICY_REF: input.egressPolicy.ref,
-        FABRIC_EGRESS_PROXY_URL: internalEgressProxyUrl(input.egressPolicy, { host: process.env.FABRIC_EGRESS_PROXY_HOST?.trim() || "fabric-egress-sidecar", trafficClass: "media_range" }),
-        ...(input.egressPolicy.directExceptionHostnames?.length
-          ? {
-              FABRIC_EGRESS_DIRECT_PROXY_URL: internalEgressProxyUrl(input.egressPolicy, { host: process.env.FABRIC_EGRESS_PROXY_HOST?.trim() || "fabric-egress-sidecar", trafficClass: "direct_exception" }),
-              FABRIC_MEDIA_DIRECT_EXCEPTION_SUFFIXES: JSON.stringify(input.egressPolicy.directExceptionHostnames),
-            }
-          : {}),
-        FABRIC_MEDIA_SOURCE_JSON: serializedSource,
-        FABRIC_MEDIA_RESULT_URL: resultEndpoint.toString(),
-        FABRIC_MEDIA_RESULT_CAPABILITY: input.relay.resultCapability,
-      },
-      volumes: [],
-      networks: ["fabric-workers", "fabric-egress"],
-      limits: input.worker.resourceLimits,
-      security: { dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false } as const,
-      cdpBind: { host: "private-overlay" as const, port: 0 },
-    };
-    const result = await this.#containerExecutor.start({ assignment: input.assignment, container, egress: {} as never, resourceLimits: input.worker.resourceLimits, security: container.security });
-    return { processId: result.processId };
-  }
-
-  public stop(processId: string): Promise<void> { return this.#containerExecutor.stop(processId); }
-  public isRunning(processId: string): Promise<boolean> { return this.#containerExecutor.isRunning(processId); }
-
-  /** Stop inherited one-shot containers before their durable jobs are requeued after a manager restart. */
-  public async stopUntrackedMediaContainers(): Promise<readonly { containerName: string; workerId: string; jobId: string }[]> {
-    const listed = await this.#command.run([
-      "container", "ls", "--all", "--filter", "label=com.browser-fabric.kind=media", "--format", "{{.Names}}",
-    ], { timeoutMs: 20_000 });
-    if (listed.exitCode !== 0) throw new FabricError("worker_unavailable", `Docker could not list prior media containers (${listed.stderr.slice(0, 500)})`, 503);
-    const records: { containerName: string; workerId: string; jobId: string }[] = [];
-    for (const name of [...new Set(listed.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))]) {
-      if (!safeContainerName.test(name)) throw new FabricError("worker_unavailable", "Docker returned an invalid managed media container name", 503);
-      const inspected = await this.#command.run([
-        "container", "inspect", "--format", "{{ index .Config.Labels \"com.browser-fabric.worker-id\" }}|{{ index .Config.Labels \"com.browser-fabric.job-id\" }}", name,
-      ], { timeoutMs: 20_000 });
-      if (inspected.exitCode !== 0) {
-        if (/no such container/i.test(inspected.stderr)) continue;
-        throw new FabricError("worker_unavailable", `Docker could not inspect prior media container (${inspected.stderr.slice(0, 500)})`, 503);
-      }
-      const [workerId = "", jobId = ""] = inspected.stdout.trim().split("|", 2);
-      if (!safeWorkerId.test(workerId) || !/^job_[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/.test(jobId)) {
-        throw new FabricError("worker_unavailable", "prior media container has invalid Fabric identity labels", 503);
-      }
-      await this.#containerExecutor.removeUntrackedContainer(name);
-      records.push({ containerName: name, workerId, jobId });
-    }
-    return records;
-  }
-
-  /** Wait for the one-shot relay and parse only its bounded structured completion line. */
-  public async wait(processId: string, timeoutMs = this.#waitTimeoutMs): Promise<{ status: "succeeded" | "failed"; result?: Record<string, unknown>; reason?: string }> {
-    const deadline = Date.now() + Math.max(1_000, Math.min(15 * 60_000, timeoutMs));
-    while (Date.now() < deadline) {
-      const inspected = await this.#command.run(["container", "inspect", "--format", "{{.State.Status}}|{{.State.ExitCode}}", processId], { timeoutMs: 10_000 });
-      if (inspected.exitCode !== 0) return { status: "failed", reason: "media relay container disappeared" };
-      const [state, exitCode] = inspected.stdout.trim().split("|", 2);
-      if (["exited", "dead"].includes(state ?? "")) {
-        if (exitCode !== "0") return { status: "failed", reason: "media relay container failed" };
-        const logs = await this.#command.run(["container", "logs", processId], { timeoutMs: 10_000 }).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
-        const lines = `${logs.stdout}\n${logs.stderr}`.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean).reverse();
-        for (const line of lines) {
-          try {
-            const parsed = JSON.parse(line) as Record<string, unknown>;
-            if (parsed.status === "succeeded" && typeof parsed.receipt === "string" && /^[A-Za-z0-9_-]{16,8192}\.[A-Za-z0-9_-]{16,128}$/.test(parsed.receipt)) {
-              return { status: "succeeded", result: { receipt: parsed.receipt } };
-            }
-            if (parsed.status === "failed") return { status: "failed", reason: "media relay reported failure" };
-          } catch {
-            // Docker diagnostics and upstream output are untrusted. Ignore non-protocol lines.
-          }
-        }
-        return { status: "failed", reason: "media relay completed without a valid result" };
-      }
-      await Bun.sleep(250);
-    }
-    return { status: "failed", reason: "media relay timed out" };
   }
 }

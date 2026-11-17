@@ -97,29 +97,6 @@ describe("Fabric provisioning manifests", () => {
     });
   });
 
-  test("treats a media playback relay endpoint as immutable worker identity", async () => {
-    const manifest = await exampleManifest();
-    const runtime = await provisionRuntime();
-    const worker = manifest.workers[0]!;
-    worker.capabilities = {
-      ...worker.capabilities,
-      runtimeFamilies: ["media-playback"],
-      recipeRefs: ["recipe_media-playback@1" as never],
-      // Keep the published fixture's profile valid; media playback itself never acquires it.
-      supportedProfileFamilies: ["default", "media"],
-    };
-    worker.mediaCapacity = 1;
-    worker.mediaPlaybackEndpoint = "http://fabric-worker-media:8084";
-    await provisionManifest(runtime, manifest);
-
-    const conflicting = structuredClone(manifest);
-    conflicting.workers[0]!.mediaPlaybackEndpoint = "http://unexpected-media-worker:8084";
-    await expect(provisionManifest(runtime, conflicting)).rejects.toMatchObject({
-      code: "conflict",
-      status: 409,
-    });
-  });
-
   test("does not make omitted principal timestamps part of its static identity", async () => {
     const manifest = await exampleManifest();
     const rawWithoutCreatedAt = structuredClone(manifest) as unknown as Record<string, unknown>;
@@ -138,7 +115,7 @@ describe("Fabric provisioning manifests", () => {
     await provisionManifest(runtime, manifest);
     for (const mutate of [
       (worker: ProvisionManifest["workers"][number]) => { worker.capabilities = { ...worker.capabilities, supportsInteractive: !worker.capabilities.supportsInteractive }; },
-      (worker: ProvisionManifest["workers"][number]) => { worker.capabilities = { ...worker.capabilities, runtimeFamilies: [...worker.capabilities.runtimeFamilies, "patchright"] }; },
+      (worker: ProvisionManifest["workers"][number]) => { worker.capabilities = { ...worker.capabilities, runtimeFamilies: [] }; },
       (worker: ProvisionManifest["workers"][number]) => { worker.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9222"; },
     ]) {
       const changed = structuredClone(manifest);
@@ -184,7 +161,7 @@ describe("Fabric provisioning manifests", () => {
     const worker = state.workers.get(resized.workers[0]!.id)!;
     expect(worker.capacity).toBe(3);
     expect(worker.resourceLimits).toEqual(resized.workers[0]!.resourceLimits);
-    expect([...state.events.values()].find((event) => event.type === "worker.reconfigured")?.payload).toEqual({ previousCapacity: 1, capacity: 3, previousMaxBrowserLeases: 1, maxBrowserLeases: 3, recipes: 2, profileFamilies: 2 });
+    expect([...state.events.values()].find((event) => event.type === "worker.reconfigured")?.payload).toEqual({ previousCapacity: 1, capacity: 3, previousMaxBrowserLeases: 1, maxBrowserLeases: 3, recipes: 2, profileFamilies: 1 });
     expect((await provisionManifest(runtime, resized)).workersToReconfigure).toEqual([]);
 
     // Shrinking back is the same reviewed transition.

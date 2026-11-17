@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { BrowserFabricClient, encryptInputForWorker, type FabricClientOptions } from "@browser-fabric/client";
-import { buildJobRequest, buildSessionRequest, createFabricClientFromEnvironment, mediaOperations } from "@browser-fabric/client";
+import { buildJobRequest, buildSessionRequest, createFabricClientFromEnvironment } from "@browser-fabric/client";
 import { FabricError } from "@browser-fabric/contracts";
 import { generateWorkerInputKeyPair, decryptEphemeralInput } from "@browser-fabric/control-plane";
 
@@ -36,8 +36,8 @@ describe("Fabric application client lifecycle", () => {
     const created = await client.browserSessions.create({
       project: "project_test" as never,
       idempotencyKey: "session-1",
-      runtime: "chromium-cdp",
-      browserRecipeRef: "recipe_interactive-chromium@1" as never,
+      runtime: "chrome",
+      browserRecipeRef: "recipe_chrome@1" as never,
       leaseMode: "interactive",
       egressPolicyRef: "egress_direct@1" as never,
       artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
@@ -65,8 +65,8 @@ describe("Fabric application client lifecycle", () => {
     await expect(client.withBrowserSession({
       project: "project_test" as never,
       idempotencyKey: "session-2",
-      runtime: "chromium-cdp",
-      browserRecipeRef: "recipe_interactive-chromium@1" as never,
+      runtime: "chrome",
+      browserRecipeRef: "recipe_chrome@1" as never,
       leaseMode: "interactive",
       egressPolicyRef: "egress_direct@1" as never,
       artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
@@ -89,7 +89,7 @@ describe("Fabric application client lifecycle", () => {
       if (path.endsWith("/heartbeat")) return jsonResponse({ id: "browser-session_handle", status: "active", cdpEndpoint: "wss://endpoint", expiresAt: "2099-01-01T00:00:00Z" });
       return jsonResponse({ id: "browser-session_handle", status: "released", expiresAt: "2099-01-01T00:00:00Z" });
     });
-    const handle = await client.acquireBrowserSession({ project: "project_test" as never, idempotencyKey: "handle-1", runtime: "chromium-cdp", browserRecipeRef: "recipe_interactive-chromium@1" as never, leaseMode: "interactive", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 60 }, { pollIntervalMs: 1 });
+    const handle = await client.acquireBrowserSession({ project: "project_test" as never, idempotencyKey: "handle-1", runtime: "chrome", browserRecipeRef: "recipe_chrome@1" as never, leaseMode: "interactive", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 60 }, { pollIntervalMs: 1 });
     expect(handle.endpoint).toBe("wss://endpoint");
     await handle.heartbeat();
     await handle.release();
@@ -134,51 +134,39 @@ describe("Fabric application client lifecycle", () => {
     expect(decryptEphemeralInput(envelope as never, keys.privateKeyPem, { requestId: request.id, workerId: request.workerId })).toBe("client-secret");
   });
 
-  test("uploads a project-scoped immutable media manifest before the consuming media job exists", async () => {
+  test("uploads a session artifact with its kind and label and never sends a storage key", async () => {
     const { client, requests } = clientWith(async () => jsonResponse({
-      id: "artifact_media_manifest",
-      project: "project_archive",
-      kind: "media_manifest",
+      id: "artifact_shot",
+      project: "project_example",
+      sessionId: "browser-session_1",
+      kind: "screenshot",
       sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      mimeType: "application/vnd.browser-fabric.media-manifest+json",
-      sizeBytes: 108,
+      mimeType: "image/png",
+      sizeBytes: 3,
       createdAt: "2026-01-01T00:00:00.000Z",
       expiresAt: "2026-01-31T00:00:00.000Z",
     }, 201));
-    const artifact = await client.artifacts.uploadMediaManifest("project_archive", {
-      version: 1,
-      mode: "relay",
-      provider: "Example provider",
-      url: "https://media.example/video.mp4",
-      artifactKind: "video",
-      expectedContentTypes: ["video/mp4"],
-    }, { label: "example-video" });
-    expect(String(artifact.id)).toBe("artifact_media_manifest");
+    const artifact = await client.artifacts.uploadForSession("browser-session_1", { kind: "screenshot", contentType: "image/png", bytes: new Uint8Array([1, 2, 3]), label: "home-page" });
+    expect(String(artifact.id)).toBe("artifact_shot");
     const request = requests[0]!;
     expect(request.method).toBe("POST");
-    expect(request.url).toBe("https://fabric.example/v1/projects/project_archive/media-manifests");
-    expect(request.headers.get("content-type")).toBe("application/vnd.browser-fabric.media-manifest+json");
-    expect(request.headers.get("x-fabric-artifact-kind")).toBe("media_manifest");
-    expect(request.headers.get("x-fabric-artifact-label")).toBe("example-video");
-    expect(await request.json()).toEqual({
-      version: 1,
-      mode: "relay",
-      provider: "Example provider",
-      url: "https://media.example/video.mp4",
-      artifactKind: "video",
-      expectedContentTypes: ["video/mp4"],
-    });
+    expect(request.url).toBe("https://fabric.example/v1/browser-sessions/browser-session_1/artifacts");
+    expect(request.headers.get("content-type")).toBe("image/png");
+    expect(request.headers.get("x-fabric-artifact-kind")).toBe("screenshot");
+    expect(request.headers.get("x-fabric-artifact-label")).toBe("home-page");
+    expect(new Uint8Array(await request.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+    await expect(client.artifacts.uploadForSession("browser-session_1", { kind: "cookie_jar" as never, contentType: "application/json", bytes: new Uint8Array([1]) })).rejects.toThrow();
   });
 });
 
 describe("request builders", () => {
   test("builds a session request from explicit refs with the default artifact policy and lease TTLs", () => {
-    const session = buildSessionRequest({ project: "project_example" as never, idempotencyKey: "interactive-1", runtime: "chromium-cdp", recipeRef: "recipe_interactive-chromium@1" as never, egressPolicyRef: "egress_tor@1" as never, profileRef: "profile_example_interactive" as never, leaseMode: "interactive", metadata: { ticket: "T-1" } });
+    const session = buildSessionRequest({ project: "project_example" as never, idempotencyKey: "interactive-1", runtime: "chrome", recipeRef: "recipe_chrome@1" as never, egressPolicyRef: "egress_tor@1" as never, profileRef: "profile_example_interactive" as never, leaseMode: "interactive", metadata: { ticket: "T-1" } });
     expect(session).toEqual({
       project: "project_example",
       idempotencyKey: "interactive-1",
-      runtime: "chromium-cdp",
-      browserRecipeRef: "recipe_interactive-chromium@1",
+      runtime: "chrome",
+      browserRecipeRef: "recipe_chrome@1",
       profileRef: "profile_example_interactive",
       leaseMode: "interactive",
       egressPolicyRef: "egress_tor@1",
@@ -186,26 +174,27 @@ describe("request builders", () => {
       metadata: { ticket: "T-1" },
       ttlSeconds: 1_800,
     } as never);
-    const headless = buildSessionRequest({ project: "project_example" as never, idempotencyKey: "headless-1", runtime: "patchright", recipeRef: "recipe_patchright@1" as never, egressPolicyRef: "egress_direct@1" as never, maxExternalConnections: 3 });
+    const headless = buildSessionRequest({ project: "project_example" as never, idempotencyKey: "headless-1", runtime: "chrome", recipeRef: "recipe_chrome-headless@1" as never, egressPolicyRef: "egress_direct@1" as never, maxExternalConnections: 3 });
     expect(headless).toMatchObject({ leaseMode: "writer", ttlSeconds: 900, maxExternalConnections: 3 });
     expect(headless.profileRef).toBeUndefined();
     expect(headless.metadata).toBeUndefined();
   });
 
-  test("builds media jobs without a browser profile and keeps operations immutable copies", () => {
-    const operation = mediaOperations.relay("artifact_relay_manifest", { start: 0, end: 1023 });
-    const relay = buildJobRequest({ project: "project_example" as never, idempotencyKey: "relay-1", recipeRef: "recipe_media-relay@1" as never, operation, egressPolicyRef: "egress_direct@1" as never, leaseMode: "clone" });
-    expect(relay).toEqual({
+  test("builds a typed job request from explicit refs and copies the operation", () => {
+    const operation = { operation: "fetch_page", url: "https://site.example", cookieJarRef: "artifact_jar" };
+    const job = buildJobRequest({ project: "project_example" as never, idempotencyKey: "fetch-1", recipeRef: "recipe_example-fetch@1" as never, operation, egressPolicyRef: "egress_direct@1" as never, profileRef: "profile_default" as never, callback: { url: "https://app.example/hook" } });
+    expect(job).toEqual({
       project: "project_example",
-      idempotencyKey: "relay-1",
-      recipeRef: "recipe_media-relay@1",
-      operation: { operation: "relay", manifestRef: "artifact_relay_manifest", range: { start: 0, end: 1023 } },
-      leaseMode: "clone",
+      idempotencyKey: "fetch-1",
+      recipeRef: "recipe_example-fetch@1",
+      operation: { operation: "fetch_page", url: "https://site.example", cookieJarRef: "artifact_jar" },
+      profileRef: "profile_default",
       egressPolicyRef: "egress_direct@1",
       artifactPolicyRef: "artifact-policy_standard-30-days@1",
+      callback: { url: "https://app.example/hook" },
     } as never);
-    expect(relay.operation).not.toBe(operation);
-    expect(mediaOperations.playback("artifact_playback_manifest")).toEqual({ operation: "playback", manifestRef: "artifact_playback_manifest" });
+    expect(job.operation).not.toBe(operation);
+    expect(job.leaseMode).toBeUndefined();
   });
 
   test("rejects durable credentials, bad idempotency keys and non-scalar-safe metadata", () => {
@@ -215,8 +204,8 @@ describe("request builders", () => {
     expect(buildJobRequest({ ...base, idempotencyKey: "j-1", operation: { operation: "fetch_page", cookieJarRef: "artifact_jar" } }).operation).toEqual({ operation: "fetch_page", cookieJarRef: "artifact_jar" });
     expect(() => buildJobRequest({ ...base, idempotencyKey: "", operation: { operation: "fetch_page" } })).toThrow(/idempotencyKey/);
     expect(() => buildJobRequest({ ...base, idempotencyKey: "x".repeat(256), operation: { operation: "fetch_page" } })).toThrow(/idempotencyKey/);
-    expect(() => buildSessionRequest({ ...base, idempotencyKey: "s-1", runtime: "chromium-cdp", metadata: { "bad key": "x" } })).toThrow(/metadata key/);
-    expect(() => buildSessionRequest({ ...base, idempotencyKey: "s-1", runtime: "chromium-cdp", metadata: { note: "x".repeat(513) } })).toThrow(/too long/);
+    expect(() => buildSessionRequest({ ...base, idempotencyKey: "s-1", runtime: "chrome", metadata: { "bad key": "x" } })).toThrow(/metadata key/);
+    expect(() => buildSessionRequest({ ...base, idempotencyKey: "s-1", runtime: "chrome", metadata: { note: "x".repeat(513) } })).toThrow(/too long/);
   });
 
   test("an environment client requires an opaque principal ID and a strong password", () => {

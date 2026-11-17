@@ -6,7 +6,7 @@ import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, createTestSchedul
 describe("scheduler lifecycle, leases, and recovery", () => {
   test("dispatches FIFO among compatible work and enforces one writer per profile", async () => {
     const { scheduler, worker, profile, store } = await bootstrapTestScheduler();
-    const common = { project: TEST_PROJECT, runtime: "rebrowser-puppeteer" as const, browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer" as const, egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 };
+    const common = { project: TEST_PROJECT, runtime: "chrome" as const, browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer" as const, egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 };
     const first = await scheduler.createBrowserSession({ ...common, idempotencyKey: "first" }, TEST_PRINCIPAL);
     const second = await scheduler.createBrowserSession({ ...common, idempotencyKey: "second" }, TEST_PRINCIPAL);
     const assignments = await scheduler.dispatch();
@@ -18,25 +18,21 @@ describe("scheduler lifecycle, leases, and recovery", () => {
     expect(snapshot.workers.get(worker.id)?.activeLeases).toBe(1);
   });
 
-  test("rejects historical policies without a sidecar route before creating work", async () => {
+  test("rejects an unknown egress policy before creating work", async () => {
     const { scheduler, profile, store } = await bootstrapTestScheduler();
     const retiredRef = "egress_retired@1" as never;
-    await store.transact((state) => {
-      const policy = state.egressPolicies.get("egress_direct@1")!;
-      state.egressPolicies.set(retiredRef, { ...policy, ref: retiredRef, family: "retired" as never, sidecar: undefined as never });
-    });
     const before = await store.snapshot();
-    await expect(scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "retired-session", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: retiredRef, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL)).rejects.toThrow(/no valid Fabric sidecar listener/);
-    await expect(scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "retired-job", recipeRef: "recipe_example-fetch@1" as never, operation: { operation: "fetch_page", url: "https://news.example" }, egressPolicyRef: retiredRef, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL)).rejects.toThrow(/no valid Fabric sidecar listener/);
+    await expect(scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "retired-session", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: retiredRef, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL)).rejects.toThrow(/egress policy egress_retired@1 was not found/);
+    await expect(scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "retired-job", recipeRef: "recipe_example-fetch@1" as never, operation: { operation: "fetch_page", url: "https://news.example" }, egressPolicyRef: retiredRef, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL)).rejects.toThrow(/egress policy egress_retired@1 was not found/);
     const after = await store.snapshot();
     expect(after.sessions.size).toBe(before.sessions.size);
     expect(after.jobs.size).toBe(before.jobs.size);
-    expect(after.egressPolicies.has(retiredRef)).toBe(true);
+    expect(after.egressPolicies.has(retiredRef)).toBe(false);
   });
 
   test("idempotency returns the original resource and rejects request mutation", async () => {
     const { scheduler, profile } = await bootstrapTestScheduler();
-    const input = { project: TEST_PROJECT, idempotencyKey: "same", runtime: "rebrowser-puppeteer" as const, browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer" as const, egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 };
+    const input = { project: TEST_PROJECT, idempotencyKey: "same", runtime: "chrome" as const, browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer" as const, egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 };
     const first = await scheduler.createBrowserSession(input, TEST_PRINCIPAL);
     const replay = await scheduler.createBrowserSession(input, TEST_PRINCIPAL);
     expect(replay.id).toBe(first.id);
@@ -46,7 +42,7 @@ describe("scheduler lifecycle, leases, and recovery", () => {
 
   test("clone leases are isolated and destroyed on release", async () => {
     const { scheduler, profile, store } = await bootstrapTestScheduler();
-    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "clone", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "clone", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "clone", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "clone", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const [assignment] = await scheduler.dispatch();
     expect(assignment?.clone?.status).toBe("ready");
     const cloneId = assignment?.clone?.id;
@@ -61,9 +57,9 @@ describe("scheduler lifecycle, leases, and recovery", () => {
     const context = await bootstrapTestScheduler();
     // Use a clock shared with the scheduler for deterministic expiry.
     const { scheduler, profile, store, worker } = context;
-    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "cap", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 60 }, TEST_PRINCIPAL);
+    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "cap", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 60 }, TEST_PRINCIPAL);
     const [assignment] = await scheduler.dispatch();
-    await scheduler.claimAssignment("worker_test" as never, assignment!.lease!.id, undefined, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
+    await scheduler.claimAssignment("worker_test" as never, assignment!.lease!.id, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
     await scheduler.markLeaseStarted(assignment!.lease!.id, worker.id, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
     const internal = (await store.snapshot()).sessions.get(session.id as BrowserSessionId)!;
     expect(internal.cdpEndpoint).toContain("cap=");
@@ -79,8 +75,8 @@ describe("scheduler lifecycle, leases, and recovery", () => {
     const session = await scheduler.createBrowserSession({
       project: TEST_PROJECT,
       idempotencyKey: "two-cdp-clients",
-      runtime: "rebrowser-puppeteer",
-      browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never,
+      runtime: "chrome",
+      browserRecipeRef: "recipe_chrome-headless@1" as never,
       profileRef: profile.ref,
       leaseMode: "clone",
       egressPolicyRef: "egress_tor@1" as never,
@@ -89,7 +85,7 @@ describe("scheduler lifecycle, leases, and recovery", () => {
       ttlSeconds: 600,
     }, TEST_PRINCIPAL);
     const [assignment] = await scheduler.dispatch();
-    await scheduler.claimAssignment(worker.id, assignment!.lease!.id, undefined, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
+    await scheduler.claimAssignment(worker.id, assignment!.lease!.id, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
     await scheduler.markLeaseStarted(assignment!.lease!.id, worker.id, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
     const internal = (await store.snapshot()).sessions.get(session.id as BrowserSessionId)!;
     const capability = new URL(internal.cdpEndpoint!).searchParams.get("cap")!;
@@ -107,7 +103,7 @@ describe("scheduler lifecycle, leases, and recovery", () => {
 
   test("ephemeral input never enters durable state and is one-shot", async () => {
     const { scheduler, profile, worker, store } = await bootstrapTestScheduler();
-    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "input", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "input", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const [assignment] = await scheduler.dispatch();
     const request = await scheduler.requestEphemeralInput({ sessionId: session.id as BrowserSessionId, leaseId: assignment!.lease!.id, field: "password", fieldType: "password" }, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
     await scheduler.provideEphemeralInput(request.request.id, "super-secret", TEST_PRINCIPAL);
@@ -115,31 +111,6 @@ describe("scheduler lifecycle, leases, and recovery", () => {
     expect(durable).not.toContain("super-secret");
     expect(await scheduler.consumeEphemeralInput(request.request.id, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint })).toBe("super-secret");
     await expect(scheduler.consumeEphemeralInput(request.request.id, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint })).rejects.toThrow();
-  });
-
-  test("media-only jobs use bounded media capacity without browser leases", async () => {
-    const { scheduler, worker, store, profile, clock } = await bootstrapTestScheduler();
-    const { ArtifactCollector, MemoryObjectStore } = await import("@browser-fabric/control-plane");
-    const manifestSession = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "media-manifest-owner", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
-    const policy = await scheduler.getArtifactPolicy("artifact-policy_standard-30-days@1" as never, TEST_PRINCIPAL);
-    const manifest = await new ArtifactCollector({ scheduler, objectStore: new MemoryObjectStore(undefined, () => clock.now()), clock: () => clock.now() }).capture({
-      project: TEST_PROJECT,
-      sessionId: manifestSession.id,
-      kind: "media_manifest",
-      contentType: "application/vnd.browser-fabric.media-manifest+json",
-      bytes: new TextEncoder().encode(JSON.stringify({ version: 1, mode: "relay", provider: "Example provider", url: "https://media.example/video.mp4", artifactKind: "video" })),
-      policy,
-      actor: TEST_PRINCIPAL,
-    });
-    await scheduler.releaseBrowserSession(manifestSession.id, TEST_PRINCIPAL);
-    const job = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "media", recipeRef: "recipe_media-relay@1" as never, operation: { operation: "relay", manifestRef: manifest.id }, egressPolicyRef: "egress_example-affinity@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never }, TEST_PRINCIPAL);
-    const [assignment] = await scheduler.dispatch();
-    expect(assignment?.lease).toBeUndefined();
-    expect((await store.snapshot()).activeBrowserLeases).toBe(0);
-    expect((await store.snapshot()).workers.get(worker.id)?.activeMediaTasks).toBe(1);
-    const attemptId = (await store.snapshot()).jobs.get(job.id)!.mediaAttemptId;
-    await scheduler.failMediaTask(job.id as JobId, worker.id, attemptId, "test media service stopped", { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
-    expect((await store.snapshot()).workers.get(worker.id)?.activeMediaTasks).toBe(0);
   });
 
   test("worker failure requeues within recipe retry budget and eventually fails", async () => {
@@ -160,7 +131,7 @@ describe("scheduler lifecycle, leases, and recovery", () => {
 
 test("serialized transactions keep global and per-profile limits under concurrent dispatch", async () => {
   const { scheduler, worker, profile, store } = await bootstrapTestScheduler();
-  const inputs = Array.from({ length: 12 }, (_, index) => ({ project: TEST_PROJECT, idempotencyKey: `concurrent-${index}`, runtime: "rebrowser-puppeteer" as const, browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "clone" as const, egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }));
+  const inputs = Array.from({ length: 12 }, (_, index) => ({ project: TEST_PROJECT, idempotencyKey: `concurrent-${index}`, runtime: "chrome" as const, browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "clone" as const, egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }));
   await Promise.all(inputs.map((input) => scheduler.createBrowserSession(input, TEST_PRINCIPAL)));
   const batches = await Promise.all(Array.from({ length: 8 }, () => scheduler.dispatch()));
   const snapshot = await store.snapshot();
@@ -179,9 +150,9 @@ test("malformed worker registrations fail closed", async () => {
 
 test("claimed leases expire independently from worker heartbeat", async () => {
   const { scheduler, clock, profile, store } = await bootstrapTestScheduler();
-  const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "lease-heartbeat-expiry", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+  const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "lease-heartbeat-expiry", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
   const [assignment] = await scheduler.dispatch();
-  await scheduler.claimAssignment("worker_test" as never, assignment!.lease!.id, undefined, { ...TEST_PRINCIPAL, certificateFingerprint: (await store.snapshot()).workers.get("worker_test")!.certificateFingerprint });
+  await scheduler.claimAssignment("worker_test" as never, assignment!.lease!.id, { ...TEST_PRINCIPAL, certificateFingerprint: (await store.snapshot()).workers.get("worker_test")!.certificateFingerprint });
   clock.advance(31_000);
   const recovery = await scheduler.recover();
   expect(recovery.expiredSessions).toBe(1);
@@ -191,12 +162,12 @@ test("claimed leases expire independently from worker heartbeat", async () => {
 
 test("does not issue a CDP capability until the claimed worker proves browser readiness", async () => {
   const { scheduler, worker, profile, store } = await bootstrapTestScheduler();
-  const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "activation-boundary", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+  const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "activation-boundary", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
   const [assignment] = await scheduler.dispatch();
   expect((await scheduler.getSession(session.id as BrowserSessionId, TEST_PRINCIPAL)).status).toBe("allocating");
   expect((await store.snapshot()).sessions.get(session.id as BrowserSessionId)?.cdpEndpoint).toBeUndefined();
   const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
-  await scheduler.claimAssignment(worker.id, assignment!.lease!.id, undefined, workerActor);
+  await scheduler.claimAssignment(worker.id, assignment!.lease!.id, workerActor);
   expect((await scheduler.getSession(session.id as BrowserSessionId, TEST_PRINCIPAL)).status).toBe("allocating");
   await scheduler.heartbeatLease(assignment!.lease!.id, worker.id, workerActor);
   const stillAllocating = await store.snapshot();

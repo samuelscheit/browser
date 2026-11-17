@@ -1,5 +1,4 @@
-import { createId, FabricError, MAX_EXTERNAL_CDP_CONNECTIONS, isMediaRuntime, type Artifact, type ArtifactPolicy, type AuditEvent, type BrowserLease, type BrowserRecipe, type BrowserSession, type BrowserSessionCreateInput, type BrowserSessionId, type BrowserSessionResponse, type EgressPolicy, type EphemeralInputRequest, type FabricEvent, type Job, type JobId, type JobResponse, type JobStatus, type LeaseMode, type Principal, type Profile, type ProfileClone, type ProjectId, type Worker, type WorkerAssignment } from "@browser-fabric/contracts";
-import { assertRuntimePolicyCompatibility, egressSidecarListenerForPolicy } from "@browser-fabric/policy";
+import { createId, FabricError, MAX_EXTERNAL_CDP_CONNECTIONS, type Artifact, type ArtifactPolicy, type AuditEvent, type BrowserLease, type BrowserRecipe, type BrowserSession, type BrowserSessionCreateInput, type BrowserSessionId, type BrowserSessionResponse, type EgressPolicy, type EphemeralInputRequest, type FabricEvent, type Job, type JobId, type JobResponse, type JobStatus, type LeaseMode, type Principal, type Profile, type ProfileClone, type ProjectId, type Worker, type WorkerAssignment } from "@browser-fabric/contracts";
 import { RecipeRegistry, type RecipeDefinition } from "@browser-fabric/recipes";
 import { CapabilitySigner } from "./capability";
 import type { Clock } from "./clock";
@@ -68,14 +67,7 @@ export class SchedulerKernel {
     artifactPolicyRef: ArtifactPolicy["ref"]
   ): void {
     this.project(state, project);
-    const egress = state.egressPolicies.get(egressPolicyRef);
-    if (!egress) throw new FabricError("not_found", `egress policy ${egressPolicyRef} was not found`, 404);
-    try {
-      assertRuntimePolicyCompatibility(recipe.runtime, egress);
-      egressSidecarListenerForPolicy(egress);
-    } catch (error) {
-      throw new FabricError("validation_failed", error instanceof Error ? error.message : "runtime and egress policy are incompatible", 400);
-    }
+    if (!state.egressPolicies.has(egressPolicyRef)) throw new FabricError("not_found", `egress policy ${egressPolicyRef} was not found`, 404);
     if (!state.artifactPolicies.has(artifactPolicyRef)) throw new FabricError("not_found", `artifact policy ${artifactPolicyRef} was not found`, 404);
     if (profileRef) {
       const profile = this.profile(state, profileRef);
@@ -87,7 +79,6 @@ export class SchedulerKernel {
     // disposable worker-local volume (represented on the lease) rather than silently sharing a
     // global profile. A clone request without a profile simply gets a fresh disposable volume.
     if (leaseMode === "interactive" && recipe.mode !== "interactive") throw new FabricError("validation_failed", "interactive lease requires an interactive recipe", 400);
-    if (isMediaRuntime(recipe.runtime) && leaseMode !== "clone") throw new FabricError("validation_failed", "media-only work does not use profile writer leases", 400);
   }
 
   public assignSession(state: FabricState, session: BrowserSession, onlyWorkerId?: Worker["id"]): WorkerAssignment | undefined {
@@ -121,26 +112,6 @@ export class SchedulerKernel {
 
   public assignJob(state: FabricState, job: Job, onlyWorkerId?: Worker["id"]): WorkerAssignment | undefined {
     const recipe = this.recipe(state, job.recipeRef);
-    if (isMediaRuntime(job.runtime)) {
-      const worker = [...state.workers.values()]
-        .filter((candidate) => !candidate.isLocal && candidate.health === "healthy" && candidate.capabilities.runtimeFamilies.includes(job.runtime) && (candidate.activeMediaTasks ?? 0) < (candidate.mediaCapacity ?? 0) && (onlyWorkerId === undefined || candidate.id === onlyWorkerId))
-        .sort((a, b) => a.id.localeCompare(b.id))[0];
-      if (!worker) return undefined;
-      job.status = "running";
-      job.workerId = worker.id;
-      job.mediaPlaybackReadyAt = undefined;
-      job.mediaPlaybackSourceRequestId = undefined;
-      worker.activeMediaTasks = (worker.activeMediaTasks ?? 0) + 1;
-      worker.updatedAt = now(this.#clock);
-      state.workers.set(worker.id, worker);
-      job.updatedAt = now(this.#clock);
-      // A media result capability is bound to this exact durable attempt. Reusing only job and
-      // worker identity would let a delayed result from a prior retry reach a newly assigned task.
-      job.mediaAttemptId = this.startAttempt(state, job, worker.id, undefined).id;
-      state.jobs.set(job.id, job);
-      this.event(state, job.project, { kind: "job", id: job.id }, "job.running", { workerId: worker.id, mediaOnly: true });
-      return this.assignmentForMediaJob(state, job);
-    }
     const decision = this.selectWorker(state, job.project, recipe, job.profileRef, job.leaseMode, onlyWorkerId);
     if (!decision) return undefined;
     const { worker, profile } = decision;
@@ -176,7 +147,7 @@ export class SchedulerKernel {
         return undefined;
       }
     }
-    if (!isMediaRuntime(recipe.runtime) && state.activeBrowserLeases >= this.#maxActiveBrowserLeases) return undefined;
+    if (state.activeBrowserLeases >= this.#maxActiveBrowserLeases) return undefined;
     const activeLocalLeases = [...state.leases.values()].filter((lease) => lease.status === "active" && state.workers.get(lease.workerId)?.isLocal).length;
     const candidates = [...state.workers.values()]
       .filter((worker) => worker.health === "healthy")
@@ -289,23 +260,6 @@ export class SchedulerKernel {
     }
   }
 
-  public releaseMediaTask(state: FabricState, job: Job): void {
-    // The exact active attempt is the sole media-capacity ownership marker. Keeping a second
-    // boolean made snapshot recovery vulnerable to stale derived state and duplicated the
-    // attempt-binding authority used by worker/result verification.
-    if (!isMediaRuntime(job.runtime) || job.mediaAttemptId === undefined) return;
-    const worker = job.workerId ? state.workers.get(job.workerId) : undefined;
-    // Invalidate any manager-issued result capability before a retry can become eligible.
-    job.mediaAttemptId = undefined;
-    job.mediaPlaybackReadyAt = undefined;
-    job.mediaPlaybackSourceRequestId = undefined;
-    state.jobs.set(job.id, job);
-    if (!worker) return;
-    worker.activeMediaTasks = Math.max(0, (worker.activeMediaTasks ?? 0) - 1);
-    worker.updatedAt = now(this.#clock);
-    state.workers.set(worker.id, worker);
-  }
-
   public startAttempt(state: FabricState, job: Job, workerId: Worker["id"], leaseId: BrowserLease["id"] | undefined): import("@browser-fabric/contracts").JobAttempt {
     const previous = [...state.attempts.values()].filter((attempt) => attempt.jobId === job.id).sort((a, b) => b.number - a.number)[0];
     const attempt: import("@browser-fabric/contracts").JobAttempt = {
@@ -383,15 +337,6 @@ export class SchedulerKernel {
     session.cdpCapabilityExpiresAt = capability.expiresAt;
     session.updatedAt = now(this.#clock);
     state.sessions.set(session.id, session);
-  }
-
-  public assignmentForMediaJob(state: FabricState, job: Job): WorkerAssignment {
-    return {
-      job: structuredClone(job),
-      recipe: structuredClone(this.recipe(state, job.recipeRef)),
-      egressPolicy: structuredClone(this.egress(state, job.egressPolicyRef)),
-      artifactPolicy: structuredClone(this.artifactPolicy(state, job.artifactPolicyRef))
-    };
   }
 
   public discardInput(requestId: EphemeralInputRequest["id"]): void { this.#ephemeralInputVault?.discard(requestId); }

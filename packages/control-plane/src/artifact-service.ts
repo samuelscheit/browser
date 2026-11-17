@@ -1,5 +1,4 @@
-import type { Artifact, ArtifactPolicy, BrowserSessionId, JobId, Principal, ProjectId } from "@browser-fabric/contracts";
-import { FabricError } from "@browser-fabric/contracts";
+import type { Artifact, BrowserSessionId, JobId, Principal } from "@browser-fabric/contracts";
 import type { ArtifactCollector, CaptureArtifactInput } from "./artifacts";
 import type { ArtifactOwnerContext, BrowserScheduler } from "./scheduler";
 
@@ -39,26 +38,4 @@ export class ArtifactService {
     });
   }
 
-  /**
-   * Store a validated media manifest before its consuming media-only job exists. This is not a
-   * general project-scoped file upload: only `media_manifest` is permitted, and it is parsed by
-   * ArtifactCollector before any byte reaches the object store.
-   */
-  public async captureMediaManifest(
-    project: ProjectId,
-    artifactPolicyRef: ArtifactPolicy["ref"],
-    input: Omit<CaptureArtifactInput, "project" | "sessionId" | "jobId" | "profileRef" | "policy" | "actor" | "projectScoped">,
-    actor?: Principal,
-  ): Promise<Artifact> {
-    if (input.kind !== "media_manifest") throw new FabricError("validation_failed", "project-scoped artifact uploads are limited to media_manifest", 400);
-    const resolved = await this.#scheduler.resolveProjectArtifact(project, artifactPolicyRef, actor);
-    const policy = await this.#scheduler.getArtifactPolicy(resolved.artifactPolicyRef);
-    return this.#collector.capture({
-      ...input,
-      project: resolved.project,
-      projectScoped: true,
-      policy,
-      actor,
-    });
-  }
 }

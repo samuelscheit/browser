@@ -1,4 +1,4 @@
-import { isMediaRuntime, type BrowserSession, type JobStatus } from "@browser-fabric/contracts";
+import type { BrowserSession, JobStatus } from "@browser-fabric/contracts";
 import { type RecipeDefinition } from "@browser-fabric/recipes";
 import type { Clock } from "./clock";
 import type { FabricState } from "./store";
@@ -113,25 +113,6 @@ export function recoverSchedulerState(state: FabricState, options: RecoveryOptio
       expiredJobs += 1;
     }
   }
-  for (const job of [...state.jobs.values()]) {
-    if (!isMediaRuntime(job.runtime) || job.status !== "running" || job.assignmentClaimedAt || !job.workerId || timestamp - asDate(job.updatedAt) <= options.assignmentClaimTimeoutSeconds * 1_000) continue;
-    options.kernel.releaseMediaTask(state, job);
-    options.kernel.finishAttempt(state, job, "failed");
-    const recipe = options.kernel.recipe(state, job.recipeRef) as RecipeDefinition;
-    const attempts = [...state.attempts.values()].filter((attempt) => attempt.jobId === job.id).length;
-    if (attempts < recipe.maxAttempts && asDate(job.expiresAt) > timestamp) {
-      job.status = "queued";
-      job.workerId = undefined;
-      job.assignmentClaimedAt = undefined;
-      job.updatedAt = now(options.clock);
-      state.jobs.set(job.id, job);
-    } else {
-      job.status = "failed";
-      job.failureReason = "media worker did not claim assignment within timeout";
-      job.updatedAt = now(options.clock);
-      state.jobs.set(job.id, job);
-    }
-  }
   for (const session of [...state.sessions.values()]) {
     if (terminalSession(session.status)) continue;
     const workerOffline = session.workerId ? state.workers.get(session.workerId)?.health === "offline" : false;
@@ -149,9 +130,8 @@ export function recoverSchedulerState(state: FabricState, options: RecoveryOptio
   // while the immutable recipe still has attempts remaining. Durable profiles are never
   // silently copied; affinity remains enforced on the next dispatch.
   for (const job of [...state.jobs.values()]) {
-    if ((job.status !== "running" && !(isMediaRuntime(job.runtime) && job.status === "awaiting_input")) || !job.workerId || state.workers.get(job.workerId)?.health !== "offline") continue;
+    if (job.status !== "running" || !job.workerId || state.workers.get(job.workerId)?.health !== "offline") continue;
     if (job.leaseId) options.kernel.releaseLease(state, options.kernel.lease(state, job.leaseId));
-    options.kernel.releaseMediaTask(state, job);
     options.kernel.finishAttempt(state, job, "failed");
     const recipe = options.kernel.recipe(state, job.recipeRef) as RecipeDefinition;
     const attempts = [...state.attempts.values()].filter((attempt) => attempt.jobId === job.id).length;
@@ -177,8 +157,7 @@ export function recoverSchedulerState(state: FabricState, options: RecoveryOptio
       job.updatedAt = now(options.clock);
       state.jobs.set(job.id, job);
       if (job.leaseId) options.kernel.releaseLease(state, options.kernel.lease(state, job.leaseId));
-      options.kernel.releaseMediaTask(state, job);
-      options.kernel.finishAttempt(state, job, "failed");
+        options.kernel.finishAttempt(state, job, "failed");
       options.kernel.cancelInputRequests(state, { jobId: job.id });
       options.kernel.event(state, job.project, { kind: "job", id: job.id }, "job.timed_out", {});
       expiredJobs += 1;
@@ -193,32 +172,11 @@ export function recoverSchedulerState(state: FabricState, options: RecoveryOptio
       if (request.jobId) {
         const job = options.kernel.job(state, request.jobId);
         if (job.status === "awaiting_input") {
-          if (job.runtime === "media-playback" && request.fieldType === "media_playback_source") {
-            options.kernel.releaseMediaTask(state, job);
-            options.kernel.finishAttempt(state, job, "failed");
-            const recipe = options.kernel.recipe(state, job.recipeRef) as RecipeDefinition;
-            const attempts = [...state.attempts.values()].filter((attempt) => attempt.jobId === job.id).length;
-            job.assignmentClaimedAt = undefined;
-            job.updatedAt = now(options.clock);
-            if (attempts < recipe.maxAttempts && asDate(job.expiresAt) > timestamp) {
-              job.status = "queued";
-              job.workerId = undefined;
-              job.failureReason = undefined;
-              state.jobs.set(job.id, job);
-              options.kernel.event(state, job.project, { kind: "job", id: job.id }, "job.requeued_after_playback_source_expiry", { attempts });
-            } else {
-              job.status = asDate(job.expiresAt) <= timestamp ? "timed_out" : "failed";
-              job.failureReason = "media playback source was not supplied within 60 seconds";
-              state.jobs.set(job.id, job);
-              options.kernel.event(state, job.project, { kind: "job", id: job.id }, `job.${job.status}`, { reason: job.failureReason });
-            }
-          } else {
-            job.status = "awaiting_manual";
-            job.failureReason = "ephemeral input was not supplied within 60 seconds";
-            job.updatedAt = now(options.clock);
-            state.jobs.set(job.id, job);
-            options.kernel.event(state, job.project, { kind: "job", id: job.id }, "job.awaiting_manual", { reason: job.failureReason });
-          }
+          job.status = "awaiting_manual";
+          job.failureReason = "ephemeral input was not supplied within 60 seconds";
+          job.updatedAt = now(options.clock);
+          state.jobs.set(job.id, job);
+          options.kernel.event(state, job.project, { kind: "job", id: job.id }, "job.awaiting_manual", { reason: job.failureReason });
         }
       }
     }

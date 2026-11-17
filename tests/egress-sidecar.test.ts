@@ -4,8 +4,7 @@ import { createServer as createHttpServer } from "node:http";
 import { loadListenerEndpoints, parseEgressConfig, parseProxyEndpoint } from "../apps/egress-sidecar/src/config";
 import { selectDialAddress, startProxyListener, type ProxyListener } from "../apps/egress-sidecar/src/proxy";
 import { pac } from "../apps/egress-sidecar/src/server";
-import { builtInEgressPolicies, egressSidecarListeners, internalEgressProxyUrl } from "@browser-fabric/policy";
-import { exampleCatalog } from "@browser-fabric/testkit";
+import { builtInEgressPolicies, egressSidecarListeners } from "@browser-fabric/policy";
 
 const nextPort = (() => {
   let value = 24_000 + Math.floor(Math.random() * 1_000);
@@ -85,11 +84,10 @@ describe("Fabric egress sidecar", () => {
   test("the compose sidecar serves a listener and PAC policy for every built-in egress policy, without solver keys", async () => {
     const config = parseEgressConfig(await Bun.file(new URL("../deploy/compose/egress-sidecar.json", import.meta.url)).json());
     const listeners = new Map(config.listeners.map((listener) => [listener.id, listener]));
+    // Each built-in policy is served by the listener of its own name.
     for (const policy of builtInEgressPolicies) {
-      const url = new URL(internalEgressProxyUrl(policy));
-      const listener = listeners.get(policy.sidecar.listener.id);
-      expect(listener?.port).toBe(Number(url.port));
-      expect(config.policies.find((entry) => entry.ref === policy.ref)?.defaultListenerId).toBe(policy.sidecar.listener.id);
+      expect(config.policies.find((entry) => entry.ref === policy.ref)?.defaultListenerId).toBe(policy.family);
+      expect(listeners.has(policy.family)).toBe(true);
     }
     for (const listener of Object.values(egressSidecarListeners)) expect(listeners.get(listener.id)?.port).toBe(listener.port);
     // The proxy listener's upstream URL lives only in a Docker secret and stays fail-closed until set.
@@ -104,19 +102,6 @@ describe("Fabric egress sidecar", () => {
     for (const solverSecret of ["deathbycaptcha_username", "deathbycaptcha_password", "anticaptcha_client_key"]) {
       expect(egressBlock).not.toContain(solverSecret);
     }
-  });
-
-  test("routes a native worker through a policy's direct listener for direct routes and exception hosts only", () => {
-    const affinity = exampleCatalog.egressPolicies.find((policy) => policy.family === "example-affinity")!;
-    expect(internalEgressProxyUrl(affinity, { trafficClass: "media_range" })).toBe("http://fabric-egress-sidecar:11010");
-    expect(internalEgressProxyUrl(affinity, { trafficClass: "direct_exception" })).toBe("http://fabric-egress-sidecar:11000");
-    expect(internalEgressProxyUrl(affinity, { trafficClass: "media_range", targetUrl: "https://cdn.direct.example/a.ts" })).toBe("http://fabric-egress-sidecar:11000");
-    expect(internalEgressProxyUrl(affinity, { trafficClass: "media_range", targetUrl: "https://direct.example.evil.test/a.ts" })).toBe("http://fabric-egress-sidecar:11010");
-    const staticDirect = exampleCatalog.egressPolicies.find((policy) => policy.family === "example-static-direct")!;
-    expect(internalEgressProxyUrl(staticDirect, { trafficClass: "static_asset" })).toBe("http://fabric-egress-sidecar:11000");
-    expect(internalEgressProxyUrl(staticDirect, { trafficClass: "document" })).toBe("http://fabric-egress-sidecar:11001");
-    expect(() => internalEgressProxyUrl(staticDirect, { host: "bad host" })).toThrow(/host is invalid/);
-    expect(() => internalEgressProxyUrl({ ...staticDirect, sidecar: { listener: { id: "proxy", port: 80 } } })).toThrow(/no valid Fabric sidecar listener/);
   });
 
   test("validates a direct listener's preferred address family and dials it when published", () => {
@@ -197,86 +182,16 @@ describe("Fabric egress sidecar", () => {
     const listener = startProxyListener({ id: "proxy", port: listenerPort, mode: "proxy", allowPrivateTargets: true }, [parseProxyEndpoint(`http://proxy-user:proxy-pass@127.0.0.1:${proxyPort}`, true)]);
     await listener.ready();
     try {
-      const response = await rawProxyRequest(listenerPort, "GET http://example.test/media HTTP/1.1\r\nHost: example.test\r\nProxy-Authorization: Basic Y2xpZW50OmNyZWRlbnRpYWw=\r\nConnection: close\r\n\r\n");
+      const response = await rawProxyRequest(listenerPort, "GET http://example.test/page HTTP/1.1\r\nHost: example.test\r\nProxy-Authorization: Basic Y2xpZW50OmNyZWRlbnRpYWw=\r\nConnection: close\r\n\r\n");
       expect(response).toContain("proxy-body");
       expect(connectRequest).toContain("CONNECT example.test:80 HTTP/1.1");
       expect(connectRequest).toContain(`Proxy-Authorization: Basic ${Buffer.from("proxy-user:proxy-pass").toString("base64")}`);
-      expect(tunneledRequest).toContain("GET /media HTTP/1.1");
+      expect(tunneledRequest).toContain("GET /page HTTP/1.1");
       expect(tunneledRequest).not.toContain("client:credential");
     } finally {
       await closeProxy(listener);
       for (const socket of proxySockets) socket.destroy();
       await close(proxy);
-    }
-  });
-
-  test("keeps an explicit Fabric media affinity selector on one upstream and strips it before forwarding", async () => {
-    const first = createTcpServer();
-    const second = createTcpServer();
-    const sockets = new Set<Socket>();
-    let firstConnections = 0;
-    let firstConnects = 0;
-    let secondConnects = 0;
-    const serveTunnel = (socket: Socket, body: string, record: () => void) => {
-      sockets.add(socket);
-      socket.once("close", () => sockets.delete(socket));
-      let buffer = "";
-      let responded = false;
-      const onData = (chunk: Buffer) => {
-        if (responded) return;
-        buffer += chunk.toString("latin1");
-        if (!buffer.includes("\r\n\r\n")) return;
-        responded = true;
-        socket.removeListener("data", onData);
-        record();
-        expect(buffer).not.toContain("fabric:");
-        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-        socket.end(`HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
-      };
-      socket.on("data", onData);
-    };
-    first.on("connection", (socket) => {
-      firstConnections += 1;
-      // The first affinity is deliberately forced onto the second configured upstream. Later
-      // affinities still begin at upstream one, proving the selector—not the shared client IP—is
-      // what remembers the route.
-      if (firstConnections === 1) {
-        socket.destroy();
-        return;
-      }
-      serveTunnel(socket, "first", () => { firstConnects += 1; });
-    });
-    second.on("connection", (socket) => serveTunnel(socket, "second", () => { secondConnects += 1; }));
-    const firstPort = await listen(first);
-    const secondPort = await listen(second);
-    const listenerPort = nextPort();
-    const listener = startProxyListener(
-      { id: "affinity", port: listenerPort, mode: "proxy", allowPrivateTargets: true },
-      [
-        parseProxyEndpoint(`http://127.0.0.1:${firstPort}`, true),
-        parseProxyEndpoint(`http://127.0.0.1:${secondPort}`, true),
-      ],
-    );
-    await listener.ready();
-    const request = (key: string) => rawProxyRequest(
-      listenerPort,
-      `GET http://example.test/media HTTP/1.1\r\nHost: example.test\r\nProxy-Authorization: Basic ${Buffer.from(`fabric:${key}`).toString("base64")}\r\nConnection: close\r\n\r\n`,
-    );
-    try {
-      const affinityA = "A".repeat(32);
-      const affinityB = "B".repeat(32);
-      expect(await request(affinityA)).toContain("second");
-      expect(await request(affinityB)).toContain("first");
-      // A returns to its established second-upstream affinity despite sharing the same source
-      // address as B. This is what ties a provider handshake to the later media relay path.
-      expect(await request(affinityA)).toContain("second");
-      expect(firstConnects).toBe(1);
-      expect(secondConnects).toBe(2);
-    } finally {
-      await closeProxy(listener);
-      for (const socket of sockets) socket.destroy();
-      await close(first);
-      await close(second);
     }
   });
 
@@ -321,7 +236,7 @@ describe("Fabric egress sidecar", () => {
     const listener = startProxyListener({ id: "socks", port: listenerPort, mode: "proxy" }, [parseProxyEndpoint(`socks5h://127.0.0.1:${socksPort}`, true)]);
     await listener.ready();
     try {
-      const response = await rawProxyRequest(listenerPort, "GET http://remote.example/media HTTP/1.1\r\nHost: remote.example\r\nConnection: close\r\n\r\n");
+      const response = await rawProxyRequest(listenerPort, "GET http://remote.example/page HTTP/1.1\r\nHost: remote.example\r\nConnection: close\r\n\r\n");
       expect(response).toContain("socks-ok");
       expect(connectHost).toBe("remote.example");
     } finally {

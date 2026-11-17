@@ -3,6 +3,7 @@ import { turnstileGuardianSpecFromEnvironment, type TurnstileGuardianSpec } from
 import type { BrowserRecipe, ChallengeHandler, EgressPolicy, Worker, WorkerAssignment } from "@browser-fabric/contracts";
 import { FabricError } from "@browser-fabric/contracts";
 import { internalEgressPacUrl } from "@browser-fabric/policy";
+import { FABRIC_BROWSER_EXECUTABLE } from "./browser-executable";
 
 export interface ContainerSecurity {
   dockerSocketMounted: false;
@@ -86,7 +87,7 @@ export class GenericBrowserRuntime implements BrowserRuntime {
     if (lease && lease.workerId !== worker.id) throw new FabricError("authorization_denied", "assignment worker mismatch", 403);
     const profileVolume = assignment.clone?.volumeName ?? assignment.profile?.volumeName ?? assignment.lease?.ephemeralVolumeName;
     const volumes = profileVolume ? [{ source: profileVolume, target: "/fabric/profile", readOnly: false }] : [];
-    if (!profileVolume && recipe.mode !== "headless") throw new FabricError("validation_failed", "interactive/headful browser requires a profile volume", 400);
+    if (!profileVolume && recipe.mode !== "headless") throw new FabricError("validation_failed", "an interactive browser requires a profile volume", 400);
     // Current Chromium deliberately keeps DevTools on loopback even when a
     // remote-debugging address flag asks for a wider bind. Managed containers
     // therefore expose a Fabric-owned TCP bridge on their private worker
@@ -118,10 +119,18 @@ export class GenericBrowserRuntime implements BrowserRuntime {
         // interactive leases so their private CDP bridge is always present.
         // Federated local workers retain their native desktop session.
         ...(managedBrowser
-          ? ["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]
-          : ["/usr/bin/chromium"]),
+          ? ["/usr/local/bin/fabric-chromium-launch", FABRIC_BROWSER_EXECUTABLE]
+          : [FABRIC_BROWSER_EXECUTABLE]),
         ...(recipe.mode === "headless" ? ["--headless=new"] : []),
+        // Google Chrome (unlike Debian's Chromium) opens a modal first-run dialog in a fresh
+        // headful profile and does not start DevTools until it is dismissed.
+        "--no-first-run",
+        "--no-default-browser-check",
         ...(recipe.mode === "interactive" ? ["--start-maximized"] : []),
+        // A headful managed browser draws on Xvfb, which has no GPU. Without these Chrome disables
+        // WebGL entirely (headless already falls back to SwiftShader), and a page without WebGL is
+        // an obvious automation signal. The guardian's fingerprint script masks the renderer name.
+        ...(managedBrowser && recipe.mode === "interactive" ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"] : []),
         ...(recipe.launch.disableServiceWorkers ? ["--disable-service-worker"] : []),
         ...recipe.launch.launchFlags,
         // These flags are appended after immutable recipe flags so no recipe can override the
@@ -154,29 +163,6 @@ export class GenericBrowserRuntime implements BrowserRuntime {
   }
 }
 
-/** Media relay workers execute HTTP range work without starting Chromium or consuming a lease. */
-export class MediaRelayRuntime implements BrowserRuntime {
-  readonly family = "media-relay";
-  public buildSpec(assignment: WorkerAssignment, worker: Worker, policy: EgressPolicy): BrowserContainerSpec {
-    if (assignment.lease) throw new FabricError("validation_failed", "media relay assignments must not carry a browser lease", 400);
-    if (!assignment.job || assignment.job.runtime !== "media-relay" || assignment.job.workerId !== worker.id) throw new FabricError("authorization_denied", "invalid media relay assignment", 403);
-    if (!policy.constraints.allowDirectMediaRelay) throw new FabricError("validation_failed", "media relay is disabled by egress policy", 400);
-    return {
-      workerId: worker.id,
-      jobId: assignment.job.id,
-      image: assignment.recipe.browserImage,
-      browserVersion: "none",
-      command: ["/usr/local/bin/fabric-media-relay"],
-      environment: { FABRIC_WORKER_ID: worker.id, FABRIC_JOB_ID: assignment.job.id, FABRIC_EGRESS_POLICY_REF: policy.ref },
-      volumes: [],
-      networks: ["fabric-workers", "fabric-egress"],
-      limits: worker.resourceLimits,
-      security: { dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false },
-      cdpBind: { host: "private-overlay", port: 0 }
-    };
-  }
-}
-
 export class WorkerRuntimeRegistry {
   readonly #runtimes = new Map<string, BrowserRuntime>();
 
@@ -198,8 +184,7 @@ export class WorkerRuntimeRegistry {
 
 export function defaultRuntimeRegistry(): WorkerRuntimeRegistry {
   const registry = new WorkerRuntimeRegistry();
-  for (const family of ["chromium-cdp", "patchright", "rebrowser-puppeteer"]) registry.register(new GenericBrowserRuntime(family));
-  registry.register(new MediaRelayRuntime());
+  registry.register(new GenericBrowserRuntime("chrome"));
   return registry;
 }
 
@@ -214,6 +199,7 @@ export * from "./captcha-solvers/death-by-captcha";
 export * from "./captcha-solvers/anticaptcha";
 export * from "./captcha-solvers/recaptcha-page";
 export * from "./cdp-connection";
+export * from "./browser-executable";
 export * from "./chromium";
 export * from "./turnstile-guardian";
 export * from "./challenge-handlers";

@@ -1,7 +1,6 @@
 
-import { ArtifactAccess, ArtifactCollector, ArtifactService, bunMtlsServerTls, createBunMtlsFetch, createPostgresScheduler, createProductionObjectStore, HttpEncryptedInputBroker, MediaPlaybackCapabilitySigner, mtlsFilesFromEnv, principalFromEdgeHeaders, type PostgresSchedulerRuntime } from "@browser-fabric/control-plane";
+import { ArtifactAccess, ArtifactCollector, ArtifactService, bunMtlsServerTls, createBunMtlsFetch, createPostgresScheduler, createProductionObjectStore, HttpEncryptedInputBroker, mtlsFilesFromEnv, principalFromEdgeHeaders, type PostgresSchedulerRuntime } from "@browser-fabric/control-plane";
 import { createApiFetch } from "./index";
-import { MediaPlaybackGateway } from "../../media-playback-gateway/src/index";
 
 async function loadSecret(name: string): Promise<string> {
   const file = process.env[`${name}_FILE`];
@@ -18,16 +17,6 @@ function optionalBrokerFetch(): ((request: RequestInfo | URL, init?: RequestInit
   if (!certificateFile && !keyFile && !caFile) return undefined;
   if (!certificateFile || !keyFile || !caFile) throw new Error("input broker client mTLS requires certificate, key, and CA files");
   return createBunMtlsFetch({ certificateFile, keyFile, caFile });
-}
-
-async function createMediaPlaybackGateway(runtime: PostgresSchedulerRuntime): Promise<MediaPlaybackGateway | undefined> {
-  const privateKeyFile = process.env.FABRIC_MEDIA_PLAYBACK_PRIVATE_KEY_FILE;
-  const privateKey = privateKeyFile ? (await Bun.file(privateKeyFile).text()).trim() : process.env.FABRIC_MEDIA_PLAYBACK_PRIVATE_KEY?.trim();
-  const baseUrl = process.env.FABRIC_MEDIA_PLAYBACK_BASE_URL?.trim();
-  if (!privateKey && !baseUrl) return undefined;
-  if (!privateKey || !baseUrl) throw new Error("FABRIC_MEDIA_PLAYBACK_PRIVATE_KEY(_FILE) and FABRIC_MEDIA_PLAYBACK_BASE_URL must be configured together");
-  const signer = new MediaPlaybackCapabilitySigner({ privateKey, gatewayBaseUrl: baseUrl });
-  return new MediaPlaybackGateway({ scheduler: runtime.scheduler, signer, verifier: signer });
 }
 
 export type ApiRuntime = PostgresSchedulerRuntime;
@@ -50,7 +39,6 @@ if (import.meta.main) {
   const collector = new ArtifactCollector({ scheduler: runtime.scheduler, objectStore });
   const artifactService = new ArtifactService({ scheduler: runtime.scheduler, collector });
   const artifactAccess = new ArtifactAccess({ scheduler: runtime.scheduler, objectStore });
-  const mediaPlaybackGateway = await createMediaPlaybackGateway(runtime);
   const brokerUrl = process.env.FABRIC_INPUT_BROKER_URL;
   const encryptedInputBroker = brokerUrl ? new HttpEncryptedInputBroker({ baseUrl: brokerUrl, serviceName: "fabric-api", fetch: optionalBrokerFetch(), headers: { "x-fabric-mtls-verified": "true" } }) : undefined;
   const port = Number(process.env.PORT ?? 8080);
@@ -62,7 +50,7 @@ if (import.meta.main) {
   Bun.serve({
     port,
     ...(tlsFiles ? { tls: bunMtlsServerTls(tlsFiles) } : {}),
-    fetch: createApiFetch({ scheduler: runtime.scheduler, authenticate: (request) => principalFromHeaders(request, runtime.scheduler), artifactService, artifactAccess, ...(mediaPlaybackGateway ? { mediaPlaybackGateway } : {}), ...(encryptedInputBroker ? { encryptedInputBroker } : {}) }),
+    fetch: createApiFetch({ scheduler: runtime.scheduler, authenticate: (request) => principalFromHeaders(request, runtime.scheduler), artifactService, artifactAccess, ...(encryptedInputBroker ? { encryptedInputBroker } : {}) }),
   });
   console.info(`Browser Fabric API listening on :${port}`);
   process.once("SIGTERM", () => void runtime.close());

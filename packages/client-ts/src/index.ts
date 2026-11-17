@@ -14,9 +14,6 @@ import {
   type ArtifactResponse,
   type ArtifactPolicyRef,
   type ProjectId,
-  type MediaManifest,
-  MEDIA_MANIFEST_CONTENT_TYPE,
-  type MediaPlaybackEndpoint,
 } from "@browser-fabric/contracts";
 
 /**
@@ -69,11 +66,6 @@ export interface ArtifactDownload {
   artifact: ArtifactResponse;
   url: string;
   expiresAt: string;
-}
-
-export interface MediaManifestUploadOptions {
-  artifactPolicyRef?: ArtifactPolicyRef;
-  label?: string;
 }
 
 /** A live browser lease returned after Fabric has verified browser-level CDP readiness. */
@@ -225,8 +217,6 @@ export class BrowserFabricClient {
     cancel: (id: JobId | string) => this.#request<JobResponse>(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
     resume: (id: JobId | string) => this.#request<JobResponse>(`/jobs/${encodeURIComponent(id)}/resume`, { method: "POST" }),
     events: (id: JobId | string, after?: number) => this.#request<unknown[]>(`/jobs/${encodeURIComponent(id)}/events${after === undefined ? "" : `?after=${encodeURIComponent(String(after))}`}`),
-    /** Issue short-lived HLS/direct-media endpoints once a media-playback job is ready. */
-    issuePlayback: (id: JobId | string) => this.#request<MediaPlaybackEndpoint>(`/jobs/${encodeURIComponent(id)}/media-playback`, { method: "POST" }),
   };
 
   public readonly inputRequests = {
@@ -255,18 +245,6 @@ export class BrowserFabricClient {
     download: (artifactId: Artifact["id"] | string, project: ProjectId | string, ttlSeconds = 60) => {
       if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 900) throw new RangeError("artifact download TTL must be from 1 to 900 seconds");
       return this.#request<ArtifactDownload>(`/artifacts/${encodeURIComponent(artifactId)}?project=${encodeURIComponent(project)}&ttlSeconds=${ttlSeconds}`);
-    },
-    /**
-     * Create the immutable input consumed by a later media-only job. The provider URL is parsed
-     * server-side before storage; this client never receives an object key or storage credential.
-     */
-    uploadMediaManifest: (project: ProjectId | string, manifest: MediaManifest, options: MediaManifestUploadOptions = {}) => {
-      const bytes = new TextEncoder().encode(JSON.stringify(manifest));
-      return this.#uploadArtifact(
-        `/projects/${encodeURIComponent(project)}/media-manifests`,
-        { kind: "media_manifest", contentType: MEDIA_MANIFEST_CONTENT_TYPE, bytes, ...(options.label === undefined ? {} : { label: options.label }) },
-        options.artifactPolicyRef === undefined ? {} : { "x-fabric-artifact-policy-ref": options.artifactPolicyRef },
-      );
     },
   };
 
@@ -400,7 +378,7 @@ export class BrowserFabricClient {
   }
 
   async #uploadArtifact(path: string, input: ArtifactUploadInput, additionalHeaders: Record<string, string> = {}): Promise<ArtifactResponse> {
-    if (!input || !["screenshot", "mhtml", "trace", "har", "download", "video", "log", "media_manifest"].includes(input.kind)) {
+    if (!input || !["screenshot", "mhtml", "trace", "har", "download", "video", "log"].includes(input.kind)) {
       throw new FabricError("validation_failed", "artifact kind is invalid", 400);
     }
     if (!input.contentType || input.contentType.length > 255 || /[\0\r\n]/.test(input.contentType)) {

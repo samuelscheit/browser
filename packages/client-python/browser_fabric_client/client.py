@@ -45,7 +45,7 @@ _KNOWN_CODES = frozenset(
         "internal_error",
     }
 )
-_ARTIFACT_KINDS = frozenset({"screenshot", "mhtml", "trace", "har", "download", "video", "log", "media_manifest"})
+_ARTIFACT_KINDS = frozenset({"screenshot", "mhtml", "trace", "har", "download", "video", "log"})
 
 
 def _path_id(value: str) -> str:
@@ -229,10 +229,6 @@ class BrowserFabricClient:
     def resume_job(self, job_id: str) -> dict[str, Any]:
         return dict(self._request("POST", f"/jobs/{_path_id(job_id)}/resume"))
 
-    def issue_media_playback(self, job_id: str) -> dict[str, Any]:
-        """Issue opaque HLS/direct-media URLs for an active media-playback job."""
-        return dict(self._request("POST", f"/jobs/{_path_id(job_id)}/media-playback"))
-
     def job_events(self, job_id: str, after: int | None = None) -> list[dict[str, Any]]:
         suffix = "" if after is None else f"?after={quote(str(after), safe='')}"
         return list(self._request("GET", f"/jobs/{_path_id(job_id)}/events{suffix}"))
@@ -242,22 +238,6 @@ class BrowserFabricClient:
 
     def upload_job_artifact(self, job_id: str, *, kind: str, content_type: str, data: bytes, label: str | None = None) -> dict[str, Any]:
         return self._upload_artifact(f"/jobs/{_path_id(job_id)}/artifacts", kind=kind, content_type=content_type, data=data, label=label)
-
-    def upload_media_manifest(self, project: str, manifest: Mapping[str, Any], *, artifact_policy_ref: str | None = None, label: str | None = None) -> dict[str, Any]:
-        if not re.fullmatch(r"project_[A-Za-z0-9][A-Za-z0-9_-]{0,127}", project):
-            raise FabricError("validation_failed", "project identifier is invalid", 400)
-        if artifact_policy_ref is not None and not re.fullmatch(r"artifact-policy_[A-Za-z0-9][A-Za-z0-9_.-]*@\d+", artifact_policy_ref):
-            raise FabricError("validation_failed", "artifact policy reference is invalid", 400)
-        import json
-        data = json.dumps(dict(manifest), separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        return self._upload_artifact(
-            f"/projects/{_path_id(project)}/media-manifests",
-            kind="media_manifest",
-            content_type="application/vnd.browser-fabric.media-manifest+json",
-            data=data,
-            label=label,
-            extra_headers={} if artifact_policy_ref is None else {"x-fabric-artifact-policy-ref": artifact_policy_ref},
-        )
 
     def list_session_artifacts(self, session_id: str) -> list[dict[str, Any]]:
         return list(self._request("GET", f"/browser-sessions/{_path_id(session_id)}/artifacts"))
@@ -478,10 +458,6 @@ class AsyncBrowserFabricClient:
     async def resume_job(self, job_id: str) -> dict[str, Any]:
         return dict(await self._request("POST", f"/jobs/{_path_id(job_id)}/resume"))
 
-    async def issue_media_playback(self, job_id: str) -> dict[str, Any]:
-        """Issue opaque HLS/direct-media URLs for an active media-playback job."""
-        return dict(await self._request("POST", f"/jobs/{_path_id(job_id)}/media-playback"))
-
     async def job_events(self, job_id: str, after: int | None = None) -> list[dict[str, Any]]:
         suffix = "" if after is None else f"?after={quote(str(after), safe='')}"
         return list(await self._request("GET", f"/jobs/{_path_id(job_id)}/events{suffix}"))
@@ -491,22 +467,6 @@ class AsyncBrowserFabricClient:
 
     async def upload_job_artifact(self, job_id: str, *, kind: str, content_type: str, data: bytes, label: str | None = None) -> dict[str, Any]:
         return await self._upload_artifact(f"/jobs/{_path_id(job_id)}/artifacts", kind=kind, content_type=content_type, data=data, label=label)
-
-    async def upload_media_manifest(self, project: str, manifest: Mapping[str, Any], *, artifact_policy_ref: str | None = None, label: str | None = None) -> dict[str, Any]:
-        if not re.fullmatch(r"project_[A-Za-z0-9][A-Za-z0-9_-]{0,127}", project):
-            raise FabricError("validation_failed", "project identifier is invalid", 400)
-        if artifact_policy_ref is not None and not re.fullmatch(r"artifact-policy_[A-Za-z0-9][A-Za-z0-9_.-]*@\d+", artifact_policy_ref):
-            raise FabricError("validation_failed", "artifact policy reference is invalid", 400)
-        import json
-        data = json.dumps(dict(manifest), separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        return await self._upload_artifact(
-            f"/projects/{_path_id(project)}/media-manifests",
-            kind="media_manifest",
-            content_type="application/vnd.browser-fabric.media-manifest+json",
-            data=data,
-            label=label,
-            extra_headers={} if artifact_policy_ref is None else {"x-fabric-artifact-policy-ref": artifact_policy_ref},
-        )
 
     async def list_session_artifacts(self, session_id: str) -> list[dict[str, Any]]:
         return list(await self._request("GET", f"/browser-sessions/{_path_id(session_id)}/artifacts"))

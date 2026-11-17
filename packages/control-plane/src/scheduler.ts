@@ -2,14 +2,9 @@ import {
   createId,
   canonicalJson,
   FabricError,
-  isMediaRuntime,
   isSafeDockerVolumeName,
-  MEDIA_MANIFEST_CONTENT_TYPE,
-  parseMediaPlaybackOperation,
-  parseMediaRelayOperation,
   type Artifact,
   type ArtifactPolicy,
-  type AttemptId,
   type AuditEvent,
   type BrowserLease,
   type BrowserRecipe,
@@ -43,7 +38,7 @@ import {
   MAX_WORKER_BROWSER_LEASES
 } from "@browser-fabric/contracts";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { assertRuntimePolicyCompatibility, builtInChallengeSets, builtInEgressPolicies } from "@browser-fabric/policy";
+import { builtInChallengeSets, builtInEgressPolicies } from "@browser-fabric/policy";
 import { builtInRecipes, RecipeRegistry, type RecipeDefinition, validateTypedOperation } from "@browser-fabric/recipes";
 import { emptyFabricCatalog, type FabricCatalog } from "./catalog";
 import { CapabilitySigner } from "./capability";
@@ -84,23 +79,15 @@ export interface ManagedWorkerReconfiguration {
 }
 
 export interface ArtifactInput {
-  /** Required only for a project-scoped media_manifest, which exists before a consuming job. */
-  project?: ProjectId;
   sessionId?: BrowserSessionId;
   jobId?: JobId;
   profileRef?: Profile["ref"];
   kind: Artifact["kind"];
-  /** Required only for a project-scoped media_manifest; owner-scoped artifacts derive it. */
-  artifactPolicyRef?: ArtifactPolicy["ref"];
   objectKey: string;
   sha256: string;
   mimeType: string;
   sizeBytes: number;
-  /** Restricts a media result finalization to one currently active media assignment. */
-  expectedWorkerId?: Worker["id"];
-  /** Restricts a media result finalization to its exact active media attempt. */
-  expectedMediaAttemptId?: AttemptId;
-  /** Stable, bounded expiry reserved by the worker manager before an immutable result upload. */
+  /** Expiry of the stored object; the scheduler checks it against the artifact policy. */
   expiresAt?: string;
 }
 
@@ -113,28 +100,9 @@ export interface ArtifactOwnerContext {
   jobId?: JobId;
 }
 
-/** Project-scoped artifact context used only for an immutable media manifest before a media job exists. */
-export interface ProjectArtifactContext {
-  project: ProjectId;
-  artifactPolicyRef: ArtifactPolicy["ref"];
-}
-
 export interface InputRequestResponse {
   request: EphemeralInputRequest;
   /** Never expose the supplied value in the control plane response. */
-}
-
-/** Internal worker-manager handoff: the manifest reference remains durable; source bytes do not. */
-export interface MediaPlaybackSourceRequestResponse {
-  request: EphemeralInputRequest;
-  job: Job;
-}
-
-/** Capability-gateway lookup result. It contains no provider URL or encrypted source data. */
-export interface ActiveMediaPlaybackBinding {
-  job: Job;
-  worker: Worker;
-  attemptId: AttemptId;
 }
 
 const isTerminalSession = (status: BrowserSession["status"]): boolean => terminalBrowserSessionStatuses.includes(status as never);
@@ -143,24 +111,6 @@ const asDate = (iso: string) => new Date(iso).getTime();
 const now = (clock: Clock) => clock.now().toISOString();
 const after = (clock: Clock, seconds: number) => new Date(clock.now().getTime() + seconds * 1_000).toISOString();
 const defaultArtifactRef = "artifact-policy_standard-30-days@1" as ArtifactPolicy["ref"];
-
-/** Resolve the active worker for either an ordinary lease-scoped input or a media-attempt source. */
-function inputRequestWorker(kernel: SchedulerKernel, state: FabricState, request: EphemeralInputRequest): Worker["id"] {
-  if (request.leaseId !== undefined) return kernel.lease(state, request.leaseId).workerId;
-  if (request.jobId !== undefined && request.mediaAttemptId !== undefined) {
-    const job = kernel.job(state, request.jobId);
-    if (
-      job.runtime !== "media-playback" ||
-      job.mediaAttemptId !== request.mediaAttemptId ||
-      !job.workerId ||
-      (job.status !== "running" && job.status !== "awaiting_input")
-    ) {
-      throw new FabricError("invalid_state", "media playback source request is no longer active", 409);
-    }
-    return job.workerId;
-  }
-  throw new FabricError("invalid_state", "input request has no active assignment", 409);
-}
 
 function requestFingerprint(scope: string, payload: unknown): string {
   return `${scope}:sha256:${createHash("sha256").update(canonicalJson(payload)).digest("hex")}`;
@@ -212,23 +162,19 @@ function matchesProvisionedWorkerRegistration(
   return canonicalJson({
     capabilities: existing.capabilities,
     capacity: existing.capacity,
-    mediaCapacity: existing.mediaCapacity,
     isLocal: existing.isLocal,
     resourceLimits: existing.resourceLimits,
     volumeNames: existing.volumeNames,
     endpoint: existing.endpoint,
     cdpRelayEndpoint: existing.cdpRelayEndpoint,
-    mediaPlaybackEndpoint: existing.mediaPlaybackEndpoint,
   }) === canonicalJson({
     capabilities: worker.capabilities,
     capacity: worker.capacity,
-    mediaCapacity: worker.mediaCapacity,
     isLocal: worker.isLocal,
     resourceLimits: worker.resourceLimits,
     volumeNames: worker.volumeNames,
     endpoint: worker.endpoint,
     cdpRelayEndpoint: worker.cdpRelayEndpoint,
-    mediaPlaybackEndpoint: worker.mediaPlaybackEndpoint,
   });
 }
 
@@ -307,7 +253,7 @@ export class BrowserScheduler {
     return this.#store;
   }
 
-  /** Shared authoritative clock for artifact retention and media capability boundaries. */
+  /** Shared authoritative clock for artifact retention and capability boundaries. */
   public now(): Date {
     return new Date(this.#clock.now().getTime());
   }
@@ -463,19 +409,6 @@ export class BrowserScheduler {
     });
   }
 
-  /**
-   * A media manifest is the one intentionally project-scoped artifact: it is created before the
-   * media-only job that consumes it. It remains subject to the same project authorization and
-   * artifact-policy lookup as browser/job outputs.
-   */
-  public async resolveProjectArtifact(project: ProjectId, artifactPolicyRef: ArtifactPolicy["ref"], actor?: Principal): Promise<ProjectArtifactContext> {
-    return this.#store.read((state) => {
-      this.#kernel.authorizeProject(state, actor, project, "create_media_manifest", artifactPolicyRef);
-      this.#kernel.artifactPolicy(state, artifactPolicyRef);
-      return { project, artifactPolicyRef };
-    });
-  }
-
   /** List a job's immutable artifacts after checking the owning project grant. */
   public async listArtifactsForJob(jobId: JobId, actor?: Principal): Promise<Artifact[]> {
     return this.#store.read((state) => {
@@ -515,14 +448,10 @@ export class BrowserScheduler {
       this.#kernel.authorizeFabricAdmin(state, actor, "register_worker", worker.id);
       if (!/^worker_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(worker.id) || !worker.certificateFingerprint || worker.certificateFingerprint.length > 512) throw new FabricError("validation_failed", "worker identity is invalid", 400);
       for (const family of worker.capabilities.runtimeFamilies) if (!(runtimeFamilies as readonly string[]).includes(family)) throw new FabricError("validation_failed", "worker runtime capability is invalid", 400);
-      if (worker.capabilities.runtimeFamilies.includes("media-playback") && !worker.mediaPlaybackEndpoint) {
-        throw new FabricError("validation_failed", "media-playback worker requires a private mediaPlaybackEndpoint", 400);
-      }
       if (!worker.volumeNames.every(isSafeDockerVolumeName) || new Set(worker.volumeNames).size !== worker.volumeNames.length) throw new FabricError("validation_failed", "worker volumes must be unique safe Docker volume names", 400);
       if (!Number.isInteger(worker.capacity) || worker.capacity < 0 || worker.capacity > MAX_WORKER_BROWSER_LEASES) throw new FabricError("validation_failed", `worker capacity must be from 0 to ${MAX_WORKER_BROWSER_LEASES}`, 400);
       if (worker.isLocal && worker.capacity !== 1) throw new FabricError("validation_failed", "the federated local worker must have exactly one interactive lease capacity", 400);
       if (worker.capacity > worker.resourceLimits.maxBrowserLeases) throw new FabricError("validation_failed", "worker capacity exceeds its declared browser resource limit", 400);
-      if (worker.mediaCapacity !== undefined && (!Number.isInteger(worker.mediaCapacity) || worker.mediaCapacity < 0 || worker.mediaCapacity > 64)) throw new FabricError("validation_failed", "worker media capacity is outside safe bounds", 400);
       const timestamp = now(this.#clock);
       const previous = state.workers.get(worker.id);
       if (previous && previous.certificateFingerprint !== worker.certificateFingerprint) {
@@ -536,8 +465,6 @@ export class BrowserScheduler {
         // Re-registration must not reset counters while leases are active; doing so would
         // silently exceed the global cap after a worker reconnects.
         activeLeases: previous?.activeLeases ?? 0,
-        mediaCapacity: worker.mediaCapacity ?? previous?.mediaCapacity ?? (worker.isLocal ? 0 : 8),
-        activeMediaTasks: previous?.activeMediaTasks ?? 0,
         lastHeartbeatAt: timestamp,
         createdAt: previous?.createdAt ?? worker.createdAt ?? timestamp,
         updatedAt: timestamp
@@ -632,7 +559,7 @@ export class BrowserScheduler {
     });
   }
 
-  public async heartbeatWorker(workerId: Worker["id"], actor?: Principal, resource?: Partial<Pick<Worker, "capacity" | "health" | "mediaCapacity">>): Promise<Worker> {
+  public async heartbeatWorker(workerId: Worker["id"], actor?: Principal, resource?: Partial<Pick<Worker, "capacity" | "health">>): Promise<Worker> {
     return this.#store.transact((state) => {
       const worker = this.#kernel.worker(state, workerId);
       this.#kernel.authorizeWorker(state, actor, worker, "heartbeat_worker");
@@ -644,10 +571,6 @@ export class BrowserScheduler {
       }
       if (resource?.health !== undefined) worker.health = resource.health;
       else if (worker.health === "offline") worker.health = "healthy";
-      if (resource?.mediaCapacity !== undefined) {
-        if (!Number.isInteger(resource.mediaCapacity) || resource.mediaCapacity < (worker.activeMediaTasks ?? 0) || resource.mediaCapacity > 64) throw new FabricError("validation_failed", "media capacity is outside permitted bounds", 400);
-        worker.mediaCapacity = resource.mediaCapacity;
-      }
       worker.lastHeartbeatAt = now(this.#clock);
       worker.updatedAt = worker.lastHeartbeatAt;
       state.workers.set(worker.id, worker);
@@ -804,25 +727,9 @@ export class BrowserScheduler {
       const recipe = this.#kernel.recipe(state, input.recipeRef) as RecipeDefinition;
       if (recipe.access !== "typed_job") throw new FabricError("validation_failed", `${recipe.ref} is raw-CDP only`, 400);
       validateTypedOperation(recipe, input.operation);
-      if (isMediaRuntime(recipe.runtime)) {
-        if (input.profileRef !== undefined) throw new FabricError("validation_failed", "media-only work must not attach a browser profile", 400);
-        const media = recipe.runtime === "media-relay"
-          ? parseMediaRelayOperation(input.operation)
-          : parseMediaPlaybackOperation(input.operation);
-        const manifest = state.artifacts.get(media.manifestRef as Artifact["id"]);
-        // Fail at submission rather than allocating worker capacity for a missing, foreign,
-        // expired, or non-manifest artifact. The bytes themselves were validated at ingestion and
-        // are verified again by the manager before the relay starts.
-        if (!manifest || manifest.project !== input.project || asDate(manifest.expiresAt) <= this.#clock.now().getTime()) {
-          throw new FabricError("not_found", "media manifest artifact was not found for this project", 404);
-        }
-        if (manifest.kind !== "media_manifest" || manifest.mimeType.toLowerCase().split(";", 1)[0]?.trim() !== MEDIA_MANIFEST_CONTENT_TYPE) {
-          throw new FabricError("validation_failed", "manifestRef must identify a Fabric media_manifest artifact", 400);
-        }
-      }
       assertDurablePayload(input.operation);
       assertSafeCallback(input.callback);
-      const effectiveLeaseMode = input.leaseMode ?? (isMediaRuntime(recipe.runtime) ? "clone" : "writer");
+      const effectiveLeaseMode = input.leaseMode ?? "writer";
       const metadata = scalarMetadata(input.metadata);
       this.#kernel.validateCommonReferences(state, input.project, recipe, input.profileRef, effectiveLeaseMode, input.egressPolicyRef, input.artifactPolicyRef);
       const timestamp = now(this.#clock);
@@ -897,7 +804,7 @@ export class BrowserScheduler {
   }
 
   /** Workers claim a signed assignment; no arbitrary worker can execute another worker's job. */
-  public async claimAssignment(workerId: Worker["id"], leaseId: BrowserLease["id"] | undefined, jobId: JobId | undefined, actor?: Principal): Promise<WorkerAssignment> {
+  public async claimAssignment(workerId: Worker["id"], leaseId: BrowserLease["id"], actor?: Principal): Promise<WorkerAssignment> {
     return this.#store.transact((state) => {
       const worker = this.#kernel.worker(state, workerId);
       this.#kernel.authorizeWorker(state, actor, worker, "claim_assignment");
@@ -928,18 +835,7 @@ export class BrowserScheduler {
           return this.#kernel.assignmentForLease(state, lease);
         }
       }
-      if (jobId) {
-        const job = this.#kernel.job(state, jobId);
-        const activeMediaStatus = job.status === "running" || (job.runtime === "media-playback" && job.status === "awaiting_input");
-        if (!isMediaRuntime(job.runtime) || job.workerId !== workerId || !activeMediaStatus) {
-          throw new FabricError("authorization_denied", "media assignment is not allocated to this worker", 403);
-        }
-        job.assignmentClaimedAt = now(this.#clock);
-        job.updatedAt = now(this.#clock);
-        state.jobs.set(job.id, job);
-        return this.#kernel.assignmentForMediaJob(state, job);
-      }
-      throw new FabricError("validation_failed", "assignment requires a leaseId or media jobId", 400);
+      throw new FabricError("invalid_state", "lease has no session or job", 409);
     });
   }
 
@@ -959,12 +855,6 @@ export class BrowserScheduler {
         if (lease.workerId !== workerId || lease.status !== "active" || lease.assignmentClaimedAt) continue;
         assignments.push(this.#kernel.assignmentForLease(state, lease));
       }
-      for (const job of [...state.jobs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
-        if (assignments.length >= limit) break;
-        const activeMediaStatus = job.status === "running" || (job.runtime === "media-playback" && job.status === "awaiting_input");
-        if (!isMediaRuntime(job.runtime) || job.workerId !== workerId || !activeMediaStatus || job.assignmentClaimedAt) continue;
-        assignments.push(this.#kernel.assignmentForMediaJob(state, job));
-      }
       return assignments.map((assignment) => structuredClone(assignment));
     });
   }
@@ -980,12 +870,6 @@ export class BrowserScheduler {
         if (assignments.length >= limit) break;
         if (lease.workerId !== workerId || lease.status !== "active") continue;
         assignments.push(this.#kernel.assignmentForLease(state, lease));
-      }
-      for (const job of [...state.jobs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
-        if (assignments.length >= limit) break;
-        const activeMediaStatus = job.status === "running" || (job.runtime === "media-playback" && job.status === "awaiting_input");
-        if (!isMediaRuntime(job.runtime) || job.workerId !== workerId || !activeMediaStatus) continue;
-        assignments.push(this.#kernel.assignmentForMediaJob(state, job));
       }
       return assignments.map((assignment) => structuredClone(assignment));
     });
@@ -1126,261 +1010,6 @@ export class BrowserScheduler {
     });
   }
 
-  /**
-   * Release a manager-owned media assignment after its one-shot service exits, is stopped during
-   * recovery, or cannot deliver a verified artifact receipt. This mirrors browser-lease recovery:
-   * capacity is released first and a bounded recipe retry is then eligible for FIFO dispatch.
-   */
-  public async failMediaTask(jobId: JobId, workerId: Worker["id"], attemptId: AttemptId | undefined, reason: string, actor?: Principal): Promise<JobResponse> {
-    return this.#store.transact((state) => {
-      const job = this.#kernel.job(state, jobId);
-      const worker = this.#kernel.worker(state, workerId);
-      this.#kernel.authorizeWorker(state, actor, worker, "fail_media_task");
-      if (!isMediaRuntime(job.runtime) || job.workerId !== workerId || job.mediaAttemptId !== attemptId) {
-        throw new FabricError("authorization_denied", "media task is not assigned to this worker", 403);
-      }
-      if (isTerminalJob(job.status)) return jobResponse(job);
-      const failureReason = safeFailureReason(reason);
-      this.#kernel.releaseMediaTask(state, job);
-      this.#kernel.finishAttempt(state, job, "failed");
-      this.#kernel.cancelInputRequests(state, { jobId: job.id });
-      const recipe = this.#kernel.recipe(state, job.recipeRef) as RecipeDefinition;
-      const attempts = [...state.attempts.values()].filter((attempt) => attempt.jobId === job.id).length;
-      job.assignmentClaimedAt = undefined;
-      job.updatedAt = now(this.#clock);
-      if (attempts < recipe.maxAttempts && asDate(job.expiresAt) > this.#clock.now().getTime()) {
-        job.status = "queued";
-        job.workerId = undefined;
-        job.failureReason = undefined;
-        state.jobs.set(job.id, job);
-        this.#kernel.event(state, job.project, { kind: "job", id: job.id }, "job.requeued_after_media_failure", { attempts });
-      } else {
-        job.status = asDate(job.expiresAt) <= this.#clock.now().getTime() ? "timed_out" : "failed";
-        job.failureReason = failureReason;
-        state.jobs.set(job.id, job);
-        this.#kernel.event(state, job.project, { kind: "job", id: job.id }, `job.${job.status}`, { reason: failureReason });
-        this.#kernel.audit(state, actor, job.project, "media_task.failed", { kind: "job", id: job.id }, "failed", {});
-      }
-      return jobResponse(job);
-    });
-  }
-
-  /**
-   * Create (or return) the one encrypted input request that carries a signed HLS/MP4 provider
-   * source for an already claimed playback attempt. The durable job retains only manifestRef;
-   * neither this method nor its events contain the URL, cookie, or request headers.
-   */
-  public async requestMediaPlaybackSource(
-    input: { jobId: JobId; workerId: Worker["id"]; attemptId: AttemptId; refresh?: boolean },
-    actor?: Principal,
-  ): Promise<MediaPlaybackSourceRequestResponse> {
-    return this.#store.transact((state) => {
-      const job = this.#kernel.job(state, input.jobId);
-      const worker = this.#kernel.worker(state, input.workerId);
-      this.#kernel.authorizeWorker(state, actor, worker, "request_media_playback_source");
-      if (
-        job.runtime !== "media-playback" ||
-        job.workerId !== input.workerId ||
-        job.mediaAttemptId !== input.attemptId ||
-        !job.assignmentClaimedAt ||
-        (job.status !== "running" && job.status !== "awaiting_input")
-      ) {
-        throw new FabricError("invalid_state", "media playback task is not active for this worker attempt", 409);
-      }
-      if (!worker.inputEncryptionPublicKeyPem) {
-        throw new FabricError("worker_unavailable", "media playback worker has no input encryption public key", 503);
-      }
-      const timestamp = now(this.#clock);
-      const current = job.mediaPlaybackSourceRequestId === undefined
-        ? undefined
-        : state.inputRequests.get(job.mediaPlaybackSourceRequestId);
-      if (
-        current &&
-        current.jobId === job.id &&
-        current.mediaAttemptId === input.attemptId &&
-        current.field === "media_source" &&
-        current.fieldType === "media_playback_source" &&
-        (current.status === "pending" || current.status === "supplied")
-      ) {
-        if (asDate(current.expiresAt) > this.#clock.now().getTime()) {
-          return { request: structuredClone(current), job: structuredClone(job) };
-        }
-        // Do not make a worker wait for the periodic recovery loop to notice the same timed-out
-        // source request. It is addressed to one worker/attempt, so expire and discard it before
-        // allocating its replacement in this serialized transaction.
-        current.status = "expired";
-        current.resolvedAt = timestamp;
-        state.inputRequests.set(current.id, current);
-        this.#kernel.discardInput(current.id);
-      }
-      if (!input.refresh && job.mediaPlaybackReadyAt !== undefined) {
-        throw new FabricError("invalid_state", "media playback source is already active for this attempt", 409);
-      }
-      const request: EphemeralInputRequest = {
-        id: createId("input-request"),
-        project: job.project,
-        jobId: job.id,
-        mediaAttemptId: input.attemptId,
-        workerId: worker.id,
-        workerInputEncryptionPublicKeyPem: worker.inputEncryptionPublicKeyPem,
-        field: "media_source",
-        fieldType: "media_playback_source",
-        status: "pending",
-        expiresAt: after(this.#clock, 60),
-        createdAt: timestamp,
-      };
-      state.inputRequests.set(request.id, request);
-      job.status = "awaiting_input";
-      job.mediaPlaybackReadyAt = undefined;
-      job.mediaPlaybackSourceRequestId = request.id;
-      job.updatedAt = timestamp;
-      state.jobs.set(job.id, job);
-      this.#kernel.event(state, job.project, { kind: "job", id: job.id }, "media_playback.source_requested", { requestId: request.id, refresh: input.refresh === true });
-      return { request: structuredClone(request), job: structuredClone(job) };
-    });
-  }
-
-  /** Mark a local media worker's in-memory source session usable after it consumed a ciphertext. */
-  public async markMediaPlaybackReady(
-    input: { jobId: JobId; workerId: Worker["id"]; attemptId: AttemptId; requestId: EphemeralInputRequest["id"] },
-    actor?: Principal,
-  ): Promise<JobResponse> {
-    return this.#store.transact((state) => {
-      const job = this.#kernel.job(state, input.jobId);
-      const worker = this.#kernel.worker(state, input.workerId);
-      this.#kernel.authorizeWorker(state, actor, worker, "mark_media_playback_ready");
-      if (
-        job.runtime !== "media-playback" ||
-        job.workerId !== input.workerId ||
-        job.mediaAttemptId !== input.attemptId
-      ) {
-        throw new FabricError("invalid_state", "media playback task is not active for this worker attempt", 409);
-      }
-      if (job.mediaPlaybackSourceRequestId !== input.requestId) {
-        throw new FabricError("authorization_denied", "media playback readiness does not match the active source request", 403);
-      }
-      if (job.status !== "running") {
-        throw new FabricError("invalid_state", "media playback task is awaiting its current encrypted source", 409);
-      }
-      const sourceRequest = this.#kernel.inputRequest(state, input.requestId);
-      if (
-        sourceRequest.jobId !== job.id ||
-        sourceRequest.mediaAttemptId !== input.attemptId ||
-        sourceRequest.workerId !== worker.id ||
-        sourceRequest.field !== "media_source" ||
-        sourceRequest.fieldType !== "media_playback_source" ||
-        sourceRequest.status !== "consumed"
-      ) {
-        throw new FabricError("invalid_state", "media playback source has not been consumed for this exact request", 409);
-      }
-      job.mediaPlaybackReadyAt = now(this.#clock);
-      job.updatedAt = job.mediaPlaybackReadyAt;
-      state.jobs.set(job.id, job);
-      this.#kernel.event(state, job.project, { kind: "job", id: job.id }, "media_playback.ready", { workerId: worker.id });
-      return jobResponse(job);
-    });
-  }
-
-  /**
-   * Resolve a live playback binding for the public capability gateway. The caller's bearer
-   * capability is authenticated separately, so this method deliberately accepts no principal.
-   */
-  public async getActiveMediaPlaybackBinding(
-    jobId: JobId,
-    expected: { workerId: Worker["id"]; attemptId: AttemptId },
-  ): Promise<ActiveMediaPlaybackBinding> {
-    return this.#store.read((state) => {
-      const job = this.#kernel.job(state, jobId);
-      if (
-        job.runtime !== "media-playback" ||
-        job.status !== "running" ||
-        job.mediaPlaybackSourceRequestId === undefined ||
-        job.mediaPlaybackReadyAt === undefined ||
-        job.workerId !== expected.workerId ||
-        job.mediaAttemptId !== expected.attemptId ||
-        asDate(job.expiresAt) <= this.#clock.now().getTime()
-      ) {
-        throw new FabricError("invalid_state", "media playback session is unavailable", 409);
-      }
-      const sourceRequest = this.#kernel.inputRequest(state, job.mediaPlaybackSourceRequestId);
-      if (
-        sourceRequest.status !== "consumed" ||
-        sourceRequest.jobId !== job.id ||
-        sourceRequest.mediaAttemptId !== expected.attemptId ||
-        sourceRequest.workerId !== expected.workerId ||
-        sourceRequest.field !== "media_source" ||
-        sourceRequest.fieldType !== "media_playback_source"
-      ) {
-        throw new FabricError("invalid_state", "media playback source is no longer bound to this active attempt", 409);
-      }
-      const worker = this.#kernel.worker(state, expected.workerId);
-      if (worker.health !== "healthy" || !worker.mediaPlaybackEndpoint) {
-        throw new FabricError("worker_unavailable", "media playback worker is unavailable", 503);
-      }
-      return { job: structuredClone(job), worker: structuredClone(worker), attemptId: expected.attemptId };
-    });
-  }
-
-  /** Project-authorized access check used before issuing a volatile public playback capability. */
-  public async getProjectMediaPlaybackBinding(jobId: JobId, actor?: Principal): Promise<ActiveMediaPlaybackBinding> {
-    return this.#store.read((state) => {
-      const job = this.#kernel.job(state, jobId);
-      this.#kernel.authorizeProject(state, actor, job.project, "read_media_playback", job.id);
-      if (job.runtime !== "media-playback" || !job.workerId || !job.mediaAttemptId) {
-        throw new FabricError("invalid_state", "job is not an active media playback session", 409);
-      }
-      if (job.status !== "running" || job.mediaPlaybackSourceRequestId === undefined || job.mediaPlaybackReadyAt === undefined || asDate(job.expiresAt) <= this.#clock.now().getTime()) {
-        throw new FabricError("invalid_state", "media playback session is unavailable", 409);
-      }
-      const sourceRequest = this.#kernel.inputRequest(state, job.mediaPlaybackSourceRequestId);
-      if (
-        sourceRequest.status !== "consumed" ||
-        sourceRequest.jobId !== job.id ||
-        sourceRequest.mediaAttemptId !== job.mediaAttemptId ||
-        sourceRequest.workerId !== job.workerId ||
-        sourceRequest.field !== "media_source" ||
-        sourceRequest.fieldType !== "media_playback_source"
-      ) {
-        throw new FabricError("invalid_state", "media playback source is no longer bound to this active attempt", 409);
-      }
-      const worker = this.#kernel.worker(state, job.workerId);
-      if (worker.health !== "healthy" || !worker.mediaPlaybackEndpoint) throw new FabricError("worker_unavailable", "media playback worker is unavailable", 503);
-      return { job: structuredClone(job), worker: structuredClone(worker), attemptId: job.mediaAttemptId };
-    });
-  }
-
-  /**
-   * Reserve the storage expiry before a media worker uploads bytes. The value is persisted on the
-   * job so a crashed manager can retry the same immutable object key without changing its S3
-   * metadata. It is intentionally not part of a public job response.
-   */
-  public async reserveMediaArtifactExpiry(jobId: JobId, workerId: Worker["id"], attemptId: AttemptId, actor?: Principal): Promise<{ job: Job; expiresAt: string }> {
-    return this.#store.transact((state) => {
-      const job = this.#kernel.job(state, jobId);
-      const worker = this.#kernel.worker(state, workerId);
-      this.#kernel.authorizeWorker(state, actor, worker, "reserve_media_artifact_expiry");
-      if (
-        job.runtime !== "media-relay" ||
-        job.workerId !== workerId ||
-        job.mediaAttemptId !== attemptId ||
-        job.status !== "running" ||
-        !job.assignmentClaimedAt
-      ) throw new FabricError("invalid_state", "media task is not active on this worker", 409);
-      const policy = this.#kernel.artifactPolicy(state, job.artifactPolicyRef);
-      const currentTime = this.#clock.now().getTime();
-      if (job.mediaArtifactExpiresAt === undefined) {
-        job.mediaArtifactExpiresAt = after(this.#clock, policy.retentionDays * 86_400);
-        job.updatedAt = now(this.#clock);
-        state.jobs.set(job.id, job);
-        this.#kernel.event(state, job.project, { kind: "job", id: job.id }, "media_artifact.expiry_reserved", {});
-      }
-      if (!Number.isFinite(asDate(job.mediaArtifactExpiresAt)) || asDate(job.mediaArtifactExpiresAt) <= currentTime) {
-        throw new FabricError("deadline_exceeded", "media artifact retention window has expired", 409);
-      }
-      return { job: structuredClone(job), expiresAt: job.mediaArtifactExpiresAt };
-    });
-  }
-
   public async registerExternalCdpConnection(sessionId: BrowserSessionId, capability: string): Promise<void> {
     await this.#store.transact((state) => {
       const session = this.#kernel.session(state, sessionId);
@@ -1443,7 +1072,6 @@ export class BrowserScheduler {
       job.failureReason = "cancelled by client";
       state.jobs.set(job.id, job);
       if (job.leaseId) this.#kernel.releaseLease(state, this.#kernel.lease(state, job.leaseId));
-      this.#kernel.releaseMediaTask(state, job);
       this.#kernel.finishAttempt(state, job, "cancelled");
       this.#kernel.cancelInputRequests(state, { jobId: job.id });
       this.#kernel.event(state, job.project, { kind: "job", id: job.id }, "job.cancelled", {});
@@ -1459,13 +1087,6 @@ export class BrowserScheduler {
       if (job.status !== "awaiting_manual" && job.status !== "awaiting_input") {
         throw new FabricError("invalid_state", `cannot resume a ${job.status} job`, 409);
       }
-      // Playback source waits are a Fabric-internal encrypted handoff, not a caller-controlled
-      // pause. Letting a client resume it would orphan the pending source request while retaining
-      // a running attempt/capacity reservation. Media retries always release and requeue through
-      // the dedicated worker/recovery path instead.
-      if (isMediaRuntime(job.runtime)) {
-        throw new FabricError("invalid_state", "media jobs cannot be resumed through the generic job lifecycle", 409);
-      }
       if (asDate(job.expiresAt) <= this.#clock.now().getTime()) throw new FabricError("invalid_state", "job has expired", 409);
       const activeLease = job.leaseId ? state.leases.get(job.leaseId) : undefined;
       const assignedWorker = job.workerId ? state.workers.get(job.workerId) : undefined;
@@ -1476,7 +1097,6 @@ export class BrowserScheduler {
         job.status = "running";
       } else {
         if (activeLease) this.#kernel.releaseLease(state, activeLease);
-        this.#kernel.releaseMediaTask(state, job);
         job.status = "queued";
         job.workerId = undefined;
         job.leaseId = undefined;
@@ -1493,71 +1113,16 @@ export class BrowserScheduler {
       const job = this.#kernel.job(state, jobId);
       this.#kernel.authorizeAssignedWorker(state, actor, job.workerId, "complete_job", jobId);
       if (isTerminalJob(job.status)) throw new FabricError("invalid_state", `job is already ${job.status}`, 409);
-      if (isMediaRuntime(job.runtime)) {
-        throw new FabricError("invalid_state", "media jobs must complete through their Fabric-owned media path", 409);
-      }
       assertDurablePayload(result);
       job.status = "succeeded";
       job.result = structuredClone(result);
       job.updatedAt = now(this.#clock);
       state.jobs.set(job.id, job);
       if (job.leaseId) this.#kernel.releaseLease(state, this.#kernel.lease(state, job.leaseId));
-      this.#kernel.releaseMediaTask(state, job);
       this.#kernel.finishAttempt(state, job, "succeeded");
       this.#kernel.cancelInputRequests(state, { jobId: job.id });
       this.#kernel.event(state, job.project, { kind: "job", id: job.id }, "job.succeeded", {});
       this.#kernel.audit(state, actor, job.project, "job.completed", { kind: "job", id: job.id }, "succeeded", {});
-      return jobResponse(job);
-    });
-  }
-
-  /**
-   * Complete a media-only job after the manager has verified the receipt against a Fabric-owned
-   * immutable artifact. Generic worker completion is deliberately unavailable for this runtime.
-   */
-  public async completeMediaTask(jobId: JobId, workerId: Worker["id"], attemptId: AttemptId, result: Record<string, unknown>, actor?: Principal): Promise<JobResponse> {
-    return this.#store.transact((state) => {
-      const job = this.#kernel.job(state, jobId);
-      const worker = this.#kernel.worker(state, workerId);
-      this.#kernel.authorizeWorker(state, actor, worker, "complete_media_task");
-      if (
-        job.runtime !== "media-relay" ||
-        job.workerId !== workerId ||
-        job.mediaAttemptId !== attemptId ||
-        job.status !== "running" ||
-        !job.assignmentClaimedAt
-      ) throw new FabricError("invalid_state", "media task is no longer active for this attempt", 409);
-      assertDurablePayload(result);
-      const artifactId = result.artifactId;
-      const kind = result.kind;
-      const contentType = result.contentType;
-      const sizeBytes = result.sizeBytes;
-      const sha256 = result.sha256;
-      if (
-        typeof artifactId !== "string" ||
-        typeof kind !== "string" ||
-        typeof contentType !== "string" ||
-        !Number.isSafeInteger(sizeBytes) ||
-        typeof sha256 !== "string"
-      ) throw new FabricError("validation_failed", "media completion result is invalid", 400);
-      const artifact = state.artifacts.get(artifactId as Artifact["id"]);
-      if (
-        !artifact ||
-        artifact.jobId !== job.id ||
-        artifact.kind !== kind ||
-        artifact.mimeType !== contentType ||
-        artifact.sizeBytes !== sizeBytes ||
-        artifact.sha256 !== sha256
-      ) throw new FabricError("conflict", "media completion does not match an immutable Fabric artifact", 409);
-      job.status = "succeeded";
-      job.result = structuredClone(result);
-      job.updatedAt = now(this.#clock);
-      state.jobs.set(job.id, job);
-      this.#kernel.releaseMediaTask(state, job);
-      this.#kernel.finishAttempt(state, job, "succeeded");
-      this.#kernel.cancelInputRequests(state, { jobId: job.id });
-      this.#kernel.event(state, job.project, { kind: "job", id: job.id }, "job.succeeded", {});
-      this.#kernel.audit(state, actor, job.project, "media_task.completed", { kind: "job", id: job.id }, "succeeded", {});
       return jobResponse(job);
     });
   }
@@ -1568,12 +1133,6 @@ export class BrowserScheduler {
       const job = this.#kernel.job(state, jobId);
       this.#kernel.authorizeAssignedWorker(state, actor, job.workerId, "retry_job", jobId);
       if (job.status !== "running") throw new FabricError("invalid_state", `cannot retry a ${job.status} job`, 409);
-      // A media retry must invalidate the old attempt-bound result/playback capability, release
-      // its media slot, and be redispatched. The generic in-place retry intentionally retains a
-      // browser lease, so applying it here would leave job.mediaAttemptId stale.
-      if (isMediaRuntime(job.runtime)) {
-        throw new FabricError("invalid_state", "media jobs retry only through Fabric media-task recovery", 409);
-      }
       const recipe = this.#kernel.recipe(state, job.recipeRef) as RecipeDefinition;
       const attempts = [...state.attempts.values()].filter((attempt) => attempt.jobId === job.id);
       if (attempts.length >= recipe.maxAttempts) throw new FabricError("conflict", "recipe retry budget is exhausted", 409);
@@ -1589,18 +1148,11 @@ export class BrowserScheduler {
       const job = this.#kernel.job(state, jobId);
       this.#kernel.authorizeAssignedWorker(state, actor, job.workerId, "fail_job", jobId);
       if (isTerminalJob(job.status)) throw new FabricError("invalid_state", `job is already ${job.status}`, 409);
-      // Generic failure permits `awaiting_manual`, which deliberately retains a browser lease.
-      // Media tasks have no browser lease and must instead release their attempt-bound capacity
-      // via failMediaTask so no signed result or playback capability outlives the assignment.
-      if (isMediaRuntime(job.runtime)) {
-        throw new FabricError("invalid_state", "media jobs must use the Fabric media-task failure lifecycle", 409);
-      }
       job.status = status;
       job.failureReason = safeFailureReason(reason);
       job.updatedAt = now(this.#clock);
       state.jobs.set(job.id, job);
       if (status !== "awaiting_manual" && job.leaseId) this.#kernel.releaseLease(state, this.#kernel.lease(state, job.leaseId));
-      if (status !== "awaiting_manual") this.#kernel.releaseMediaTask(state, job);
       if (status !== "awaiting_manual") this.#kernel.finishAttempt(state, job, "failed");
       if (status !== "awaiting_manual") this.#kernel.cancelInputRequests(state, { jobId: job.id });
       this.#kernel.event(state, job.project, { kind: "job", id: job.id }, `job.${status}`, { reason: job.failureReason });
@@ -1691,11 +1243,10 @@ export class BrowserScheduler {
         throw new FabricError("invalid_state", "input request has expired", 409);
       }
       if (!value || value.length > 16_384) throw new FabricError("validation_failed", "input value must be non-empty and at most 16KiB", 400);
-      if (!request.leaseId) throw new FabricError("validation_failed", "media playback sources must be supplied as encrypted envelopes", 400);
       if (!this.#allowPlaintextEphemeralInputs || this.#ephemeralInputVault.putEnvelope) {
         throw new FabricError("validation_failed", "this scheduler uses encrypted input envelopes; call provideEncryptedEphemeralInput", 400);
       }
-      this.#ephemeralInputVault.put(request, inputRequestWorker(this.#kernel, state, request), value);
+      this.#ephemeralInputVault.put(request, this.#kernel.lease(state, request.leaseId).workerId, value);
       this.#kernel.markInputSupplied(state, request);
       this.#kernel.event(state, request.project, { kind: request.jobId ? "job" : "browser_session", id: request.jobId ?? request.sessionId! }, "ephemeral_input.supplied", { field: request.field, fieldType: request.fieldType });
       return { request: structuredClone(request) };
@@ -1717,7 +1268,7 @@ export class BrowserScheduler {
       if (request.status === "supplied") return { request: structuredClone(request) };
       if (request.status !== "pending") throw new FabricError("invalid_state", `input request is ${request.status}`, 409);
       if (request.expiresAt !== envelope.expiresAt || envelope.requestId !== request.id) throw new FabricError("authorization_denied", "encrypted input envelope does not match the request", 403);
-      const assignedWorkerId = inputRequestWorker(this.#kernel, state, request);
+      const assignedWorkerId = this.#kernel.lease(state, request.leaseId).workerId;
       if (envelope.workerId !== assignedWorkerId) throw new FabricError("authorization_denied", "encrypted input envelope is addressed to another worker", 403);
       if (asDate(request.expiresAt) <= this.#clock.now().getTime()) throw new FabricError("invalid_state", "input request has expired", 409);
       this.#ephemeralInputVault.putEnvelope(envelope, request);
@@ -1731,8 +1282,7 @@ export class BrowserScheduler {
   public async consumeEphemeralInput(requestId: EphemeralInputRequest["id"], actor?: Principal): Promise<string> {
     return this.#store.transact((state) => {
       const request = this.#kernel.inputRequest(state, requestId);
-      if (!request.leaseId) throw new FabricError("validation_failed", "media playback sources must be consumed by an encrypted worker channel", 400);
-      const assignedWorkerId = inputRequestWorker(this.#kernel, state, request);
+      const assignedWorkerId = this.#kernel.lease(state, request.leaseId).workerId;
       this.#kernel.authorizeAssignedWorker(state, actor, assignedWorkerId, "consume_ephemeral_input", requestId);
       if (request.status !== "supplied") {
         this.#ephemeralInputVault.discard(request.id);
@@ -1753,7 +1303,7 @@ export class BrowserScheduler {
     return this.#store.transact((state) => {
       const request = this.#kernel.inputRequest(state, requestId);
       this.#kernel.authorizeWorker(state, actor, this.#kernel.worker(state, workerId), "take_encrypted_ephemeral_input");
-      if (inputRequestWorker(this.#kernel, state, request) !== workerId) throw new FabricError("authorization_denied", "input request is assigned to another worker", 403);
+      if (this.#kernel.lease(state, request.leaseId).workerId !== workerId) throw new FabricError("authorization_denied", "input request is assigned to another worker", 403);
       if (!this.#ephemeralInputVault.takeEnvelope) throw new FabricError("validation_failed", "encrypted ephemeral input is not configured", 400);
       if (request.status !== "supplied") throw new FabricError("invalid_state", `input request is ${request.status}`, 409);
       const envelope = this.#ephemeralInputVault.takeEnvelope(request, workerId);
@@ -1770,7 +1320,7 @@ export class BrowserScheduler {
     await this.#store.transact((state) => {
       const request = this.#kernel.inputRequest(state, requestId);
       this.#kernel.authorizeWorker(state, actor, this.#kernel.worker(state, workerId), "mark_encrypted_input_consumed");
-      if (inputRequestWorker(this.#kernel, state, request) !== workerId) throw new FabricError("authorization_denied", "input request is assigned to another worker", 403);
+      if (this.#kernel.lease(state, request.leaseId).workerId !== workerId) throw new FabricError("authorization_denied", "input request is assigned to another worker", 403);
       if (request.status !== "supplied") throw new FabricError("invalid_state", `input request is ${request.status}`, 409);
       request.status = "consumed";
       request.resolvedAt = now(this.#clock);
@@ -1801,27 +1351,10 @@ export class BrowserScheduler {
     return this.#store.transact((state) => {
       const hasSessionOwner = input.sessionId !== undefined;
       const hasJobOwner = input.jobId !== undefined;
-      const projectScopedManifest = !hasSessionOwner && !hasJobOwner && input.kind === "media_manifest" && input.project !== undefined;
-      if (hasSessionOwner === hasJobOwner && !projectScopedManifest) {
-        throw new FabricError("validation_failed", "artifact must belong to exactly one session/job or be a project-scoped media manifest", 400);
-      }
+      if (hasSessionOwner === hasJobOwner) throw new FabricError("validation_failed", "artifact must belong to exactly one session or job", 400);
       const sessionOwner = input.sessionId ? this.#kernel.session(state, input.sessionId) : undefined;
       const jobOwner = input.jobId ? this.#kernel.job(state, input.jobId) : undefined;
-      const project = sessionOwner?.project ?? jobOwner?.project ?? input.project;
-      if (!project) throw new FabricError("validation_failed", "artifact must belong to a session or job", 400);
-      if (input.project !== undefined && input.project !== project) throw new FabricError("authorization_denied", "artifact project does not match its owner", 403);
-      if (projectScopedManifest && input.profileRef !== undefined) throw new FabricError("validation_failed", "a project-scoped media manifest cannot reference a browser profile", 400);
-      if (input.expectedWorkerId !== undefined) {
-        if (
-          !jobOwner ||
-          jobOwner.runtime !== "media-relay" ||
-          jobOwner.workerId !== input.expectedWorkerId ||
-          (input.expectedMediaAttemptId !== undefined && jobOwner.mediaAttemptId !== input.expectedMediaAttemptId) ||
-          jobOwner.status !== "running"
-        ) {
-          throw new FabricError("invalid_state", "media artifact result is no longer assigned to this worker", 409);
-        }
-      }
+      const project = (sessionOwner?.project ?? jobOwner?.project)!;
       // An artifact has exactly one owner. Do not compare a valid session profile against an
       // absent job owner (or vice versa): optional chaining turns that into an accidental denial.
       if (input.profileRef && sessionOwner && sessionOwner.profileRef !== input.profileRef) throw new FabricError("authorization_denied", "artifact profile does not match session profile", 403);
@@ -1831,10 +1364,9 @@ export class BrowserScheduler {
       if (!safeArtifactObjectKey.test(input.objectKey) || input.objectKey.includes("//") || input.objectKey.includes("..")) throw new FabricError("validation_failed", "artifact object key is invalid", 400);
       if (typeof input.mimeType !== "string" || !input.mimeType || input.mimeType.length > 255 || /[\0\r\n]/.test(input.mimeType)) throw new FabricError("validation_failed", "artifact MIME type is invalid", 400);
       if (!Number.isInteger(input.sizeBytes) || input.sizeBytes < 0) throw new FabricError("validation_failed", "artifact size must be non-negative", 400);
-      const artifactPolicyRef = sessionOwner?.artifactPolicyRef ?? jobOwner?.artifactPolicyRef ?? input.artifactPolicyRef;
-      const artifactPolicy = artifactPolicyRef ? this.#kernel.artifactPolicy(state, artifactPolicyRef) : undefined;
-      if (!artifactPolicy?.allowedKinds.includes(input.kind)) throw new FabricError("validation_failed", `artifact kind ${input.kind} is not allowed by the owning policy`, 400);
-      const defaultExpiry = after(this.#clock, (artifactPolicy?.retentionDays ?? 30) * 24 * 60 * 60);
+      const artifactPolicy = this.#kernel.artifactPolicy(state, (sessionOwner?.artifactPolicyRef ?? jobOwner?.artifactPolicyRef)!);
+      if (!artifactPolicy.allowedKinds.includes(input.kind)) throw new FabricError("validation_failed", `artifact kind ${input.kind} is not allowed by the owning policy`, 400);
+      const defaultExpiry = after(this.#clock, artifactPolicy.retentionDays * 24 * 60 * 60);
       const expiresAt = input.expiresAt ?? defaultExpiry;
       if (!Number.isFinite(asDate(expiresAt)) || asDate(expiresAt) <= this.#clock.now().getTime()) throw new FabricError("validation_failed", "artifact expiry is invalid", 400);
       // A caller may shorten retention for a bounded workflow but cannot turn this internal field

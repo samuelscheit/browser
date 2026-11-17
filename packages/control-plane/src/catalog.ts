@@ -8,12 +8,11 @@ import {
   type ChallengeHandlerSet,
   type EgressPolicy,
   type EgressRoute,
-  type EgressSidecarListener,
   type ProjectId,
   type RuntimeFamily,
   type TrafficClass,
 } from "@browser-fabric/contracts";
-import { assertEgressSidecarRouting, builtInChallengeSets, builtInEgressPolicies, makeChallengeSet, makeEgressPolicy } from "@browser-fabric/policy";
+import { builtInChallengeSets, builtInEgressPolicies, makeChallengeSet, makeEgressPolicy } from "@browser-fabric/policy";
 import { builtInRecipes, makeRecipe, type RecipeDefinition, type TypedOperationSpec } from "@browser-fabric/recipes";
 
 /**
@@ -89,7 +88,6 @@ function optional<T>(raw: Json, key: string, parse: (value: unknown) => T): T | 
 
 const namePattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const fieldPattern = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
-const hostnameSuffixPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 const proxyRefPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 function typedOperation(value: unknown, path: string): TypedOperationSpec {
@@ -148,7 +146,7 @@ function recipe(value: unknown, path: string): RecipeDefinition {
     ...(raw.version === undefined ? {} : { version: integer(raw.version, `${path}.version`, 1, 9999) }),
     runtime: oneOf(raw.runtime, `${path}.runtime`, runtimeFamilies) as RuntimeFamily,
     profileFamily: string(raw.profileFamily, `${path}.profileFamily`, namePattern),
-    mode: oneOf(raw.mode, `${path}.mode`, ["headless", "headful", "interactive"] as const),
+    mode: oneOf(raw.mode, `${path}.mode`, ["headless", "interactive"] as const),
     access,
     ...(challengeHandlerSetRef === undefined ? {} : { challengeHandlerSetRef }),
     ...(typedOperations === undefined ? {} : { typedOperations }),
@@ -182,40 +180,20 @@ function route(value: unknown, path: string): EgressRoute {
   return { kind, reason: string(raw.reason, `${path}.reason`, undefined, 256) };
 }
 
-function listener(value: unknown, path: string): EgressSidecarListener {
-  const raw = object(value, path);
-  onlyKeys(raw, path, ["id", "port"]);
-  return { id: string(raw.id, `${path}.id`, namePattern), port: integer(raw.port, `${path}.port`, 1_024, 65_535) };
-}
-
 function egressPolicy(value: unknown, path: string): EgressPolicy {
   const raw = object(value, path);
-  onlyKeys(raw, path, ["name", "version", "routes", "constraints", "sidecar", "proxyFallbackRefs", "directExceptionHostnames"]);
+  onlyKeys(raw, path, ["name", "version", "routes"]);
   const routesRaw = object(raw.routes, `${path}.routes`);
   const routes: Partial<Record<TrafficClass, EgressRoute>> = {};
   for (const [trafficClass, entry] of Object.entries(routesRaw)) {
     routes[oneOf(trafficClass, `${path}.routes key`, trafficClasses)] = route(entry, `${path}.routes.${trafficClass}`);
   }
   if (Object.keys(routes).length === 0) fail(`${path}.routes must route at least one traffic class`);
-  const constraintsRaw = object(raw.constraints ?? {}, `${path}.constraints`);
-  onlyKeys(constraintsRaw, `${path}.constraints`, ["preserveProxyAffinity", "disableServiceWorkersInProxyMode", "allowDirectMediaRelay"]);
-  const flag = (key: string) => constraintsRaw[key] === undefined ? false : boolean(constraintsRaw[key], `${path}.constraints.${key}`);
-  const sidecarRaw = object(raw.sidecar, `${path}.sidecar`);
-  onlyKeys(sidecarRaw, `${path}.sidecar`, ["listener", "directListener"]);
-  const directListener = optional(sidecarRaw, "directListener", (entry) => listener(entry, `${path}.sidecar.directListener`));
-  const proxyFallbackRefs = optional(raw, "proxyFallbackRefs", (entry) => strings(entry, `${path}.proxyFallbackRefs`, 8, proxyRefPattern));
-  const directExceptionHostnames = optional(raw, "directExceptionHostnames", (entry) => strings(entry, `${path}.directExceptionHostnames`, 32, hostnameSuffixPattern));
-  const policy = makeEgressPolicy({
+  return makeEgressPolicy({
     name: string(raw.name, `${path}.name`, namePattern),
     ...(raw.version === undefined ? {} : { version: integer(raw.version, `${path}.version`, 1, 9999) }),
     routes,
-    constraints: { preserveProxyAffinity: flag("preserveProxyAffinity"), disableServiceWorkersInProxyMode: flag("disableServiceWorkersInProxyMode"), allowDirectMediaRelay: flag("allowDirectMediaRelay") },
-    sidecar: { listener: listener(sidecarRaw.listener, `${path}.sidecar.listener`), ...(directListener === undefined ? {} : { directListener }) },
-    ...(proxyFallbackRefs === undefined ? {} : { proxyFallbackRefs }),
-    ...(directExceptionHostnames === undefined ? {} : { directExceptionHostnames }),
   });
-  assertEgressSidecarRouting(policy);
-  return policy;
 }
 
 function challengeHandler(value: unknown, path: string): ChallengeHandler {

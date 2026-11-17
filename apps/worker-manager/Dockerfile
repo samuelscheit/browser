@@ -9,6 +9,6 @@ COPY packages ./packages
 COPY deploy ./deploy
 RUN bun install --frozen-lockfile
 # The controller is the single narrowly-scoped trusted component allowed to use the local Docker
-# API. Browser and media containers never inherit this socket or the manager image.
+# API. Browser containers never inherit this socket or the manager image.
 ENV HOME=/tmp
 CMD ["bun", "apps/worker-manager/src/server.ts"]

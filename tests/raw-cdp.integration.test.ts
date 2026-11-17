@@ -91,7 +91,7 @@ describe("real browser-level CDP compatibility", () => {
     await scheduler.registerWorker(worker);
     const profile = makeProfile(worker);
     await scheduler.createProfile(profile);
-    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway-integration", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 });
+    const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway-integration", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 });
     const supervisor = new ChromiumProcessSupervisor({ executablePath, startupTimeoutMs: 20_000, cwd: "/tmp" });
     const spec: BrowserContainerSpec = {
       workerId: worker.id,
@@ -113,7 +113,7 @@ describe("real browser-level CDP compatibility", () => {
       browserProcess = await supervisor.start(spec);
       const [assignment] = await scheduler.dispatch();
       const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
-      await scheduler.claimAssignment(worker.id, assignment!.lease!.id, undefined, workerActor);
+      await scheduler.claimAssignment(worker.id, assignment!.lease!.id, workerActor);
       await scheduler.markLeaseStarted(assignment!.lease!.id, worker.id, workerActor);
       const internal = (await scheduler.store.snapshot()).sessions.get(session.id as never)!;
       const capability = new URL(internal.cdpEndpoint!).searchParams.get("cap")!;
@@ -153,25 +153,24 @@ describe("real browser-level CDP compatibility", () => {
       id: "worker_local_federated" as never,
       isLocal: true,
       capacity: 1,
-      mediaCapacity: 0,
       cdpRelayEndpoint: "ws://127.0.0.1:9222",
       volumeNames: ["profile-federated"],
       capabilities: {
         ...makeWorker().capabilities,
-        runtimeFamilies: ["chromium-cdp"],
-        recipeRefs: ["recipe_interactive-chromium@1" as never],
+        runtimeFamilies: ["chrome"],
+        recipeRefs: ["recipe_chrome@1" as never],
         supportsInteractive: true,
-        supportedProfileFamilies: ["interactive"],
+        supportedProfileFamilies: ["default"],
       },
     });
     await scheduler.registerWorker(worker);
-    const profile = makeProfile(worker, { ref: "profile_federated" as never, profileFamily: "interactive", volumeName: "profile-federated" });
+    const profile = makeProfile(worker, { ref: "profile_federated" as never, profileFamily: "default", volumeName: "profile-federated" });
     await scheduler.createProfile(profile, TEST_PRINCIPAL);
     const session = await scheduler.createBrowserSession({
       project: TEST_PROJECT,
       idempotencyKey: "federated-gateway-integration",
-      runtime: "chromium-cdp",
-      browserRecipeRef: "recipe_interactive-chromium@1" as never,
+      runtime: "chrome",
+      browserRecipeRef: "recipe_chrome@1" as never,
       profileRef: profile.ref,
       leaseMode: "interactive",
       egressPolicyRef: "egress_direct@1" as never,
@@ -181,7 +180,7 @@ describe("real browser-level CDP compatibility", () => {
     const [allocated] = await scheduler.dispatch();
     if (!allocated?.lease) throw new Error("federated session was not allocated");
     const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
-    const claimed = await scheduler.claimAssignment(worker.id, allocated.lease.id, undefined, workerActor);
+    const claimed = await scheduler.claimAssignment(worker.id, allocated.lease.id, workerActor);
     const claimedLeaseId = claimed.lease?.id;
     if (!claimedLeaseId) throw new Error("federated assignment lost its lease");
     const supervisor = new ChromiumProcessSupervisor({ executablePath, startupTimeoutMs: 20_000, cwd: "/tmp", profileRoot: `/tmp/fabric-federated-${crypto.randomUUID()}` });

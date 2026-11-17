@@ -56,18 +56,6 @@ export function parseWorkerRegistration(value: unknown, certificateFingerprint: 
   const isLocal = input.isLocal === true;
   const capacity = boundedInt(input.capacity, "capacity", 0, isLocal ? 1 : MAX_WORKER_BROWSER_LEASES);
   if (isLocal && (!capabilities.supportsInteractive || capacity !== 1)) throw new FabricError("validation_failed", "local workers must support interactive mode and have capacity one", 400);
-  // A media task is intentionally outside the browser-lease cap, but it is still a bounded
-  // worker resource. Normalize the default here rather than letting a later registration/replay
-  // invent it, so operator manifests have a stable static identity.
-  const mediaCapacity = input.mediaCapacity === undefined
-    ? (isLocal ? 0 : 8)
-    : boundedInt(input.mediaCapacity, "mediaCapacity", 0, 64);
-  const mediaPlaybackEndpoint = input.mediaPlaybackEndpoint === undefined
-    ? undefined
-    : endpoint(input.mediaPlaybackEndpoint, "mediaPlaybackEndpoint", ["https:", "http:"]);
-  if (runtimeList.includes("media-playback" as never) && !mediaPlaybackEndpoint) {
-    throw new FabricError("validation_failed", "media-playback workers require mediaPlaybackEndpoint", 400);
-  }
   let inputEncryptionPublicKeyPem: string | undefined;
   if (input.inputEncryptionPublicKeyPem !== undefined) {
     if (typeof input.inputEncryptionPublicKeyPem !== "string" || input.inputEncryptionPublicKeyPem.length > 8_192) throw new FabricError("validation_failed", "inputEncryptionPublicKeyPem is invalid", 400);
@@ -95,10 +83,8 @@ export function parseWorkerRegistration(value: unknown, certificateFingerprint: 
     ...(enrollmentTokenHash === undefined ? {} : { enrollmentTokenHash }),
     endpoint: endpoint(input.endpoint, "endpoint", ["https:", "http:"]),
     cdpRelayEndpoint: endpoint(input.cdpRelayEndpoint, "cdpRelayEndpoint", ["wss:", "ws:", "https:", "http:"]),
-    ...(mediaPlaybackEndpoint === undefined ? {} : { mediaPlaybackEndpoint }),
     capabilities,
     capacity,
-    mediaCapacity,
     health: "healthy",
     isLocal,
     volumeNames,

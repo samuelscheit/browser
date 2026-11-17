@@ -39,8 +39,8 @@ async function claimedBrowserAssignment() {
   const session = await context.scheduler.createBrowserSession({
     project: TEST_PROJECT,
     idempotencyKey: `managed-browser-${crypto.randomUUID()}`,
-    runtime: "chromium-cdp",
-    browserRecipeRef: "recipe_chromium-cdp@1" as never,
+    runtime: "chrome",
+    browserRecipeRef: "recipe_chrome-headless@1" as never,
     profileRef: context.profile.ref,
     leaseMode: "writer",
     egressPolicyRef: "egress_direct@1" as never,
@@ -49,7 +49,7 @@ async function claimedBrowserAssignment() {
   }, TEST_PRINCIPAL);
   const [allocated] = await context.scheduler.dispatch();
   const actor = { ...TEST_PRINCIPAL, certificateFingerprint: context.worker.certificateFingerprint };
-  const assignment = await context.scheduler.claimAssignment(context.worker.id, allocated!.lease!.id, undefined, actor);
+  const assignment = await context.scheduler.claimAssignment(context.worker.id, allocated!.lease!.id, actor);
   return { ...context, actor, assignment, session };
 }
 
@@ -247,8 +247,8 @@ test("a restarted manager also fails an untracked generic CDP lease", async () =
   const session = await context.scheduler.createBrowserSession({
     project: TEST_PROJECT,
     idempotencyKey: "untracked-generic-browser",
-    runtime: "rebrowser-puppeteer",
-    browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never,
+    runtime: "chrome",
+    browserRecipeRef: "recipe_chrome-headless@1" as never,
     profileRef: context.profile.ref,
     leaseMode: "writer",
     egressPolicyRef: "egress_direct@1" as never,
@@ -257,7 +257,7 @@ test("a restarted manager also fails an untracked generic CDP lease", async () =
   }, TEST_PRINCIPAL);
   const [assignment] = await context.scheduler.dispatch();
   const actor = { ...TEST_PRINCIPAL, certificateFingerprint: context.worker.certificateFingerprint };
-  await context.scheduler.claimAssignment(context.worker.id, assignment!.lease!.id, undefined, actor);
+  await context.scheduler.claimAssignment(context.worker.id, assignment!.lease!.id, actor);
   await context.scheduler.markLeaseStarted(assignment!.lease!.id, context.worker.id, actor);
   const controller = new ManagedWorkerController({
     scheduler: context.scheduler,
@@ -275,8 +275,8 @@ test("a restarted manager releases a claimed generic lease that never reached br
   const session = await context.scheduler.createBrowserSession({
     project: TEST_PROJECT,
     idempotencyKey: "untracked-generic-startup",
-    runtime: "rebrowser-puppeteer",
-    browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never,
+    runtime: "chrome",
+    browserRecipeRef: "recipe_chrome-headless@1" as never,
     profileRef: context.profile.ref,
     leaseMode: "writer",
     egressPolicyRef: "egress_direct@1" as never,
@@ -285,7 +285,7 @@ test("a restarted manager releases a claimed generic lease that never reached br
   }, TEST_PRINCIPAL);
   const [assignment] = await context.scheduler.dispatch();
   const actor = { ...TEST_PRINCIPAL, certificateFingerprint: context.worker.certificateFingerprint };
-  await context.scheduler.claimAssignment(context.worker.id, assignment!.lease!.id, undefined, actor);
+  await context.scheduler.claimAssignment(context.worker.id, assignment!.lease!.id, actor);
   const controller = new ManagedWorkerController({
     scheduler: context.scheduler,
     browserExecutor: { start: async () => ({ processId: "unused" }), stop: async () => undefined },

@@ -22,8 +22,8 @@ function fakeAssignment(worker: Worker, leaseId: string): WorkerAssignment {
       id: "browser-session_local" as never,
       project: TEST_PROJECT,
       idempotencyKey: "local",
-      runtime: "chromium-cdp",
-      browserRecipeRef: "recipe_interactive-chromium@1" as never,
+      runtime: "chrome",
+      browserRecipeRef: "recipe_chrome@1" as never,
       leaseMode: "interactive",
       egressPolicyRef: "egress_direct@1" as never,
       artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
@@ -38,15 +38,15 @@ function fakeAssignment(worker: Worker, leaseId: string): WorkerAssignment {
       updatedAt: "2026-01-01T00:00:00.000Z",
     },
     recipe: {
-      ref: "recipe_interactive-chromium@1" as never,
-      family: "interactive-chromium",
+      ref: "recipe_chrome@1" as never,
+      family: "chrome",
       version: 1,
-      runtime: "chromium-cdp",
+      runtime: "chrome",
       immutableHash: "sha256:test",
       browserImage: "registry.example/chromium@sha256:" + "a".repeat(64),
       browserVersion: "test",
       mode: "interactive",
-      profileFamily: "interactive",
+      profileFamily: "default",
       requiredCapabilities: [],
       launch: { viewport: { width: 1440, height: 1024 }, locale: "en-US", timezone: "UTC", launchFlags: [], extensions: [], initScripts: [], sharedMemoryMiB: 512, downloadsEnabled: true },
       artifactDefaults: [],
@@ -58,7 +58,7 @@ function fakeAssignment(worker: Worker, leaseId: string): WorkerAssignment {
       grants: [TEST_PROJECT],
       workerId: worker.id,
       volumeName: "profile-volume",
-      profileFamily: "interactive",
+      profileFamily: "default",
       volumeGeneration: 1,
       status: "active",
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -67,11 +67,9 @@ function fakeAssignment(worker: Worker, leaseId: string): WorkerAssignment {
     egressPolicy: {
       ref: "egress_direct@1" as never,
       family: "direct",
-      sidecar: { listener: { id: "direct", port: 11000 } },
       version: 1,
       immutableHash: "sha256:test",
       routes: {},
-      constraints: { preserveProxyAffinity: false, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: false },
       createdAt: "2026-01-01T00:00:00.000Z",
     },
     artifactPolicy: { ref: "artifact-policy_standard-30-days@1" as never, retentionDays: 30, allowedKinds: ["screenshot"], createdAt: "2026-01-01T00:00:00.000Z" },
@@ -79,7 +77,7 @@ function fakeAssignment(worker: Worker, leaseId: string): WorkerAssignment {
 }
 
 test("local agent starts the reverse relay before publishing readiness and tears it down first", async () => {
-  const worker = makeWorker({ id: "worker_local" as never, isLocal: true, capacity: 1, volumeNames: ["profile-volume"], capabilities: { ...makeWorker().capabilities, supportsInteractive: true, supportedProfileFamilies: ["interactive"], recipeRefs: ["recipe_interactive-chromium@1" as never], runtimeFamilies: ["chromium-cdp"] } });
+  const worker = makeWorker({ id: "worker_local" as never, isLocal: true, capacity: 1, volumeNames: ["profile-volume"], capabilities: { ...makeWorker().capabilities, supportsInteractive: true, supportedProfileFamilies: ["interactive"], recipeRefs: ["recipe_chrome@1" as never], runtimeFamilies: ["chrome"] } });
   const assignment = fakeAssignment(worker, "browser-lease_local");
   const events: string[] = [];
   const relay: CdpRelayHandle = { connected: true, stop: async () => { events.push("relay-stop"); } };
@@ -104,7 +102,7 @@ test("local agent starts the reverse relay before publishing readiness and tears
 });
 
 test("local agent stops the browser when reverse relay startup fails", async () => {
-  const worker = makeWorker({ id: "worker_local_2" as never, isLocal: true, capacity: 1, volumeNames: ["profile-volume"], capabilities: { ...makeWorker().capabilities, supportsInteractive: true, supportedProfileFamilies: ["interactive"], recipeRefs: ["recipe_interactive-chromium@1" as never], runtimeFamilies: ["chromium-cdp"] } });
+  const worker = makeWorker({ id: "worker_local_2" as never, isLocal: true, capacity: 1, volumeNames: ["profile-volume"], capabilities: { ...makeWorker().capabilities, supportsInteractive: true, supportedProfileFamilies: ["interactive"], recipeRefs: ["recipe_chrome@1" as never], runtimeFamilies: ["chrome"] } });
   const assignment = fakeAssignment(worker, "browser-lease_local_2");
   const events: string[] = [];
   const transport: LocalAgentTransport = {
@@ -119,7 +117,7 @@ test("local agent stops the browser when reverse relay startup fails", async () 
 });
 
 test("local agent fails closed when no outbound relay is configured", async () => {
-  const worker = makeWorker({ id: "worker_local_3" as never, isLocal: true, capacity: 1, volumeNames: ["profile-volume"], capabilities: { ...makeWorker().capabilities, supportsInteractive: true, supportedProfileFamilies: ["interactive"], recipeRefs: ["recipe_interactive-chromium@1" as never], runtimeFamilies: ["chromium-cdp"] } });
+  const worker = makeWorker({ id: "worker_local_3" as never, isLocal: true, capacity: 1, volumeNames: ["profile-volume"], capabilities: { ...makeWorker().capabilities, supportsInteractive: true, supportedProfileFamilies: ["interactive"], recipeRefs: ["recipe_chrome@1" as never], runtimeFamilies: ["chrome"] } });
   const assignment = fakeAssignment(worker, "browser-lease_local_3");
   const events: string[] = [];
   const transport: LocalAgentTransport = { register: async () => {}, heartbeat: async () => {}, activeAssignments: async () => [], nextAssignments: async () => [assignment], claimAssignment: async () => assignment };

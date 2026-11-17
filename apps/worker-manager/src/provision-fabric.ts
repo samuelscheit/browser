@@ -167,7 +167,6 @@ function staticPrincipalEqual(left: Principal, right: Principal): boolean {
 }
 
 function staticWorkerIdentity(worker: ProvisionWorker | Worker): Record<string, unknown> {
-  const mediaCapacity = worker.mediaCapacity ?? (worker.isLocal ? 0 : 8);
   return {
     id: worker.id,
     certificateFingerprint: worker.certificateFingerprint,
@@ -175,10 +174,6 @@ function staticWorkerIdentity(worker: ProvisionWorker | Worker): Record<string, 
     inputEncryptionPublicKeyPem: worker.inputEncryptionPublicKeyPem,
     endpoint: worker.endpoint,
     cdpRelayEndpoint: worker.cdpRelayEndpoint,
-    // A playback-capable worker's private relay address decides where bearer capabilities are
-    // forwarded. It is therefore deployment identity, not mutable heartbeat state: silently
-    // accepting a changed endpoint could route an active player to the wrong worker.
-    mediaPlaybackEndpoint: worker.mediaPlaybackEndpoint,
     capabilities: {
       ...worker.capabilities,
       runtimeFamilies: [...worker.capabilities.runtimeFamilies].sort(),
@@ -186,7 +181,6 @@ function staticWorkerIdentity(worker: ProvisionWorker | Worker): Record<string, 
       supportedProfileFamilies: [...worker.capabilities.supportedProfileFamilies].sort(),
     },
     capacity: worker.capacity,
-    mediaCapacity,
     // Health is runtime state reported by the worker heartbeat. It must not turn a safe,
     // unchanged bootstrap replay into a conflict merely because a worker is temporarily
     // degraded/offline; reconciliation never overwrites that state.

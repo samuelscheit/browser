@@ -6,6 +6,7 @@ import type { TokenCaptchaSolver } from "./captcha-solvers/types";
 import { FabricError } from "@browser-fabric/contracts";
 import { assertFailClosedPac } from "@browser-fabric/policy";
 import { closeBrowserGracefully } from "./cdp-connection";
+import { FABRIC_BROWSER_EXECUTABLE } from "./browser-executable";
 import {
   assertTurnstileGuardianSpec,
   defaultTurnstileGuardianFactory,
@@ -42,10 +43,10 @@ function waitForExit(process: ChromiumProcess): Promise<void> {
 
 function commandPath(spec: BrowserContainerSpec, configuredPath?: string): string {
   const command = spec.command[0];
-  const expected = configuredPath ?? "/usr/bin/chromium";
-  // Generic recipes use the pinned Linux path. A federated local agent may substitute its
+  const expected = configuredPath ?? FABRIC_BROWSER_EXECUTABLE;
+  // Generic recipes use the pinned image path. A federated local agent may substitute its
   // explicitly configured host binary; it cannot substitute an arbitrary path from a job.
-  if (!command || (command !== expected && !(configuredPath && command === "/usr/bin/chromium"))) throw new FabricError("validation_failed", "worker may launch only the pinned Chromium executable", 400);
+  if (!command || (command !== expected && !(configuredPath && command === FABRIC_BROWSER_EXECUTABLE))) throw new FabricError("validation_failed", "worker may launch only the pinned Chromium executable", 400);
   return expected;
 }
 

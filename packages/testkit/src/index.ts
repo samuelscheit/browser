@@ -4,16 +4,15 @@ import { builtInRecipes } from "@browser-fabric/recipes";
 
 /**
  * The catalog test schedulers load: a typed browser recipe (recipe_example-fetch@1), a raw recipe
- * without token solving (recipe_example-guardian-only@1) and two
- * policies that exercise listener selection (egress_example-affinity@1 with a direct-exception
- * host, egress_example-static-direct@1 with direct static assets).
+ * without token solving (recipe_example-guardian-only@1) and a policy that sends static assets
+ * direct (egress_example-static-direct@1).
  */
 export const exampleCatalogDocument = {
   version: 1,
   recipes: [
     {
       name: "example-fetch",
-      runtime: "chromium-cdp",
+      runtime: "chrome",
       profileFamily: "default",
       mode: "headless",
       access: "typed_job",
@@ -21,19 +20,9 @@ export const exampleCatalogDocument = {
       typedOperations: [{ name: "fetch_page", requiredFields: ["url"], allowedFields: ["url", "serialized", "cookieJarRef"], secretInputFields: ["cookie"] }],
       maxAttempts: 2,
     },
-    { name: "example-guardian-only", runtime: "chromium-cdp", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_guardian@1" },
+    { name: "example-guardian-only", runtime: "chrome", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_guardian@1" },
   ],
   egressPolicies: [
-    {
-      name: "example-affinity",
-      routes: {
-        ...Object.fromEntries(["document", "api", "websocket", "static_asset", "provider_handshake", "media_manifest", "media_key", "media_segment", "media_range"].map((trafficClass) => [trafficClass, { kind: "proxy", proxyRef: "affinity", protocol: "socks5h" }])),
-        direct_exception: { kind: "direct" },
-      },
-      constraints: { preserveProxyAffinity: true, allowDirectMediaRelay: true },
-      sidecar: { listener: { id: "affinity", port: 11010 }, directListener: { id: "direct", port: 11000 } },
-      directExceptionHostnames: ["direct.example"],
-    },
     {
       name: "example-static-direct",
       routes: {
@@ -44,8 +33,6 @@ export const exampleCatalogDocument = {
         static_asset: { kind: "direct" },
         direct_exception: { kind: "direct" },
       },
-      constraints: { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: true },
-      sidecar: { listener: { id: "proxy", port: 11001 }, directListener: { id: "direct", port: 11000 } },
     },
   ],
 } as const;
@@ -71,18 +58,15 @@ export function makeWorker(overrides: Partial<Worker> = {}): Worker {
     ...(overrides.inputEncryptionPublicKeyPem === undefined ? {} : { inputEncryptionPublicKeyPem: overrides.inputEncryptionPublicKeyPem }),
     endpoint: overrides.endpoint ?? "https://worker.internal",
     cdpRelayEndpoint: overrides.cdpRelayEndpoint ?? "wss://worker.internal/cdp",
-    ...(overrides.mediaPlaybackEndpoint === undefined ? { mediaPlaybackEndpoint: "http://media-worker.internal:8084" } : { mediaPlaybackEndpoint: overrides.mediaPlaybackEndpoint }),
     capabilities: overrides.capabilities ?? {
       runtimeFamilies: [...runtimeFamilies],
       recipeRefs: [...builtInRecipes, ...exampleCatalog.recipes].map((recipe) => recipe.ref),
       browserVersions: { chromium: "stable" },
-      supportsInteractive: overrides.isLocal ?? false,
-      supportedProfileFamilies: ["default", "interactive", "media"]
+      supportsInteractive: true,
+      supportedProfileFamilies: ["default"]
     },
     capacity: overrides.capacity ?? (overrides.isLocal ? 1 : 3),
     activeLeases: overrides.activeLeases ?? 0,
-    mediaCapacity: overrides.mediaCapacity ?? 8,
-    activeMediaTasks: overrides.activeMediaTasks ?? 0,
     health: overrides.health ?? "healthy",
     isLocal: overrides.isLocal ?? false,
     volumeNames: overrides.volumeNames ?? ["profile-volume", "profile-volume-g1", "profile-volume-g2"],
@@ -120,7 +104,7 @@ export function createTestScheduler(options: { clock?: FakeClock; maxActiveBrows
 export async function bootstrapTestScheduler(options: { localWorker?: boolean } = {}) {
   const context = createTestScheduler();
   await context.scheduler.bootstrap({ projects: [{ id: TEST_PROJECT, name: "Test" }], principals: [TEST_PRINCIPAL] });
-  const worker = options.localWorker ? makeWorker({ id: "worker_local" as Worker["id"], isLocal: true, capacity: 1, mediaCapacity: 0, volumeNames: ["profile-volume"] }) : context.worker;
+  const worker = options.localWorker ? makeWorker({ id: "worker_local" as Worker["id"], isLocal: true, capacity: 1, volumeNames: ["profile-volume"] }) : context.worker;
   await context.scheduler.registerWorker(worker);
   const profile = makeProfile(worker);
   await context.scheduler.createProfile(profile);

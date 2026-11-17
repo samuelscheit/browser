@@ -33,7 +33,7 @@ BEGIN
 
   INSERT INTO fabric_projects(id, name) VALUES ('project_validation', 'Validation');
   INSERT INTO fabric_workers(id, certificate_fingerprint, endpoint, cdp_relay_endpoint, runtime_families, recipe_refs, capacity, cpu_milli, memory_mib, pids, shm_mib, temporary_storage_mib, health, last_heartbeat_at)
-    VALUES ('worker_validation', 'fingerprint', 'https://worker.internal.example', 'http://fabric-browser-{leaseId}:9223', '{chromium-cdp}', '{recipe_chromium-cdp@1}', 4, 1000, 1024, 128, 512, 1024, 'healthy', now());
+    VALUES ('worker_validation', 'fingerprint', 'https://worker.internal.example', 'http://fabric-browser-{leaseId}:9223', '{chrome}', '{recipe_chrome@1}', 4, 1000, 1024, 128, 512, 1024, 'healthy', now());
   BEGIN
     UPDATE fabric_workers SET capacity = 5 WHERE id = 'worker_validation';
     RAISE EXCEPTION 'fabric_workers accepted a capacity above four';
@@ -41,43 +41,50 @@ BEGIN
   END;
   BEGIN
     INSERT INTO fabric_workers(id, certificate_fingerprint, endpoint, cdp_relay_endpoint, runtime_families, recipe_refs, capacity, is_local, cpu_milli, memory_mib, pids, shm_mib, temporary_storage_mib, health, last_heartbeat_at)
-      VALUES ('worker_local', 'fingerprint-local', 'https://local.internal.example', 'http://127.0.0.1:9223', '{chromium-cdp}', '{}', 2, true, 1000, 1024, 128, 512, 1024, 'healthy', now());
+      VALUES ('worker_local', 'fingerprint-local', 'https://local.internal.example', 'http://127.0.0.1:9223', '{chrome}', '{}', 2, true, 1000, 1024, 128, 512, 1024, 'healthy', now());
     RAISE EXCEPTION 'a federated local worker accepted more than one lease';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 
-  -- A media manifest is the only project-scoped (ownerless) artifact.
-  INSERT INTO fabric_artifacts(id, project_id, kind, object_key, sha256, mime_type, size_bytes, expires_at)
-    VALUES ('artifact_manifest', 'project_validation', 'media_manifest', 'manifests/a', 'sha256:' || repeat('a', 64), 'application/json', 10, now() + interval '30 days');
+  -- Every artifact, lease-bound input request and attempt hangs off a real session or job.
+  INSERT INTO fabric_recipes(ref, family, version, immutable_hash, runtime, definition) VALUES ('recipe_chrome@1', 'chrome', 1, 'sha256:x', 'chrome', '{}');
+  INSERT INTO fabric_egress_policies(ref, family, version, immutable_hash, definition) VALUES ('egress_direct@1', 'direct', 1, 'x', '{}');
+  INSERT INTO fabric_artifact_policies(ref, retention_days, allowed_kinds) VALUES ('artifact-policy_standard-30-days@1', 30, '{screenshot}');
+  INSERT INTO fabric_jobs(id, project_id, idempotency_key, recipe_ref, runtime, operation, lease_mode, egress_policy_ref, artifact_policy_ref, status, worker_id, expires_at)
+    VALUES ('job_validation', 'project_validation', 'k', 'recipe_chrome@1', 'chrome', '{}', 'writer', 'egress_direct@1', 'artifact-policy_standard-30-days@1', 'running', 'worker_validation', now() + interval '1 hour');
+  INSERT INTO fabric_browser_leases(id, job_id, project_id, worker_id, mode, status, expires_at)
+    VALUES ('browser-lease_validation', 'job_validation', 'project_validation', 'worker_validation', 'writer', 'active', now() + interval '1 hour');
+  BEGIN
+    INSERT INTO fabric_browser_leases(id, job_id, project_id, worker_id, mode, status, expires_at)
+      VALUES ('browser-lease_second', 'job_validation', 'project_validation', 'worker_validation', 'writer', 'active', now() + interval '1 hour');
+    RAISE EXCEPTION 'a job accepted a second active lease';
+  EXCEPTION WHEN unique_violation THEN NULL;
+  END;
+  INSERT INTO fabric_artifacts(id, project_id, job_id, kind, object_key, sha256, mime_type, size_bytes, expires_at)
+    VALUES ('artifact_shot', 'project_validation', 'job_validation', 'screenshot', 'screenshots/a', 'sha256:' || repeat('a', 64), 'image/png', 10, now() + interval '30 days');
   BEGIN
     INSERT INTO fabric_artifacts(id, project_id, kind, object_key, sha256, mime_type, size_bytes, expires_at)
-      VALUES ('artifact_orphan', 'project_validation', 'screenshot', 'screenshots/a', 'sha256:' || repeat('a', 64), 'image/png', 10, now() + interval '30 days');
-    RAISE EXCEPTION 'an ownerless non-manifest artifact was accepted';
-  EXCEPTION WHEN check_violation THEN NULL;
-  END;
-
-  -- Media attempt ids are shape-checked wherever they are stored.
-  INSERT INTO fabric_recipes(ref, family, version, immutable_hash, runtime, definition) VALUES ('recipe_media-playback@1', 'media-playback', 1, 'sha256:x', 'media-playback', '{}');
-  INSERT INTO fabric_egress_policies(ref, family, version, immutable_hash, definition) VALUES ('egress_direct@1', 'direct', 1, 'x', '{}');
-  INSERT INTO fabric_artifact_policies(ref, retention_days, allowed_kinds) VALUES ('artifact-policy_standard-30-days@1', 30, '{media_manifest}');
-  INSERT INTO fabric_jobs(id, project_id, idempotency_key, recipe_ref, runtime, operation, lease_mode, egress_policy_ref, artifact_policy_ref, status, expires_at)
-    VALUES ('job_validation', 'project_validation', 'k', 'recipe_media-playback@1', 'media-playback', '{}', 'clone', 'egress_direct@1', 'artifact-policy_standard-30-days@1', 'running', now() + interval '1 hour');
-  INSERT INTO fabric_ephemeral_input_requests(id, project_id, job_id, media_attempt_id, field, field_type, status, expires_at)
-    VALUES ('input_ok', 'project_validation', 'job_validation', 'attempt_1', 'source', 'media_playback_source', 'pending', now());
-  BEGIN
-    INSERT INTO fabric_ephemeral_input_requests(id, project_id, job_id, media_attempt_id, field, field_type, status, expires_at)
-      VALUES ('input_bad', 'project_validation', 'job_validation', 'not-an-attempt', 'source', 'media_playback_source', 'pending', now());
-    RAISE EXCEPTION 'an invalid media attempt input request was accepted';
+      VALUES ('artifact_orphan', 'project_validation', 'screenshot', 'screenshots/b', 'sha256:' || repeat('a', 64), 'image/png', 10, now() + interval '30 days');
+    RAISE EXCEPTION 'an ownerless artifact was accepted';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
   BEGIN
-    UPDATE fabric_jobs SET media_attempt_id = 'not-an-attempt' WHERE id = 'job_validation';
-    RAISE EXCEPTION 'an invalid job media attempt id was accepted';
+    INSERT INTO fabric_artifacts(id, project_id, job_id, kind, object_key, sha256, mime_type, size_bytes, expires_at)
+      VALUES ('artifact_kind', 'project_validation', 'job_validation', 'cookie_jar', 'jars/a', 'sha256:' || repeat('a', 64), 'application/json', 10, now() + interval '30 days');
+    RAISE EXCEPTION 'an unknown artifact kind was accepted';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
+  INSERT INTO fabric_ephemeral_input_requests(id, project_id, job_id, lease_id, field, field_type, status, expires_at)
+    VALUES ('input_ok', 'project_validation', 'job_validation', 'browser-lease_validation', 'password', 'password', 'pending', now());
   BEGIN
-    INSERT INTO fabric_ephemeral_input_requests(id, project_id, job_id, media_attempt_id, field, field_type, status, expires_at)
-      VALUES ('input_unknown', 'project_validation', 'job_validation', 'attempt_1', 'f', 'cookie_jar', 'pending', now());
+    INSERT INTO fabric_ephemeral_input_requests(id, project_id, job_id, field, field_type, status, expires_at)
+      VALUES ('input_no_lease', 'project_validation', 'job_validation', 'password', 'password', 'pending', now());
+    RAISE EXCEPTION 'an input request without a lease was accepted';
+  EXCEPTION WHEN not_null_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO fabric_ephemeral_input_requests(id, project_id, job_id, lease_id, field, field_type, status, expires_at)
+      VALUES ('input_unknown', 'project_validation', 'job_validation', 'browser-lease_validation', 'f', 'cookie_jar', 'pending', now());
     RAISE EXCEPTION 'an unknown input field type was accepted';
   EXCEPTION WHEN check_violation THEN NULL;
   END;

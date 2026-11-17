@@ -108,7 +108,7 @@ describe("remote session defaults", () => {
   test("pick the only project, its interactive profile, the interactive recipe and eight CDP clients", () => {
     const input = sessionInput(agentIdentity(), remoteRequest({ ttlSeconds: 3600 }));
     expect(input).toMatchObject({
-      project: "project_agent", runtime: "chromium-cdp", browserRecipeRef: DEFAULT_RECIPE, profileRef: "profile_agent",
+      project: "project_agent", runtime: "chrome", browserRecipeRef: DEFAULT_RECIPE, profileRef: "profile_agent",
       leaseMode: "interactive", egressPolicyRef: DEFAULT_EGRESS, artifactPolicyRef: "artifact-policy_standard-30-days@1",
       ttlSeconds: 3600, maxExternalConnections: 8, metadata: { client: "fabric-cli", name: "remote" },
     });

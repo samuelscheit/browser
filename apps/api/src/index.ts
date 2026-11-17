@@ -11,7 +11,6 @@ import {
 import { ArtifactAccess, ArtifactCollector, ArtifactService, BrowserScheduler, MemoryObjectStore } from "@browser-fabric/control-plane";
 import { parseWorkerRegistration } from "../../worker-manager/src/protocol";
 import type { EncryptedInputBroker } from "@browser-fabric/control-plane";
-import { MediaPlaybackGateway } from "../../media-playback-gateway/src/index";
 
 export interface ApiServerOptions {
   scheduler: BrowserScheduler;
@@ -19,17 +18,13 @@ export interface ApiServerOptions {
   /** Required for application artifact uploads and short-lived artifact downloads. */
   artifactService?: ArtifactService;
   artifactAccess?: ArtifactAccess;
-  /** Authenticated issuer for active media-playback job URLs. It need not reach media workers. */
-  mediaPlaybackGateway?: MediaPlaybackGateway;
   /** Production deployment should derive this only after the trusted edge verifies a credential. */
   authenticate(request: Request): Promise<Principal | undefined> | Principal | undefined;
   corsOrigins?: readonly string[];
 }
 
 const MAX_ARTIFACT_UPLOAD_BYTES = 32 * 1024 * 1024;
-const artifactKinds = new Set<Artifact["kind"]>(["screenshot", "mhtml", "trace", "har", "download", "video", "log", "media_manifest"]);
-const mediaManifestContentType = "application/vnd.browser-fabric.media-manifest+json";
-const defaultArtifactPolicyRef = "artifact-policy_standard-30-days@1";
+const artifactKinds = new Set<Artifact["kind"]>(["screenshot", "mhtml", "trace", "har", "download", "video", "log"]);
 
 function json(body: unknown, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
@@ -95,19 +90,6 @@ function artifactUploadHeaders(request: Request): { kind: Artifact["kind"]; cont
   const label = request.headers.get("x-fabric-artifact-label")?.trim();
   if (label !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(label))) throw new FabricError("validation_failed", "x-fabric-artifact-label is invalid", 400);
   return { kind: kind as Artifact["kind"], contentType, ...(label === undefined ? {} : { label }) };
-}
-
-function mediaManifestUploadHeaders(request: Request): { kind: "media_manifest"; contentType: string; label?: string; artifactPolicyRef: string } {
-  const parsed = artifactUploadHeaders(request);
-  const baseContentType = parsed.contentType.toLowerCase().split(";", 1)[0]?.trim();
-  if (parsed.kind !== "media_manifest" || baseContentType !== mediaManifestContentType) {
-    throw new FabricError("validation_failed", "project media manifest uploads require media_manifest kind and the Fabric media-manifest content type", 415);
-  }
-  const artifactPolicyRef = request.headers.get("x-fabric-artifact-policy-ref")?.trim() || defaultArtifactPolicyRef;
-  if (!/^artifact-policy_[A-Za-z0-9][A-Za-z0-9_.-]*@\d+$/.test(artifactPolicyRef)) {
-    throw new FabricError("validation_failed", "x-fabric-artifact-policy-ref is invalid", 400);
-  }
-  return { ...parsed, kind: "media_manifest", artifactPolicyRef };
 }
 
 function requireArtifactService(options: ApiServerOptions): ArtifactService {
@@ -228,10 +210,6 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
           const artifact = await requireArtifactService(options).capture({ jobId }, { ...headers, bytes: await requestBytes(request) }, actor);
           return json(publicArtifact(artifact), 201, corsHeaders);
         }
-        if (parts[2] === "media-playback" && parts.length === 3 && request.method === "POST") {
-          if (!options.mediaPlaybackGateway) throw new FabricError("not_found", "media playback is not configured", 404);
-          return json(await options.mediaPlaybackGateway.issue(jobId, actor), 201, corsHeaders);
-        }
         if (parts[2] === "cancel" && request.method === "POST") return json(await options.scheduler.cancelJob(jobId, actor), 200, corsHeaders);
         if (parts[2] === "resume" && request.method === "POST") return json(await options.scheduler.resumeJob(jobId, actor), 200, corsHeaders);
         if (parts[2] === "events" && request.method === "GET") {
@@ -245,13 +223,6 @@ export function createApiFetch(options: ApiServerOptions): (request: Request) =>
           const input = await requestJson(request) as Record<string, unknown>;
           return json(await options.scheduler.requestEphemeralInput({ jobId, leaseId: input.leaseId as never, field: String(input.field ?? ""), fieldType: parseInputFieldType(input.fieldType) }, actor), 201, corsHeaders);
         }
-      }
-      if (parts[0] === "projects" && parts[1] && parts[2] === "media-manifests" && parts.length === 3 && request.method === "POST") {
-        const project = decodeURIComponent(parts[1]);
-        if (!/^project_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(project)) throw new FabricError("validation_failed", "project identifier is invalid", 400);
-        const headers = mediaManifestUploadHeaders(request);
-        const artifact = await requireArtifactService(options).captureMediaManifest(project as never, headers.artifactPolicyRef as never, { kind: headers.kind, contentType: headers.contentType, bytes: await requestBytes(request, 64 * 1024), ...(headers.label === undefined ? {} : { label: headers.label }) }, actor);
-        return json(publicArtifact(artifact), 201, corsHeaders);
       }
       if (parts[0] === "input-requests" && parts[1] && parts.length === 2 && request.method === "GET") {
         return json(await options.scheduler.getEphemeralInputRequest(decodeURIComponent(parts[1]) as never, actor), 200, corsHeaders);

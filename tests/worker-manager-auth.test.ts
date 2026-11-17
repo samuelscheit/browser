@@ -25,7 +25,6 @@ describe("worker-manager control authentication", () => {
       certificateFingerprint: worker.certificateFingerprint,
       endpoint: worker.endpoint,
       cdpRelayEndpoint: worker.cdpRelayEndpoint,
-      ...(worker.mediaPlaybackEndpoint === undefined ? {} : { mediaPlaybackEndpoint: worker.mediaPlaybackEndpoint }),
       capabilities: {
         supportedProfileFamilies: worker.capabilities.supportedProfileFamilies,
         browserVersions: worker.capabilities.browserVersions,
@@ -34,7 +33,6 @@ describe("worker-manager control authentication", () => {
         runtimeFamilies: worker.capabilities.runtimeFamilies,
       },
       capacity: worker.capacity,
-      mediaCapacity: worker.mediaCapacity,
       health: worker.health,
       isLocal: worker.isLocal,
       volumeNames: worker.volumeNames,

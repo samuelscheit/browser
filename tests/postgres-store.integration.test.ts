@@ -87,7 +87,7 @@ suite("PostgreSQL store against a real server", () => {
     await scheduler.heartbeatWorker(worker.id, workerActor);
     const [assignment] = await scheduler.dispatch();
     expect(assignment?.lease).toBeDefined();
-    await scheduler.claimAssignment(worker.id, assignment!.lease!.id, undefined, workerActor);
+    await scheduler.claimAssignment(worker.id, assignment!.lease!.id, workerActor);
     return assignment!.lease!.id;
   }
 
@@ -152,7 +152,7 @@ suite("PostgreSQL store against a real server", () => {
   });
 
   test("a stale claimed session lease times out with a plain-text reason, and cancel persists", async () => {
-    const common = { project: TEST_PROJECT, runtime: "rebrowser-puppeteer" as const, browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: exampleProfile as never, leaseMode: "writer" as const, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600 };
+    const common = { project: TEST_PROJECT, runtime: "chrome" as const, browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: exampleProfile as never, leaseMode: "writer" as const, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600 };
     const stale = await scheduler.createBrowserSession({ ...common, idempotencyKey: "stale-session", metadata: { purpose: "browser", retries: 0 } }, TEST_PRINCIPAL);
     const leaseId = await dispatchAndClaim();
     await scheduler.markLeaseStarted(leaseId as never, worker.id, workerActor);

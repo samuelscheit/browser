@@ -6,7 +6,6 @@ export interface FabricWorkerAgentOptions {
   worker: Worker;
   transport: LocalAgentTransport;
   executor: Executor;
-  proxyUrls?: readonly string[];
   pollIntervalMs?: number;
   onAssignmentError?(assignment: WorkerAssignment, error: unknown): Promise<void> | void;
 }
@@ -19,7 +18,6 @@ export class FabricWorkerAgent {
   readonly #worker: Worker;
   readonly #transport: LocalAgentTransport;
   readonly #executor: Executor;
-  readonly #proxyUrls: readonly string[];
   readonly #pollIntervalMs: number;
   readonly #onAssignmentError?: FabricWorkerAgentOptions["onAssignmentError"];
   readonly #active = new Map<string, { processId: string; relay?: CdpRelayHandle; browserEndpoint?: string; leaseId?: string }>();
@@ -31,7 +29,6 @@ export class FabricWorkerAgent {
     this.#worker = options.worker;
     this.#transport = options.transport;
     this.#executor = options.executor;
-    this.#proxyUrls = options.proxyUrls ?? [];
     this.#pollIntervalMs = Math.max(250, Math.min(30_000, options.pollIntervalMs ?? 2_000));
     this.#onAssignmentError = options.onAssignmentError;
   }
@@ -62,7 +59,7 @@ export class FabricWorkerAgent {
       await this.#transport.heartbeat(this.#worker.id);
       const active = await this.#transport.activeAssignments(this.#worker.id);
       for (const assignment of active) {
-        const identity = assignment.lease?.id ?? assignment.job?.id;
+        const identity = assignment.lease.id;
         const process = identity ? this.#active.get(identity) : undefined;
         if (process && this.#executor.isRunning) {
           const running = await Promise.resolve(this.#executor.isRunning(process.processId)).catch(() => false);
@@ -87,19 +84,13 @@ export class FabricWorkerAgent {
       }
       const assignments = await this.#transport.nextAssignments(this.#worker.id);
       for (const assignment of assignments) {
-        const identity = assignment.lease?.id ?? assignment.job?.id;
-        if (!identity || this.#active.has(identity)) continue;
-        if (assignment.recipe.runtime === "media-relay") {
-          // Media tasks are manager-owned server work because their result endpoint has access to
-          // the Fabric object store. A federated local interactive worker must never receive one.
-          await this.#onAssignmentError?.(assignment, new Error("media assignments are not supported by the federated local worker"));
-          continue;
-        }
+        const identity = assignment.lease.id;
+        if (this.#active.has(identity)) continue;
         let startedProcess: { processId: string } | undefined;
         let relay: import("./index").CdpRelayHandle | undefined;
         try {
           const claimed = await this.#transport.claimAssignment(this.#worker.id, assignment);
-          const spec = buildBrowserProcessSpec(this.#worker, claimed, this.#proxyUrls);
+          const spec = buildBrowserProcessSpec(this.#worker, claimed);
           const started = await this.#executor.start(spec);
           startedProcess = { processId: started.processId };
           // Local workers cannot accept an inbound gateway connection. Open the reverse relay
@@ -136,7 +127,7 @@ export class FabricWorkerAgent {
         }
       }
       const live = new Set<string>((await this.#transport.activeAssignments(this.#worker.id))
-        .map((assignment) => assignment.lease?.id ?? assignment.job?.id)
+        .map((assignment) => assignment.lease.id)
         .filter((identity): identity is NonNullable<typeof identity> => identity !== undefined)
         .map(String));
       for (const [identity, process] of this.#active) {
@@ -153,7 +144,7 @@ export class FabricWorkerAgent {
   public activeAssignments(): readonly string[] { return [...this.#active.keys()]; }
 
   async #reconnectLocalRelay(assignment: WorkerAssignment, process: { processId: string; relay?: CdpRelayHandle; browserEndpoint?: string; leaseId?: string }): Promise<void> {
-    const leaseId = assignment.lease?.id;
+    const leaseId = assignment.lease.id;
     if (!leaseId || !process.browserEndpoint || !this.#transport.openCdpRelay) throw new Error("local browser lost its outbound CDP relay and cannot reconnect");
     await process.relay?.stop().catch(() => undefined);
     const relay = await this.#transport.openCdpRelay(this.#worker.id, leaseId, process.browserEndpoint);

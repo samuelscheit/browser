@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { FabricError } from "@browser-fabric/contracts";
 import { ArtifactCollector, MemoryObjectStore } from "@browser-fabric/control-plane";
 import { builtInEgressPolicies } from "@browser-fabric/policy";
-import { defaultRuntimeRegistry } from "@browser-fabric/worker-runtime";
-import { exampleCatalog, TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, createTestScheduler, makeProfile, makeWorker } from "@browser-fabric/testkit";
+import { defaultRuntimeRegistry, FABRIC_BROWSER_EXECUTABLE } from "@browser-fabric/worker-runtime";
+import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, createTestScheduler, makeProfile, makeWorker } from "@browser-fabric/testkit";
 
 describe("artifacts and worker isolation", () => {
   test("object store is immutable and signed URLs are bounded", async () => {
@@ -22,7 +22,7 @@ describe("artifacts and worker isolation", () => {
     const context = await bootstrapTestScheduler();
     const objectStore = new MemoryObjectStore();
     const collector = new ArtifactCollector({ scheduler: context.scheduler, objectStore });
-    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "artifact-session", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "artifact-session", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const artifact = await collector.capture({ project: TEST_PROJECT, sessionId: session.id as never, kind: "screenshot", contentType: "image/png", bytes: new Uint8Array([1, 2, 3]), policy: { ref: "artifact-policy_standard-30-days@1" as never, retentionDays: 30, allowedKinds: ["screenshot"], createdAt: new Date().toISOString() } });
     expect(artifact.objectKey).toContain("projects/project_test/artifacts");
     expect((await objectStore.head(artifact.objectKey)).sha256).toBe(artifact.sha256);
@@ -39,7 +39,7 @@ describe("artifacts and worker isolation", () => {
       // attempt to extend 30-day retention.
       clock: () => new Date(context.clock.now().getTime() + 2 * 60_000),
     });
-    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "artifact-clock-skew", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "artifact-clock-skew", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const artifact = await collector.capture({
       project: TEST_PROJECT,
       sessionId: session.id,
@@ -54,14 +54,14 @@ describe("artifacts and worker isolation", () => {
 
   test("runtime specs cannot mount secrets or host resources", async () => {
     const context = await bootstrapTestScheduler();
-    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "runtime", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "runtime", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const [assignment] = await context.scheduler.dispatch();
-    const runtime = defaultRuntimeRegistry().get("rebrowser-puppeteer");
+    const runtime = defaultRuntimeRegistry().get("chrome");
     const spec = runtime.buildSpec(assignment!, context.worker, builtInEgressPolicies.find((policy) => policy.family === "direct")!);
     expect(spec.security).toEqual({ dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false });
     expect(spec.volumes[0]?.target).toBe("/fabric/profile");
     expect(spec.command.some((arg) => arg.includes("remote-debugging-port"))).toBe(true);
-    expect(spec.command.slice(0, 2)).toEqual(["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]);
+    expect(spec.command.slice(0, 2)).toEqual(["/usr/local/bin/fabric-chromium-launch", FABRIC_BROWSER_EXECUTABLE]);
     expect(spec.command).toContain("--remote-debugging-address=127.0.0.1");
     expect(spec.command).toContain("--remote-debugging-port=9222");
     expect(spec.cdpBind).toEqual({ host: "private-overlay", port: 9223 });
@@ -81,27 +81,26 @@ describe("artifacts and worker isolation", () => {
       id: "worker_managed_interactive" as never,
       isLocal: false,
       capacity: 1,
-      mediaCapacity: 0,
       volumeNames: ["profile_example_interactive"],
       capabilities: {
-        runtimeFamilies: ["chromium-cdp"],
-        recipeRefs: ["recipe_interactive-chromium@1" as never],
+        runtimeFamilies: ["chrome"],
+        recipeRefs: ["recipe_chrome@1" as never],
         browserVersions: { chromium: "pinned" },
         supportsInteractive: true,
-        supportedProfileFamilies: ["interactive"],
+        supportedProfileFamilies: ["default"],
       },
     });
     await scheduler.registerWorker(worker, TEST_PRINCIPAL);
     const profile = await scheduler.createProfile(makeProfile(worker, {
       ref: "profile_example_interactive" as never,
-      profileFamily: "interactive",
+      profileFamily: "default",
       volumeName: "profile_example_interactive",
     }), TEST_PRINCIPAL);
     await scheduler.createBrowserSession({
       project: TEST_PROJECT,
       idempotencyKey: "managed-interactive",
-      runtime: "chromium-cdp",
-      browserRecipeRef: "recipe_interactive-chromium@1" as never,
+      runtime: "chrome",
+      browserRecipeRef: "recipe_chrome@1" as never,
       profileRef: profile.ref,
       leaseMode: "interactive",
       egressPolicyRef: "egress_tor@1" as never,
@@ -110,63 +109,19 @@ describe("artifacts and worker isolation", () => {
     }, TEST_PRINCIPAL);
     const [assignment] = await scheduler.dispatch();
     expect(assignment?.lease?.workerId).toBe(worker.id);
-    const spec = defaultRuntimeRegistry().get("chromium-cdp").buildSpec(
+    const spec = defaultRuntimeRegistry().get("chrome").buildSpec(
       assignment!,
       worker,
       builtInEgressPolicies.find((policy) => policy.ref === "egress_tor@1")!,
     );
-    expect(spec.command.slice(0, 2)).toEqual(["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]);
+    expect(spec.command.slice(0, 2)).toEqual(["/usr/local/bin/fabric-chromium-launch", FABRIC_BROWSER_EXECUTABLE]);
     expect(spec.command).toContain("--start-maximized");
+    expect(spec.command).toContain("--use-angle=swiftshader");
+    expect(spec.command).toContain("--enable-unsafe-swiftshader");
+    expect(spec.command).toContain("--no-first-run");
     expect(spec.command).toContain("--disable-setuid-sandbox");
     expect(spec.command).not.toContain("--no-sandbox");
     expect(spec.cdpBind).toEqual({ host: "private-overlay", port: 9223 });
   });
 
-  test("media relay validates immutable-source ranges, public URLs, and content types", async () => {
-    const { MediaRelay } = await import("../workers/media-relay/src/index");
-    const policy = exampleCatalog.egressPolicies.find((candidate) => candidate.family === "example-affinity")!;
-    const seen: RequestInit[] = [];
-    const relay = new MediaRelay(policy, async (_url, init) => {
-      seen.push(init ?? {});
-      return new Response(new Uint8Array([7, 8, 9, 10, 11, 12]), {
-        status: 206,
-        headers: {
-          "content-type": "video/mp4",
-          "content-range": "bytes 4-9/10",
-          "content-length": "6",
-        },
-      });
-    });
-    const result = await relay.fetch({
-      resourceUrl: "https://media.example/segment.ts",
-      provider: "Example provider",
-      expectedContentTypes: ["video/mp4"],
-      requestHeaders: { accept: "*/*", origin: "https://provider.example", referer: "https://provider.example/watch", "user-agent": "Fabric fixture" },
-      range: { start: 4, end: 9 },
-    });
-    expect(result.status).toBe(206);
-    expect(new Headers(seen[0]?.headers).get("range")).toBe("bytes=4-9");
-    expect(new Headers(seen[0]?.headers).get("origin")).toBe("https://provider.example");
-    expect(new Headers(seen[0]?.headers).get("referer")).toBe("https://provider.example/watch");
-    expect(new Headers(seen[0]?.headers).get("cookie")).toBeNull();
-    await expect(relay.fetch({ resourceUrl: "file:///tmp/secret", provider: "Example provider" })).rejects.toThrow();
-    await expect(relay.fetch({ resourceUrl: "https://127.0.0.1/segment.ts", provider: "Example provider" })).rejects.toThrow();
-    await expect(relay.fetch({ resourceUrl: "https://media.example/segment.ts", provider: "Example provider", range: { start: -1 } })).rejects.toThrow();
-    await expect(relay.fetch({ resourceUrl: "https://media.example/segment.ts", provider: "Example provider", expectedContentTypes: ["application/vnd.apple.mpegurl"] })).rejects.toThrow(/unexpected content type/);
-
-    const redirected: string[] = [];
-    const redirectRelay = new MediaRelay(policy, async (url, init) => {
-      redirected.push(url);
-      expect(init?.redirect).toBe("manual");
-      if (redirected.length === 1) return new Response(null, { status: 302, headers: { location: "https://cdn.example/video.mp4" } });
-      return new Response(new Uint8Array([1]), { status: 200, headers: { "content-type": "video/mp4" } });
-    });
-    await expect(redirectRelay.fetch({ resourceUrl: "https://media.example/start", provider: "Example provider" })).resolves.toMatchObject({ status: 200 });
-    expect(redirected).toEqual(["https://media.example/start", "https://cdn.example/video.mp4"]);
-
-    const privateRedirectRelay = new MediaRelay(policy, async () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1/admin" } }));
-    await expect(privateRedirectRelay.fetch({ resourceUrl: "https://media.example/start", provider: "Example provider" })).rejects.toThrow(/public provider host/);
-    const ignoredRangeRelay = new MediaRelay(policy, async () => new Response(new Uint8Array([1]), { status: 200, headers: { "content-type": "video/mp4" } }));
-    await expect(ignoredRangeRelay.fetch({ resourceUrl: "https://media.example/video.mp4", provider: "Example provider", range: { start: 0, end: 0 } })).rejects.toThrow(/ignored the requested byte range/);
-  });
 });

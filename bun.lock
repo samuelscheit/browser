@@ -75,14 +75,6 @@
         "@browser-fabric/worker-runtime": "workspace:*",
       },
     },
-    "apps/media-playback-gateway": {
-      "name": "@browser-fabric/media-playback-gateway",
-      "version": "0.1.0",
-      "dependencies": {
-        "@browser-fabric/contracts": "workspace:*",
-        "@browser-fabric/control-plane": "workspace:*",
-      },
-    },
     "apps/scheduler": {
       "name": "@browser-fabric/scheduler",
       "version": "0.1.0",
@@ -161,14 +153,6 @@
         "@browser-fabric/policy": "workspace:*",
       },
     },
-    "workers/media-relay": {
-      "name": "@browser-fabric/media-relay",
-      "version": "0.1.0",
-      "dependencies": {
-        "@browser-fabric/contracts": "workspace:*",
-        "@browser-fabric/control-plane": "workspace:*",
-      },
-    },
   },
   "packages": {
     "@browser-fabric/api": ["@browser-fabric/api@workspace:apps/api"],
@@ -188,10 +172,6 @@
     "@browser-fabric/input-broker": ["@browser-fabric/input-broker@workspace:apps/input-broker"],
 
     "@browser-fabric/local-agent": ["@browser-fabric/local-agent@workspace:apps/local-agent"],
-
-    "@browser-fabric/media-playback-gateway": ["@browser-fabric/media-playback-gateway@workspace:apps/media-playback-gateway"],
-
-    "@browser-fabric/media-relay": ["@browser-fabric/media-relay@workspace:workers/media-relay"],
 
     "@browser-fabric/policy": ["@browser-fabric/policy@workspace:packages/policy"],
 

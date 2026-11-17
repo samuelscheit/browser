@@ -176,29 +176,6 @@ function parseRequest(header: Buffer, rest: Buffer): ParsedRequest {
   return { method, target, version, headers, rest };
 }
 
-/**
- * A Fabric media source may bind its provider handshake and subsequent worker relay to one
- * configured upstream identity. The client supplies this opaque selector as proxy basic auth
- * (`fabric:<random-key>`); it is consumed here, never forwarded to the provider or upstream.
- */
-function fabricAffinityKey(request: ParsedRequest): string | undefined {
-  const header = request.headers.find((line) => line.slice(0, line.indexOf(":" )).toLowerCase() === "proxy-authorization");
-  if (!header) return undefined;
-  const value = header.slice(header.indexOf(":") + 1).trim();
-  const match = /^Basic\s+([A-Za-z0-9+/=]{8,512})$/i.exec(value);
-  if (!match) return undefined;
-  let decoded: string;
-  try {
-    decoded = Buffer.from(match[1]!, "base64").toString("utf8");
-  } catch {
-    return undefined;
-  }
-  const separator = decoded.indexOf(":");
-  if (separator < 1 || decoded.slice(0, separator) !== "fabric") return undefined;
-  const key = decoded.slice(separator + 1);
-  return /^[A-Za-z0-9_-]{16,128}$/.test(key) ? `fabric-affinity:${key}` : undefined;
-}
-
 function upstreamCredentials(endpoint: EgressProxyEndpoint): string | undefined {
   if (!endpoint.username && !endpoint.password) return undefined;
   const value = `${endpoint.username ?? ""}:${endpoint.password ?? ""}`;
@@ -469,8 +446,9 @@ async function handleHttp(
 /** Start a fail-closed internal forward proxy listener for one immutable egress policy route. */
 export function startProxyListener(listener: EgressListenerConfig, endpoints: readonly EgressProxyEndpoint[]): ProxyListener {
   const sticky = new Map<string, StickySelection>();
-  const connectionKey = (client: Socket, request: ParsedRequest): string =>
-    fabricAffinityKey(request) ?? `client:${client.remoteAddress ?? crypto.randomUUID()}`;
+  // Each client address keeps the upstream it last succeeded with, so one browser does not hop
+  // between exits of a proxy list mid-session.
+  const connectionKey = (client: Socket): string => `client:${client.remoteAddress ?? crypto.randomUUID()}`;
   const selectionFor = (key: string): StickySelection | undefined => {
     if (listener.mode === "direct") return undefined;
     const current = sticky.get(key);
@@ -496,7 +474,7 @@ export function startProxyListener(listener: EgressListenerConfig, endpoints: re
         const { header, rest } = await readHeader(client);
         const request = parseRequest(header, rest);
         client.setTimeout(0);
-        const key = connectionKey(client, request);
+        const key = connectionKey(client);
         const selection = selectionFor(key);
         if (request.method === "CONNECT") await handleConnect(client, request, listener, endpoints, selection, (index) => rememberFor(key, index));
         else await handleHttp(client, request, listener, endpoints, selection, (index) => rememberFor(key, index));

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { BrowserProcessSpec, Executor, MediaExecutor } from "../apps/worker-manager/src";
+import type { BrowserProcessSpec, Executor } from "../apps/worker-manager/src";
 import { ManagedWorkerController } from "../apps/worker-manager/src/controller";
 import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, makeWorker } from "@browser-fabric/testkit";
 import { ArtifactCollector, MemoryObjectStore } from "@browser-fabric/control-plane";
@@ -10,11 +10,10 @@ test("managed controller revokes a ready CDP capability and releases the lease w
   const worker = makeWorker({
     id: "worker_controller" as never,
     capacity: 1,
-    mediaCapacity: 0,
     capabilities: {
       ...makeWorker().capabilities,
-      runtimeFamilies: ["rebrowser-puppeteer"],
-      recipeRefs: ["recipe_rebrowser-puppeteer@1" as never],
+      runtimeFamilies: ["chrome"],
+      recipeRefs: ["recipe_chrome-headless@1" as never],
       supportedProfileFamilies: ["default"],
     },
   });
@@ -28,8 +27,8 @@ test("managed controller revokes a ready CDP capability and releases the lease w
   const session = await scheduler.createBrowserSession({
     project: TEST_PROJECT,
     idempotencyKey: "controller-process-exit",
-    runtime: "rebrowser-puppeteer",
-    browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never,
+    runtime: "chrome",
+    browserRecipeRef: "recipe_chrome-headless@1" as never,
     profileRef: controllerProfile.ref,
     leaseMode: "writer",
     egressPolicyRef: "egress_direct@1" as never,
@@ -74,60 +73,3 @@ test("managed controller revokes a ready CDP capability and releases the lease w
   expect(controller.activeProcesses()).toEqual([]);
 });
 
-test("managed controller releases a media attempt immediately when its manager receipt is invalid", async () => {
-  const { scheduler, worker, clock } = await bootstrapTestScheduler();
-  const collector = new ArtifactCollector({ scheduler, objectStore: new MemoryObjectStore(undefined, () => clock.now()), clock: () => clock.now() });
-  const policy = await scheduler.getArtifactPolicy("artifact-policy_standard-30-days@1" as never, TEST_PRINCIPAL);
-  const manifest = await collector.capture({
-    project: TEST_PROJECT,
-    projectScoped: true,
-    kind: "media_manifest",
-    contentType: "application/vnd.browser-fabric.media-manifest+json",
-    bytes: new TextEncoder().encode(JSON.stringify({ version: 1, mode: "relay", provider: "Example provider", url: "https://media.example/video.mp4", artifactKind: "video" })),
-    policy,
-    actor: TEST_PRINCIPAL,
-  });
-  const job = await scheduler.createJob({
-    project: TEST_PROJECT,
-    idempotencyKey: "controller-invalid-media-receipt",
-    recipeRef: "recipe_media-relay@1" as never,
-    operation: { operation: "relay", manifestRef: manifest.id },
-    egressPolicyRef: "egress_example-affinity@1" as never,
-    artifactPolicyRef: policy.ref,
-  }, TEST_PRINCIPAL);
-  await scheduler.dispatch();
-
-  const stopped: string[] = [];
-  const mediaExecutor: MediaExecutor = {
-    start: async () => ({ processId: "managed-media" }),
-    wait: async () => ({ status: "succeeded", result: { receipt: "forged-receipt" } }),
-    stop: async (processId) => { stopped.push(processId); },
-  };
-  const browserExecutor: Executor = {
-    start: async () => { throw new Error("browser executor must not run a media job"); },
-    stop: async () => undefined,
-  };
-  const controller = new ManagedWorkerController({
-    scheduler,
-    browserExecutor,
-    mediaExecutor,
-    mediaResultGateway: {
-      prepare: async () => ({
-        source: { version: 1, mode: "relay", provider: "Example provider", url: "https://media.example/video.mp4", artifactKind: "video" },
-        resultEndpoint: "http://fabric-worker-manager:8083/v1/media-results/job_fixture",
-        resultCapability: "x".repeat(32),
-      }),
-      verifyCompletion: async () => { throw new Error("manager receipt signature is invalid"); },
-    },
-    pollIntervalMs: 30_000,
-  });
-
-  await controller.tick();
-  for (let attempt = 0; attempt < 20 && (await scheduler.getJob(job.id, TEST_PRINCIPAL)).status === "running"; attempt += 1) {
-    await Bun.sleep(5);
-  }
-  expect((await scheduler.getJob(job.id, TEST_PRINCIPAL)).status).toBe("queued");
-  expect((await scheduler.store.snapshot()).workers.get(worker.id)?.activeMediaTasks).toBe(0);
-  expect(stopped).toEqual(["managed-media"]);
-  expect(controller.activeProcesses()).toEqual([]);
-});

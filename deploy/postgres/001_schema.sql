@@ -29,7 +29,6 @@ CREATE TABLE IF NOT EXISTS fabric_workers (
   input_encryption_public_key_pem text,
   endpoint text NOT NULL,
   cdp_relay_endpoint text NOT NULL,
-  media_playback_endpoint text,
   runtime_families text[] NOT NULL,
   recipe_refs text[] NOT NULL,
   browser_versions jsonb NOT NULL DEFAULT '{}',
@@ -37,8 +36,6 @@ CREATE TABLE IF NOT EXISTS fabric_workers (
   supports_interactive boolean NOT NULL DEFAULT false,
   capacity integer NOT NULL CHECK (capacity BETWEEN 0 AND 4),
   active_leases integer NOT NULL DEFAULT 0 CHECK (active_leases >= 0),
-  media_capacity integer NOT NULL DEFAULT 0 CHECK (media_capacity BETWEEN 0 AND 64),
-  active_media_tasks integer NOT NULL DEFAULT 0 CHECK (active_media_tasks >= 0),
   is_local boolean NOT NULL DEFAULT false,
   volume_names text[] NOT NULL DEFAULT '{}',
   cpu_milli integer NOT NULL CHECK (cpu_milli > 0),
@@ -168,17 +165,11 @@ CREATE TABLE IF NOT EXISTS fabric_jobs (
   result jsonb,
   failure_reason text,
   assignment_claimed_at timestamptz,
-  media_artifact_expires_at timestamptz,
-  media_attempt_id text CHECK (media_attempt_id IS NULL OR media_attempt_id ~ '^attempt_[A-Za-z0-9_-]+$'),
-  media_playback_source_request_id text CHECK (media_playback_source_request_id IS NULL OR media_playback_source_request_id ~ '^input-request_[A-Za-z0-9_-]+$'),
-  media_playback_ready_at timestamptz,
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id, idempotency_key)
 );
-CREATE INDEX IF NOT EXISTS fabric_jobs_media_artifact_expiry_idx ON fabric_jobs(media_artifact_expires_at) WHERE media_artifact_expires_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS fabric_jobs_media_attempt_id_idx ON fabric_jobs(media_attempt_id) WHERE media_attempt_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS fabric_browser_leases (
   id text PRIMARY KEY CHECK (id ~ '^browser-lease_[A-Za-z0-9_-]+$'),
   session_id text REFERENCES fabric_browser_sessions(id) ON DELETE CASCADE,
@@ -253,18 +244,14 @@ CREATE TABLE IF NOT EXISTS fabric_artifacts (
   session_id text REFERENCES fabric_browser_sessions(id) ON DELETE CASCADE,
   job_id text REFERENCES fabric_jobs(id) ON DELETE CASCADE,
   profile_ref text REFERENCES fabric_profiles(ref),
-  kind text NOT NULL CONSTRAINT fabric_artifacts_kind_check CHECK (kind IN ('screenshot','mhtml','trace','har','download','video','log','media_manifest')),
+  kind text NOT NULL CONSTRAINT fabric_artifacts_kind_check CHECK (kind IN ('screenshot','mhtml','trace','har','download','video','log')),
   object_key text NOT NULL UNIQUE,
   sha256 text NOT NULL CHECK (sha256 ~ '^sha256:[A-Fa-f0-9]{64}$'),
   mime_type text NOT NULL,
   size_bytes bigint NOT NULL CHECK (size_bytes >= 0),
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
-  CONSTRAINT fabric_artifacts_owner_check CHECK (
-    (session_id IS NOT NULL AND job_id IS NULL)
-    OR (session_id IS NULL AND job_id IS NOT NULL)
-    OR (session_id IS NULL AND job_id IS NULL AND kind = 'media_manifest' AND profile_ref IS NULL)
-  )
+  CONSTRAINT fabric_artifacts_owner_check CHECK ((session_id IS NOT NULL) <> (job_id IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS fabric_artifacts_expiry_idx ON fabric_artifacts(expires_at);
 CREATE TABLE IF NOT EXISTS fabric_ephemeral_input_requests (
@@ -272,23 +259,17 @@ CREATE TABLE IF NOT EXISTS fabric_ephemeral_input_requests (
   project_id text NOT NULL REFERENCES fabric_projects(id),
   session_id text REFERENCES fabric_browser_sessions(id) ON DELETE CASCADE,
   job_id text REFERENCES fabric_jobs(id) ON DELETE CASCADE,
-  lease_id text REFERENCES fabric_browser_leases(id) ON DELETE CASCADE,
-  media_attempt_id text CHECK (media_attempt_id IS NULL OR media_attempt_id ~ '^attempt_[A-Za-z0-9_-]+$'),
+  lease_id text NOT NULL REFERENCES fabric_browser_leases(id) ON DELETE CASCADE,
   worker_id text REFERENCES fabric_workers(id),
   worker_input_encryption_public_key_pem text,
   field text NOT NULL CHECK (length(field) BETWEEN 1 AND 255),
-  field_type text NOT NULL CHECK (field_type IN ('password','otp','captcha_provider_credential','proxy_credential','form_value','media_playback_source')),
+  field_type text NOT NULL CHECK (field_type IN ('password','otp','captcha_provider_credential','proxy_credential','form_value')),
   status text NOT NULL CHECK (status IN ('pending','supplied','consumed','expired','cancelled')),
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   resolved_at timestamptz,
-  CHECK ((session_id IS NOT NULL) <> (job_id IS NOT NULL)),
-  CHECK (
-    (lease_id IS NOT NULL AND media_attempt_id IS NULL)
-    OR (lease_id IS NULL AND media_attempt_id IS NOT NULL AND job_id IS NOT NULL)
-  )
+  CHECK ((session_id IS NOT NULL) <> (job_id IS NOT NULL))
 );
-CREATE INDEX IF NOT EXISTS fabric_ephemeral_input_requests_media_attempt_idx ON fabric_ephemeral_input_requests(media_attempt_id) WHERE media_attempt_id IS NOT NULL;
 -- Values are intentionally absent; only the worker-memory vault may hold them.
 CREATE TABLE IF NOT EXISTS fabric_idempotency (
   id text PRIMARY KEY,

@@ -46,7 +46,7 @@ async function guardianSolverFor(recipe: { ref: string; runtime: string; profile
   }, TEST_PRINCIPAL);
   const [allocated] = await context.scheduler.dispatch();
   const actor = { ...TEST_PRINCIPAL, certificateFingerprint: context.worker.certificateFingerprint };
-  const assignment = await context.scheduler.claimAssignment(context.worker.id, allocated!.lease!.id, undefined, actor);
+  const assignment = await context.scheduler.claimAssignment(context.worker.id, allocated!.lease!.id, actor);
   // The worker advertises the recipe's profile family, as a deployment's worker config does for its own recipes.
   const worker = makeWorker({
     id: context.worker.id,
@@ -63,7 +63,7 @@ async function guardianSolverFor(recipe: { ref: string; runtime: string; profile
     return new FakeGuardian();
   };
   const selector = captchaTokenSolverFor({ providerProxyUrl: "http://fabric-egress-sidecar:11003", deathByCaptchaUsername: "u", deathByCaptchaPassword: "p" });
-  const spec = buildBrowserProcessSpec(worker, assignment, [], new Map([[recipe.runtime, new GenericBrowserRuntime(recipe.runtime)]]));
+  const spec = buildBrowserProcessSpec(worker, assignment, new Map([[recipe.runtime, new GenericBrowserRuntime(recipe.runtime)]]));
   const executor = new DockerContainerExecutor({
     command: new RecordingDockerCommand(),
     fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" })),
@@ -79,19 +79,19 @@ async function guardianSolverFor(recipe: { ref: string; runtime: string; profile
 
 describe("token solver wiring from the signed recipe to the guardian", () => {
   test("a built-in recipe whose challenge set enables automatic DBC gets a solver in its guardian", async () => {
-    const { solver, handlers } = await guardianSolverFor({ ref: "recipe_rebrowser-puppeteer@1", runtime: "rebrowser-puppeteer", profileFamily: "default" });
+    const { solver, handlers } = await guardianSolverFor({ ref: "recipe_chrome-headless@1", runtime: "chrome", profileFamily: "default" });
     expect(handlers?.some((handler: ChallengeHandler) => handler.kind === "dbc" && handler.mode === "automatic")).toBe(true);
     expect(solver).toBeDefined();
   });
 
   test("the signed assignment carries the challenge set the scheduler resolved from the recipe", async () => {
-    const { handlers } = await guardianSolverFor({ ref: "recipe_rebrowser-puppeteer@1", runtime: "rebrowser-puppeteer", profileFamily: "default" });
+    const { handlers } = await guardianSolverFor({ ref: "recipe_chrome-headless@1", runtime: "chrome", profileFamily: "default" });
     expect(handlers).toBeDefined();
     expect(handlers!.map((handler: ChallengeHandler) => handler.id)).toContain("death-by-captcha");
   });
 
   test("a recipe whose challenge set enables only the guardian gets no solver", async () => {
-    const { solver, handlers } = await guardianSolverFor({ ref: "recipe_example-guardian-only@1", runtime: "chromium-cdp", profileFamily: "default" });
+    const { solver, handlers } = await guardianSolverFor({ ref: "recipe_example-guardian-only@1", runtime: "chrome", profileFamily: "default" });
     expect(handlers?.map((handler: ChallengeHandler) => handler.kind)).toEqual(["guardian"]);
     expect(solver).toBeUndefined();
   });
