@@ -171,7 +171,6 @@ export async function runTask(options: RunTaskOptions): Promise<TaskResult> {
         system: SYSTEM_PROMPT,
         messages: buildMessages(intro, initial, history, window),
         tools,
-        toolChoice: "required",
         maxTokens: options.maxTokens ?? 4_096,
         signal,
       });

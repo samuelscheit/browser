@@ -92,7 +92,9 @@ export class OpenAiModel implements ChatModel {
       [official ? "max_completion_tokens" : "max_tokens"]: request.maxTokens ?? 4_096,
       ...(tools.length ? {
         tools: tools.map((tool) => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
-        tool_choice: request.toolChoice ?? "auto",
+        // Not "required": several models and gateways reject a forced tool call; the agent loop
+        // answers a reply without a tool call with a reminder instead.
+        tool_choice: "auto",
       } : {}),
     };
     const headers: Record<string, string> = this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {};

@@ -54,7 +54,7 @@ describe("Anthropic Messages adapter", () => {
       usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 900 },
     })]);
     const model = new AnthropicModel({ model: "claude-test", apiKey: "sk-ant-test", baseUrl: "https://anthropic.example/", http: { fetch, ...noSleep } });
-    const response = await model.complete({ system: "sys", messages: HISTORY, tools: TOOLS, toolChoice: "required", maxTokens: 321 });
+    const response = await model.complete({ system: "sys", messages: HISTORY, tools: TOOLS, maxTokens: 321 });
 
     expect(response.text).toBe("Typing now.");
     expect(response.toolCalls).toEqual([
@@ -71,7 +71,7 @@ describe("Anthropic Messages adapter", () => {
     expect(headers["anthropic-version"]).toBe("2023-06-01");
     expect(call!.body.model).toBe("claude-test");
     expect(call!.body.max_tokens).toBe(321);
-    expect(call!.body.tool_choice).toEqual({ type: "any" });
+    expect(call!.body.tool_choice).toEqual({ type: "auto" });
     expect(call!.body.tools[0]).toEqual({ name: "click", description: "Click", input_schema: TOOLS[0]!.parameters, cache_control: { type: "ephemeral" } });
     // Tool results and the following note merge into one user turn.
     expect(call!.body.messages.map((message: any) => message.role)).toEqual(["user", "assistant", "user"]);
@@ -110,7 +110,7 @@ describe("OpenAI-compatible chat completions adapter", () => {
       usage: { prompt_tokens: 50, completion_tokens: 5 },
     })]);
     const model = new OpenAiModel({ model: "gpt-test", apiKey: "sk-test", http: { fetch, ...noSleep } });
-    const response = await model.complete({ system: "sys", messages: HISTORY, tools: TOOLS, toolChoice: "required" });
+    const response = await model.complete({ system: "sys", messages: HISTORY, tools: TOOLS });
 
     expect(response.text).toBe("");
     expect(response.toolCalls[0]).toEqual({ id: "call_a", name: "click", arguments: { ref: "e3" } });
@@ -124,7 +124,7 @@ describe("OpenAI-compatible chat completions adapter", () => {
     expect((call!.init.headers as Record<string, string>).authorization).toBe("Bearer sk-test");
     expect(call!.body.max_completion_tokens).toBe(4_096);
     expect(call!.body.max_tokens).toBeUndefined();
-    expect(call!.body.tool_choice).toBe("required");
+    expect(call!.body.tool_choice).toBe("auto");
     expect(call!.body.tools).toEqual([{ type: "function", function: { name: "click", description: "Click", parameters: TOOLS[0]!.parameters } }]);
     expect(call!.body.messages).toEqual([
       { role: "system", content: "sys" },

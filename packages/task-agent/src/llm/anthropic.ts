@@ -77,7 +77,9 @@ export class AnthropicModel implements ChatModel {
       max_tokens: request.maxTokens ?? 4_096,
       system: [{ type: "text", text: request.system, ...(tools.length ? {} : { cache_control: { type: "ephemeral" } }) }],
       messages: anthropicMessages(request.messages),
-      ...(tools.length ? { tools, tool_choice: { type: request.toolChoice === "required" ? "any" : "auto" } } : {}),
+      // Not "any": models with extended thinking (and some gateways) reject a forced tool call; the
+      // agent loop answers a reply without a tool call with a reminder instead.
+      ...(tools.length ? { tools, tool_choice: { type: "auto" } } : {}),
     };
     const base = (this.options.baseUrl ?? "https://api.anthropic.com").replace(/\/+$/, "");
     const response = await postJson(`${base}/v1/messages`, { "x-api-key": this.options.apiKey, "anthropic-version": "2023-06-01" }, body, request.signal, this.options.http);

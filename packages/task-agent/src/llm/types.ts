@@ -35,8 +35,6 @@ export interface ChatRequest {
   system: string;
   messages: ChatMessage[];
   tools?: ToolDefinition[];
-  /** "required" forces a tool call where the provider supports it. */
-  toolChoice?: "auto" | "required";
   maxTokens?: number;
   signal?: AbortSignal;
 }
