@@ -39,6 +39,11 @@ interface Point { x: number; y: number }
  * included); an OOPIF session adds its <iframe>'s offset.
  */
 async function locate(context: ActionContext, ref: ResolvedRef): Promise<Point> {
+  return (await locateBox(context, ref)).page;
+}
+
+/** The click point in page coordinates, and in the ref session's local-root coordinates (`local`). */
+async function locateBox(context: ActionContext, ref: ResolvedRef): Promise<{ page: Point; local: Point }> {
   const { browser } = context;
   const offset = await browser.frameOffset(ref.tab, ref.session);
   await browser.send("DOM.scrollIntoViewIfNeeded", { objectId: ref.objectId }, ref.session.sessionId).catch(() => undefined);
@@ -46,12 +51,13 @@ async function locate(context: ActionContext, ref: ResolvedRef): Promise<Point> 
   const area = (quad: number[]) => Math.abs((quad[2]! - quad[0]!) * (quad[5]! - quad[1]!));
   const quad = quads.filter((candidate) => candidate.length === 8 && area(candidate) > 0.5).sort((left, right) => area(right) - area(left))[0];
   if (!quad) throw new ActionError("the element has no visible box (hidden, zero-size or detached)");
-  const page = { x: (quad[0]! + quad[2]! + quad[4]! + quad[6]!) / 4 + offset.x, y: (quad[1]! + quad[3]! + quad[5]! + quad[7]!) / 4 + offset.y };
+  const local = { x: (quad[0]! + quad[2]! + quad[4]! + quad[6]!) / 4, y: (quad[1]! + quad[3]! + quad[5]! + quad[7]!) / 4 };
+  const page = { x: local.x + offset.x, y: local.y + offset.y };
   const { cssLayoutViewport } = await browser.send("Page.getLayoutMetrics", {}, ref.tab.sessionId) as { cssLayoutViewport: { clientWidth: number; clientHeight: number } };
   if (page.x < 0 || page.y < 0 || page.x > cssLayoutViewport.clientWidth || page.y > cssLayoutViewport.clientHeight) {
     throw new ActionError("the element is outside the visible viewport even after scrolling");
   }
-  return page;
+  return { page, local };
 }
 
 async function mouseClick(context: ActionContext, point: Point): Promise<void> {
@@ -63,11 +69,11 @@ async function mouseClick(context: ActionContext, point: Point): Promise<void> {
   await browser.send("Input.dispatchMouseEvent", { ...base, type: "mouseReleased", buttons: 0 }, sessionId);
 }
 
-/** Trusted click at the element's center; refuses when something else would receive it. */
+/** Trusted click at the center of the element's largest box; refuses when something else would receive it. */
 async function clickRef(context: ActionContext, ref: ResolvedRef, force: boolean): Promise<void> {
-  const page = await locate(context, ref);
+  const { page, local } = await locateBox(context, ref);
   if (!force) {
-    const cover = await context.browser.callOn<string | null>(ref, coveringElement);
+    const cover = await context.browser.callOn<string | null>(ref, coveringElement, await context.browser.nodeAt(ref, local) ?? null);
     if (cover) throw new ActionError(`the element is covered by ${cover}; close or scroll past it first (or click with force=true)`);
   }
   await mouseClick(context, page);

@@ -141,8 +141,7 @@ describe.skipIf(!executable)("runTask end to end (scripted model, real Chromium)
     const last = model.requests.filter((request) => request.tools).at(-1)!;
     expect(requestText(last)).toContain("Earlier steps (summarized):\\n1. type{");
     expect(last.messages).toHaveLength(5);
-    // Its own tab is closed again.
-    await Bun.sleep(200);
+    // Its own tab is closed again, by the time runTask returns.
     expect(await pageTargets()).toEqual(before);
   });
 
@@ -209,7 +208,6 @@ describe.skipIf(!executable)("runTask end to end (scripted model, real Chromium)
     expect(result.status).toBe("timeout");
     expect(result.summary).toBe("Timed out after 2 s.");
     expect(Date.now() - started).toBeLessThan(5_000);
-    await Bun.sleep(200);
     expect(await pageTargets()).toEqual(before);
   });
 

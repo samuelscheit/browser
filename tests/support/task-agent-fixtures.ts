@@ -100,6 +100,20 @@ function routes(otherOrigin: string): Record<string, (request: Request, url: URL
 
     "/popup-target": () => html(page("Popup", `<h1>Popup page</h1><button onclick="window.close()">Close me</button>`)),
 
+    // Labels that wrap over two lines (as fonts and widths happen to make them): the center of
+    // their bounding box lies between the line fragments, where a <select> sits. The custom
+    // checkbox is visually hidden, so its label is what gets clicked.
+    "/wrapped-labels": () => html(page("Wrapped labels", `
+      <div style="position:relative;width:300px;font:16px/40px monospace">
+        <span style="display:inline-block;width:200px"></span><label><input type="checkbox" name="news" style="position:absolute;opacity:0;width:1px;height:1px" onchange="log('news ' + this.checked)">Send me news</label>
+        <select aria-label="Language" style="position:absolute;left:110px;top:25px;width:80px;height:30px"><option>English</option><option>German</option></select>
+      </div>
+      <div style="position:relative;width:300px;font:16px/40px monospace">
+        <span style="display:inline-block;width:200px"></span><a href="#all" onclick="log('link')">Read all the news</a>
+        <select aria-label="Region" style="position:absolute;left:110px;top:25px;width:80px;height:30px"><option>EU</option><option>US</option></select>
+      </div>
+      ${LOG_SCRIPT}`)),
+
     "/login": () => html(page("Sign in", `
       <h1>Sign in</h1>
       <form method="post" action="/login">

@@ -284,29 +284,20 @@ export function waitForDomQuiet(quietMs: number, maxMs: number): Promise<void> {
 }
 
 /**
- * Hit test at the element's center (in its own frame's coordinates). Returns null when the
- * element itself (or something inside it, or its own label) receives the click; otherwise a
- * short description of what covers it.
+ * Judge Chrome's hit test at the exact click point: `hitNode` is what receives the click there
+ * (null when it is outside this frame). Returns null when that is the element itself, something
+ * inside it (also through shadow roots) or its own label; otherwise a short description of what
+ * covers it.
  */
-export function coveringElement(this: Element): string | null {
-  const rect = this.getBoundingClientRect();
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-  let hit = document.elementFromPoint(x, y);
-  while (hit?.shadowRoot) {
-    const inner = hit.shadowRoot.elementFromPoint(x, y);
-    if (!inner || inner === hit) break;
-    hit = inner;
-  }
-  if (!hit) return "nothing (the point is outside the page)";
-  if (hit === this || this.contains(hit) || hit.contains(this) && hit.localName === "label") return null;
-  // An element inside a shadow root: the host is what elementFromPoint returns at first.
+export function coveringElement(this: Element, hitNode: Node | null): string | null {
+  const hit = hitNode?.nodeType === Node.ELEMENT_NODE ? hitNode as Element : hitNode?.parentElement ?? null;
+  if (!hit) return "something outside this frame";
+  if (hit.contains(this) && hit.localName === "label") return null;
   let node: Node | null = hit;
   while (node) {
-    if (node === this) return null;
+    if (node === this || (node as HTMLLabelElement).control === this) return null;
     node = node.parentNode ?? (node as ShadowRoot).host ?? null;
   }
-  if ((hit as HTMLLabelElement).control === this) return null;
   const name = ((hit as HTMLElement).innerText || hit.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 60);
   return `<${hit.localName}${hit.id ? `#${hit.id}` : ""}>${name ? ` "${name}"` : ""}`;
 }

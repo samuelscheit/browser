@@ -165,6 +165,15 @@ describe.skipIf(!executable)("actions (real Chromium)", () => {
     expect((await look(context)).url).toBe(`${site.origin}/form`);
   });
 
+  test("a label wrapping over two lines is clicked, although its bounding box's center is covered", async () => {
+    const context = await open("/wrapped-labels");
+    const observation = await look(context);
+    // The hidden custom checkbox is offered (and clicked) as its label.
+    await ACTIONS.click!(context, { ref: ref(observation, "checkbox \"Send me news\"") });
+    await ACTIONS.click!(context, { ref: ref(observation, "link \"Read all the news\"") });
+    expect(await pageLog(context)).toBe("news true\nlink\n");
+  });
+
   test("type replaces content, handles date, contenteditable and secrets; select and checkbox labels work; submit sends the form", async () => {
     const context = await open("/form", { PASSWORD: "s3cret-value" });
     const observation = await look(context);
@@ -298,9 +307,20 @@ describe.skipIf(!executable)("actions (real Chromium)", () => {
     expect(await targets()).toContain(id);
     const owned = await TaskBrowser.open({ cdpEndpoint: chromium.endpoint });
     const ownedId = owned.active.targetId;
+    // close() returns only once Chrome destroyed the tab, so listing right away never sees it.
     await owned.close(false);
-    await Bun.sleep(200);
     expect(await targets()).not.toContain(ownedId);
     await fetch(`${chromium.endpoint}/json/close/${id}`);
+  });
+
+  test("close() really closes a tab whose failed navigation is still committing its error page", async () => {
+    const context = await open("/counter");
+    const id = context.browser.active.targetId;
+    // Chrome answers Target.closeTarget with success but drops it while the error page commits.
+    for (let attempt = 0; attempt < 2; attempt++) await expect(ACTIONS.navigate!(context, { url: "http://unresolvable.invalid/" })).rejects.toThrow("navigation failed");
+    await context.browser.close(false);
+    browser = undefined;
+    const targets = (await (await fetch(`${chromium.endpoint}/json/list`)).json() as { id: string }[]).map((target) => target.id);
+    expect(targets).not.toContain(id);
   });
 });

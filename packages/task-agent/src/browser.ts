@@ -3,6 +3,9 @@ import { callExpression, elementByRef, waitForDomQuiet } from "./page-script";
 
 const WORLD_NAME = "fabric-task-agent";
 const SETTLE_MAX_MS = 15_000;
+/** A tab close is confirmed by Target.targetDestroyed within this time, or requested again. */
+const CLOSE_CONFIRM_MS = 750;
+const CLOSE_ATTEMPTS = 4;
 
 /** A CDP session of a tab: its top-level page, or an out-of-process iframe (OOPIF) inside it. */
 export interface FrameSession {
@@ -39,6 +42,11 @@ export interface ResolvedRef {
 
 export class StaleRefError extends Error {}
 
+/** A page object handed to `callOn` by reference instead of by value. */
+export class RemoteObject {
+  public constructor(public readonly objectId: string) {}
+}
+
 /** Source usable as a function expression; method shorthand (`name(…) {…}`) gets a `function` keyword. */
 export function functionSource(fn: (...args: never[]) => unknown): string {
   const source = fn.toString();
@@ -54,6 +62,8 @@ export class TaskBrowser {
   readonly #tabs = new Map<string, Tab>();
   readonly #notices: string[] = [];
   readonly #pending = new Set<Promise<unknown>>();
+  /** Resolvers waiting for Target.targetDestroyed, by target id. */
+  readonly #destroyed = new Map<string, () => void>();
   #active!: Tab;
   #unsubscribe: () => void;
 
@@ -133,6 +143,7 @@ export class TaskBrowser {
         return;
       }
       case "Target.targetDestroyed": {
+        this.#destroyed.get(params.targetId)?.();
         const tab = this.#tabs.get(params.targetId);
         if (!tab) return;
         tab.closed = true;
@@ -231,12 +242,26 @@ export class TaskBrowser {
     const { result, exceptionDetails } = await this.send("Runtime.callFunctionOn", {
       objectId: ref.objectId,
       functionDeclaration: functionSource(fn),
-      arguments: args.map((value) => ({ value })),
+      arguments: args.map((value) => value instanceof RemoteObject ? { objectId: value.objectId } : { value }),
       returnByValue: true,
       awaitPromise: true,
     }, ref.session.sessionId);
     if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text ?? "page script failed");
     return result.value as T;
+  }
+
+  /**
+   * Chrome's own hit test at a point of the ref's session (its local root's coordinates, as
+   * DOM.getContentQuads reports them), as an object in the ref's world; undefined when nothing
+   * there belongs to that world (another frame, or outside the page).
+   */
+  public async nodeAt(ref: ResolvedRef, point: { x: number; y: number }): Promise<RemoteObject | undefined> {
+    const hit = await this.send("DOM.getNodeForLocation", { x: Math.floor(point.x), y: Math.floor(point.y), includeUserAgentShadowDOM: false, ignorePointerEventsNone: false }, ref.session.sessionId)
+      .catch(() => undefined) as { backendNodeId?: number } | undefined;
+    if (!hit?.backendNodeId) return undefined;
+    const resolved = await this.send("DOM.resolveNode", { backendNodeId: hit.backendNodeId, executionContextId: ref.contextId }, ref.session.sessionId).catch(() => undefined);
+    const objectId = resolved?.object?.objectId as string | undefined;
+    return objectId ? new RemoteObject(objectId) : undefined;
   }
 
   /** Resolve `e12` / `f2e12` from the latest snapshot of the active tab to a live element. */
@@ -269,9 +294,23 @@ export class TaskBrowser {
     return { x: parentOffset.x + model.content[0]!, y: parentOffset.y + model.content[1]! };
   }
 
+  /**
+   * Close a tab and wait until Chrome destroyed it. Target.closeTarget answers before the target
+   * is gone, and Chrome drops the request (still answering success) while a failed navigation's
+   * error page commits, so the close is repeated until Target.targetDestroyed confirms it.
+   */
   public async closeTab(tab: Tab): Promise<void> {
     if (tab.closed) return;
-    await this.send("Target.closeTarget", { targetId: tab.targetId }, undefined, 5_000).catch(() => undefined);
+    const destroyed = new Promise<void>((resolve) => this.#destroyed.set(tab.targetId, resolve));
+    try {
+      for (let attempt = 0; attempt < CLOSE_ATTEMPTS && !tab.closed; attempt++) {
+        const requested = await this.send("Target.closeTarget", { targetId: tab.targetId }, undefined, 5_000).then(() => true, () => false);
+        if (!requested) return;
+        await Promise.race([destroyed, Bun.sleep(CLOSE_CONFIRM_MS)]);
+      }
+    } finally {
+      this.#destroyed.delete(tab.targetId);
+    }
   }
 
   /** Close the tabs this run opened (unless kept) and the connection it opened. */
