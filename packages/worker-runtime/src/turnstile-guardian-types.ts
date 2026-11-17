@@ -1,4 +1,7 @@
-/** Shared contracts for the process-level Cloudflare Turnstile guardian. */
+/**
+ * Shared contracts for the process-level challenge guardian. It is named after Turnstile, its
+ * first handler; it also slides DataDome's slider (see challenge-handlers.ts).
+ */
 
 import type { TokenCaptchaSolver } from "./captcha-solvers/types";
 import type { CdpFetcher, CdpTransportFactory } from "./cdp-connection";
@@ -12,9 +15,9 @@ export interface TurnstileGuardianSpec {
   enabled: boolean;
   /** How often each attached page is inspected. */
   pollIntervalMs: number;
-  /** Maximum time spent clicking one challenge before entering cooldown. */
+  /** Maximum time spent on one challenge before it is bounded. */
   challengeTimeoutMs: number;
-  /** Maximum click gestures issued for one challenge instance. */
+  /** Maximum Turnstile click gestures for one challenge instance. DataDome has its own fixed, smaller budget. */
   maxClickAttempts: number;
 }
 
@@ -32,31 +35,20 @@ export interface TurnstileGuardianOptions extends Partial<Omit<TurnstileGuardian
   tokenSolver?: TokenCaptchaSolver;
 }
 
-/** A visible Turnstile iframe rectangle in top-level page coordinates. */
-export interface TurnstileChallengeBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  /** Internal only; telemetry sanitizes this to origin before logging. */
-  frameUrl: string;
-  /** Internal CDP/DOM identity used only for bounded local accounting. */
-  instanceId?: string;
-}
-
+/** Scalar Turnstile signals from the page's isolated world. Geometry never comes from the page. */
 export interface TurnstilePageObservation {
   url: string;
   title: string;
   signals: string[];
   challenge: boolean;
   solved: boolean;
-  boxes: TurnstileChallengeBox[];
 }
 
 export interface TurnstileGuardianSnapshot {
   running: boolean;
   attachedPages: number;
   checks: number;
+  /** Trusted gestures sent across all handlers: Turnstile clicks and DataDome slides. */
   clickAttempts: number;
   lastError?: string;
 }

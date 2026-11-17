@@ -1,10 +1,12 @@
 /**
- * Process-level Cloudflare Turnstile guardian.
+ * Process-level challenge guardian (named after Turnstile, its first handler).
  *
  * One guardian attaches to each Fabric-owned Chromium process independently of
- * application CDP clients. It observes every page/tab and performs a bounded,
- * Media-style trusted mouse gesture only on visible Cloudflare Turnstile
- * iframe owners. Recipes whose challenge handlers enable token solving also get
+ * application CDP clients. It observes every page/tab and performs bounded
+ * trusted mouse gestures only on visible, URL-validated challenge iframes: a
+ * Media-style click on Cloudflare Turnstile and a human-like slide on
+ * DataDome's slider (one handler each, see challenge-handlers.ts). Recipes whose
+ * challenge handlers enable token solving also get
  * reCAPTCHA v2 token injection from this same companion (hCaptcha is unsupported).
  * The clicker itself never calls a provider API; solver traffic goes through the
  * injected TokenCaptchaSolver only.
@@ -13,7 +15,6 @@ import {
   DEFAULT_TURNSTILE_CHALLENGE_TIMEOUT_MS,
   DEFAULT_TURNSTILE_MAX_CLICK_ATTEMPTS,
   DEFAULT_TURNSTILE_POLL_INTERVAL_MS,
-  type TurnstileChallengeBox,
   type TurnstileGuardianFactory,
   type TurnstileGuardianHandle,
   type TurnstileGuardianLogger,
@@ -28,23 +29,35 @@ import { isCaptchaSitekey, CaptchaSolverError } from "./captcha-solvers/types";
 import { RECAPTCHA_V2_PROBE_SCRIPT, recaptchaCallbackScript, recaptchaFillScript } from "./captcha-solvers/recaptcha-page";
 import { CdpConnection, DEFAULT_CDP_CONNECT_TIMEOUT_MS } from "./cdp-connection";
 import {
+  SiteAttemptLedger,
+  challengeDecision,
+  challengeSite,
+  handlerForFrameUrl,
+  newChallengeState,
+  type ChallengeActionContext,
+  type ChallengeFrameBox,
+  type ChallengeHandler,
+  type ChallengeKind,
+  type ChallengeState,
+} from "./challenge-handlers";
+import { dataDomeSliderHandler } from "./datadome-slider";
+import { turnstileClickHandler } from "./turnstile-click";
+import {
   TURNSTILE_MOUSE_COMPAT_SCRIPT,
   TURNSTILE_OBSERVATION_SCRIPT,
   attributeValue,
   boxFromContentQuad,
+  challengeGeometryKey,
+  challengeKey,
   childFrames,
   documentIframes,
   distinctBoxes,
-  isTurnstileFrameUrl,
   isUsableBox,
-  jitter,
   normalizeObservation,
-  resolveTurnstileFrameUrl,
+  resolveFrameUrl,
   safeErrorKind,
   safeGuardianDetails,
   sleep,
-  turnstileChallengeKey,
-  turnstileGeometryKey,
 } from "./turnstile-guardian-observation";
 
 export {
@@ -53,7 +66,6 @@ export {
   DEFAULT_TURNSTILE_POLL_INTERVAL_MS,
 } from "./turnstile-guardian-types";
 export type {
-  TurnstileChallengeBox,
   TurnstileGuardianFactory,
   TurnstileGuardianFactoryInput,
   TurnstileGuardianHandle,
@@ -74,15 +86,6 @@ const ISOLATED_WORLD_NAME = "fabric-turnstile-guardian";
 const FILL_FIELD_WAIT_MS = 5_000;
 const FILL_FIELD_POLL_MS = 150;
 
-type ActiveTurnstileChallenge = {
-  startedAt: number;
-  clickAttempts: number;
-  checks: number;
-  cooldownUntil: number;
-  /** Geometry bridges DOM and frame-tree observations of the same iframe. */
-  geometryKey: string;
-};
-
 type AttachedPage = {
   targetId: string;
   sessionId: string;
@@ -99,7 +102,7 @@ type AttachedPage = {
    */
   isolatedContextId?: number;
   /** Bounded state is per visible widget, rather than per whole page. */
-  challenges: Map<string, ActiveTurnstileChallenge>;
+  challenges: Map<string, ChallengeState>;
 };
 
 export const defaultTurnstileGuardianSpec = (): TurnstileGuardianSpec => ({
@@ -151,8 +154,8 @@ function normalizeOptions(options: TurnstileGuardianOptions): {
 
 function defaultLogger(event: string, details?: Record<string, unknown>): void {
   // Callers receive only telemetry sanitized by safeGuardianDetails.
-  if (details) console.info(`[fabric-turnstile] ${event}`, details);
-  else console.info(`[fabric-turnstile] ${event}`);
+  if (details) console.info(`[fabric-guardian] ${event}`, details);
+  else console.info(`[fabric-guardian] ${event}`);
 }
 
 /** Validate a guardian declaration before a runtime may launch Chromium. */
@@ -186,13 +189,18 @@ export function turnstileGuardianSpecFromEnvironment(env: Record<string, string 
 }
 
 /**
- * Watches every page target in one browser and performs bounded Turnstile
- * checkbox gestures. Application CDP clients may attach/reconnect freely;
- * this connection remains Fabric-owned and independent.
+ * Watches every page target in one browser and performs bounded challenge
+ * gestures. Application CDP clients may attach/reconnect freely; this
+ * connection remains Fabric-owned and independent.
  */
 export class TurnstileGuardian implements TurnstileGuardianHandle {
   readonly #options: ReturnType<typeof normalizeOptions>;
   readonly #logger: TurnstileGuardianLogger;
+  readonly #handlers: readonly ChallengeHandler[];
+  /** Gestures per vendor and top-level origin, for budgets that must survive reloads. */
+  readonly #siteAttempts = new SiteAttemptLedger();
+  /** Frame targets a handler is attaching to; auto-attach cleanup must leave their sessions alone. */
+  readonly #claimedFrameTargets = new Set<string>();
   readonly #pages = new Map<string, AttachedPage>();
   /** Token solves in flight, keyed by page target. */
   readonly #tokenSolves = new Map<string, AbortController>();
@@ -214,6 +222,10 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
 
   public constructor(options: TurnstileGuardianOptions) {
     this.#options = normalizeOptions(options);
+    this.#handlers = [
+      turnstileClickHandler({ maxAttempts: this.#options.maxClickAttempts, timeoutMs: this.#options.challengeTimeoutMs }),
+      dataDomeSliderHandler({ timeoutMs: this.#options.challengeTimeoutMs }),
+    ];
     const logger = options.logger ?? defaultLogger;
     // Telemetry must never disrupt a protected browser session.
     this.#logger = (event, details) => {
@@ -335,9 +347,10 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
       if (!sessionId) return;
       if (info?.type === "page" && info.targetId) {
         await this.#registerPage(info.targetId, sessionId, info.url ?? "");
-      } else {
+      } else if (!(info?.targetId && this.#claimedFrameTargets.has(info.targetId))) {
         // Flattened auto-attach includes workers/OOPIFs. The page session's
         // frame tree is enough; retaining auxiliary sessions can leak them.
+        // A handler's own short-lived frame session detaches itself.
         await this.#connection?.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
       }
       return;
@@ -378,8 +391,8 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
       if (!frame?.url) return;
       for (const page of this.#pages.values()) {
         if (page.sessionId !== message.sessionId) continue;
-        // Turnstile's own child-frame navigations are expected and must not
-        // grant a fresh top-level click budget.
+        // Challenge widgets' own child-frame navigations are expected and must
+        // not grant a fresh top-level budget.
         if (frame.parentId || (page.mainFrameId && frame.id && page.mainFrameId !== frame.id)) continue;
         this.#resetPageDocument(page, frame.url, frame.id);
       }
@@ -438,10 +451,11 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
   }
 
   #resetPageDocument(page: AttachedPage, url: string, mainFrameId?: string): void {
+    // Vendors reload the page after a solve (DataDome sets its cookie, then reloads).
+    this.#clearChallenges(page, "navigation");
     page.url = url;
     if (mainFrameId) page.mainFrameId = mainFrameId;
     page.isolatedContextId = undefined;
-    page.challenges.clear();
     // A new top-level document gets a fresh token budget. A solve for the previous document is cancelled
     // so its token can never be injected into this one.
     page.documentGeneration += 1;
@@ -511,51 +525,49 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
       });
       const normalized = normalizeObservation(result?.result?.value);
       if (!normalized) return;
-      // Page JavaScript supplies signals only. Never trust a page-returned
-      // geometry value for trusted CDP input; rectangles below come solely
-      // from DOM.getBoxModel / Page.getFrameTree.
-      observation = { ...normalized, boxes: [] };
-      const frameBoxes = await this.#turnstileFrameBoxes(page);
-      if (this.#pages.get(page.targetId) !== page) return;
-      if (frameBoxes.length > 0) {
-        observation = {
-          ...observation,
-          challenge: !observation.solved,
-          signals: [...new Set([...observation.signals, "challenge-frame"])],
-          // CDP frame-tree boxes carry a stable frame identity and are first so
-          // dedupe preserves them over ordinary DOM-query observations.
-          boxes: distinctBoxes([...frameBoxes, ...observation.boxes]),
-        };
-      }
+      observation = normalized;
     } catch (error) {
       this.#logError("page observation failed", error, { targetId: page.targetId });
       return;
     }
+    // Page JavaScript supplies Turnstile signals only. Rectangles for trusted
+    // input come solely from DOM.getBoxModel on CDP-reported frames.
+    const frameBoxes = await this.#challengeFrameBoxes(page);
+    if (this.#pages.get(page.targetId) !== page) return;
 
     page.url = observation.url || page.url;
     if (this.#options.tokenSolver) void this.#solveRecaptchaToken(page);
-    if (!observation.challenge || observation.solved) {
-      this.#clearChallenges(page);
+
+    // Revalidate the frame URL against its handler outside the page realm. A
+    // hostile page cannot turn a fabricated frame into input on an arbitrary
+    // cross-origin frame. A filled Turnstile response means its widget is done.
+    const boxes = frameBoxes
+      .filter((box) => isUsableBox(box) && this.#handler(box.kind).matchesFrameUrl(box.frameUrl) && !(box.kind === "turnstile" && observation.solved))
+      .slice(0, MAX_TRACKED_CHALLENGES_PER_PAGE);
+    if (boxes.length === 0) {
+      // A Turnstile page whose widget is still booting keeps its budget.
+      if (!observation.challenge || observation.solved) this.#clearChallenges(page, "solved");
       return;
     }
 
-    // Revalidate origin outside the page realm. A hostile page cannot turn a
-    // fabricated observation into a click on an arbitrary cross-origin frame.
-    const boxes = distinctBoxes(observation.boxes.filter((box) => isUsableBox(box) && isTurnstileFrameUrl(box.frameUrl)))
-      .slice(0, MAX_TRACKED_CHALLENGES_PER_PAGE);
-    if (boxes.length === 0) return;
-
-    const visibleKeys = new Set(boxes.map(turnstileChallengeKey));
+    const visibleKeys = new Set(boxes.map(challengeKey));
     for (const key of page.challenges.keys()) {
       if (visibleKeys.has(key)) continue;
       const challenge = page.challenges.get(key);
-      if (!challenge || !boxes.some((box) => turnstileGeometryKey(box) === challenge.geometryKey)) page.challenges.delete(key);
+      if (!challenge || !boxes.some((box) => challengeGeometryKey(box) === challenge.geometryKey)) page.challenges.delete(key);
     }
 
     for (const box of boxes) {
       if (this.#pages.get(page.targetId) !== page || !this.#running) return;
-      await this.#processChallenge(page, box, observation.signals);
+      const signals = box.kind === "turnstile" ? [...new Set([...observation.signals, "challenge-frame"])] : ["challenge-frame"];
+      await this.#processChallenge(page, box, signals);
     }
+  }
+
+  #handler(kind: ChallengeKind): ChallengeHandler {
+    const handler = this.#handlers.find((candidate) => candidate.kind === kind);
+    if (!handler) throw new Error(`No challenge handler for ${kind}`);
+    return handler;
   }
 
   /**
@@ -630,22 +642,26 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
     return result?.result?.value;
   }
 
-  #clearChallenges(page: AttachedPage): void {
+  /** Reports the challenges that left the page: their widget went away, or the document navigated. */
+  #clearChallenges(page: AttachedPage, by: "solved" | "navigation"): void {
     if (page.challenges.size > 0) {
-      let clickAttempts = 0;
+      let attempts = 0;
       let checks = 0;
+      const kinds = new Set<ChallengeKind>();
       for (const challenge of page.challenges.values()) {
-        clickAttempts += challenge.clickAttempts;
+        attempts += challenge.attempts;
         checks += challenge.checks;
+        kinds.add(challenge.kind);
       }
-      this.#logger("cleared", { url: page.url, challenges: page.challenges.size, checks, clickAttempts });
+      this.#logger("cleared", { url: page.url, by, kinds: [...kinds], challenges: page.challenges.size, checks, clickAttempts: attempts });
     }
     page.challenges.clear();
   }
 
-  async #processChallenge(page: AttachedPage, box: TurnstileChallengeBox, signals: readonly string[]): Promise<void> {
-    const key = turnstileChallengeKey(box);
-    const geometryKey = turnstileGeometryKey(box);
+  async #processChallenge(page: AttachedPage, box: ChallengeFrameBox, signals: readonly string[]): Promise<void> {
+    const handler = this.#handler(box.kind);
+    const key = challengeKey(box);
+    const geometryKey = challengeGeometryKey(box);
     let challenge = page.challenges.get(key);
     if (!challenge) {
       // A transient DOM/frame-tree race can change an internal key while the
@@ -659,36 +675,89 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
     }
     if (!challenge) {
       if (page.challenges.size >= MAX_TRACKED_CHALLENGES_PER_PAGE) return;
-      challenge = { startedAt: Date.now(), clickAttempts: 0, checks: 0, cooldownUntil: 0, geometryKey };
+      challenge = newChallengeState(box.kind, handler.policy, Date.now(), geometryKey);
       page.challenges.set(key, challenge);
-      this.#logger("detected", { url: page.url, signals });
+      this.#logger("detected", { url: page.url, kind: box.kind, signals });
     }
     challenge.geometryKey = geometryKey;
     challenge.checks += 1;
-    const elapsed = Date.now() - challenge.startedAt;
-    if (Date.now() < challenge.cooldownUntil || elapsed > this.#options.challengeTimeoutMs || challenge.clickAttempts >= this.#options.maxClickAttempts) {
-      if (challenge.cooldownUntil === 0) {
-        challenge.cooldownUntil = Date.now() + Math.max(this.#options.challengeTimeoutMs, 5_000);
-        this.#logger("bounded", { url: page.url, elapsedMs: elapsed, checks: challenge.checks, clickAttempts: challenge.clickAttempts });
-      }
+    const site = challengeSite(box.kind, page.url);
+    const now = Date.now();
+    const siteAttempts = handler.policy.site ? this.#siteAttempts.count(site, handler.policy.site.windowMs, now) : 0;
+    const decision = challengeDecision(challenge, handler.policy, now, siteAttempts);
+    if (decision === "bound") {
+      challenge.bounded = true;
+      this.#logger("bounded", { url: page.url, kind: box.kind, elapsedMs: now - challenge.startedAt, checks: challenge.checks, clickAttempts: challenge.attempts, siteAttempts });
+    }
+    if (decision !== "act") return;
+
+    let outcome;
+    try {
+      outcome = await handler.act(this.#actionContext(page), box);
+    } catch (error) {
+      this.#logError(`${box.kind} gesture failed`, error, { frameUrl: box.frameUrl });
       return;
     }
-    if (await this.#click(page.sessionId, box)) {
-      challenge.clickAttempts += 1;
-      this.#clickAttempts += 1;
-      this.#logger("clicked", { url: page.url, signals, clickAttempts: challenge.clickAttempts });
+    if (outcome === "unsupported") {
+      challenge.bounded = true;
+      this.#logger("bounded", { url: page.url, kind: box.kind, reason: "unsupported-variant", checks: challenge.checks, clickAttempts: challenge.attempts });
+      return;
+    }
+    if (outcome !== "acted") return;
+    challenge.attempts += 1;
+    challenge.nextAttemptAt = Date.now() + handler.policy.retryDelayMs;
+    if (handler.policy.site) this.#siteAttempts.record(site, Date.now());
+    this.#clickAttempts += 1;
+    this.#logger(handler.actionEvent, { url: page.url, kind: box.kind, signals, clickAttempts: challenge.attempts });
+  }
+
+  #actionContext(page: AttachedPage): ChallengeActionContext {
+    const connection = this.#connection;
+    if (!connection) throw new Error("Turnstile guardian is not connected");
+    return {
+      pageSessionId: page.sessionId,
+      send: (method, params, sessionId) => connection.send(method, params ?? {}, sessionId),
+      withFrameSession: (box, use) => this.#withFrameSession(connection, box, use),
+    };
+  }
+
+  /**
+   * An out-of-process frame is its own target whose id is the frame id. Attaching
+   * fails for a frame in the page's process, which `use` then reads through the
+   * page session instead. The target's CDP-reported URL is revalidated, so input
+   * geometry only ever comes from the validated vendor document.
+   */
+  async #withFrameSession<T>(connection: CdpConnection, box: ChallengeFrameBox, use: (sessionId: string | undefined) => Promise<T>): Promise<T> {
+    const frameId = box.frameId;
+    if (frameId === undefined) return use(undefined);
+    this.#claimedFrameTargets.add(frameId);
+    let sessionId: string | undefined;
+    try {
+      const info = await connection.send("Target.getTargetInfo", { targetId: frameId }).catch(() => undefined);
+      const target = info?.targetInfo as { type?: unknown; url?: unknown } | undefined;
+      if (target?.type === "iframe") {
+        if (!this.#handler(box.kind).matchesFrameUrl(target.url)) throw new Error("Challenge frame target URL changed");
+        const attached = await connection.send("Target.attachToTarget", { targetId: frameId, flatten: true });
+        sessionId = typeof attached?.sessionId === "string" ? attached.sessionId : undefined;
+        if (!sessionId) throw new Error("Challenge frame target did not attach");
+      }
+      return await use(sessionId);
+    } finally {
+      if (sessionId) await connection.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+      this.#claimedFrameTargets.delete(frameId);
     }
   }
 
-  async #turnstileFrameBoxes(page: AttachedPage): Promise<TurnstileChallengeBox[]> {
+  async #challengeFrameBoxes(page: AttachedPage): Promise<ChallengeFrameBox[]> {
     if (!this.#connection) return [];
-    const boxes: TurnstileChallengeBox[] = [];
+    const boxes: ChallengeFrameBox[] = [];
     try {
       const result = await this.#connection.send("Page.getFrameTree", {}, page.sessionId);
       const rootFrame = result?.frameTree?.frame as { id?: unknown } | undefined;
       if (typeof rootFrame?.id === "string") page.mainFrameId = rootFrame.id;
       for (const frame of childFrames(result?.frameTree)) {
-        if (typeof frame.id !== "string" || !isTurnstileFrameUrl(frame.url)) continue;
+        const handler = handlerForFrameUrl(this.#handlers, frame.url);
+        if (typeof frame.id !== "string" || !handler || typeof frame.url !== "string") continue;
         const owner = await this.#connection.send("DOM.getFrameOwner", { frameId: frame.id }, page.sessionId).catch(() => undefined);
         if (typeof owner?.backendNodeId !== "number") continue;
         const model = await this.#connection.send("DOM.getBoxModel", { backendNodeId: owner.backendNodeId }, page.sessionId).catch(() => undefined);
@@ -696,7 +765,7 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
         // Older Chromium/CDP wrappers may not resolve a cross-process owner.
         // A non-empty CDP box is then the only available visibility proof.
         if (visible === false) continue;
-        const box = boxFromContentQuad(model?.model?.content ?? model?.model?.border, frame.url, `frame:${frame.id}`);
+        const box = boxFromContentQuad(model?.model?.content ?? model?.model?.border, { kind: handler.kind, frameUrl: frame.url, frameId: frame.id, instanceId: `frame:${frame.id}` });
         if (box) boxes.push(box);
       }
     } catch (error) {
@@ -707,7 +776,7 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
     }
 
     try {
-      boxes.push(...await this.#turnstileDomFrameBoxes(page));
+      boxes.push(...await this.#domFrameBoxes(page));
     } catch (error) {
       // Internal Chromium pages and a navigation in progress may not expose a
       // DOM root. The frame-tree path remains available; retry next poll.
@@ -721,18 +790,24 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
    * mounts its out-of-process Turnstile iframe inside a closed shadow root,
    * which only a shadow-piercing document walk reaches.
    */
-  async #turnstileDomFrameBoxes(page: AttachedPage): Promise<TurnstileChallengeBox[]> {
+  async #domFrameBoxes(page: AttachedPage): Promise<ChallengeFrameBox[]> {
     if (!this.#connection) return [];
     const documentResult = await this.#connection.send("DOM.getDocument", { depth: -1, pierce: true }, page.sessionId);
     const iframes = documentIframes(documentResult?.root).slice(0, MAX_TRACKED_CHALLENGES_PER_PAGE);
-    const boxes: TurnstileChallengeBox[] = [];
+    const boxes: ChallengeFrameBox[] = [];
     for (const node of iframes) {
-      const frameUrl = resolveTurnstileFrameUrl(attributeValue(node.attributes, "src"), page.url);
-      if (!frameUrl) continue;
+      const frameUrl = resolveFrameUrl(attributeValue(node.attributes, "src"), page.url);
+      const handler = handlerForFrameUrl(this.#handlers, frameUrl);
+      if (!frameUrl || !handler) continue;
       const model = await this.#connection.send("DOM.getBoxModel", { backendNodeId: node.backendNodeId }, page.sessionId).catch(() => undefined);
       const visible = await this.#isVisibleNode(page, node.backendNodeId);
       if (visible === false) continue;
-      const box = boxFromContentQuad(model?.model?.content ?? model?.model?.border, frameUrl, `dom:${node.backendNodeId}`);
+      const box = boxFromContentQuad(model?.model?.content ?? model?.model?.border, {
+        kind: handler.kind,
+        frameUrl,
+        ...(node.frameId ? { frameId: node.frameId } : {}),
+        instanceId: `dom:${node.backendNodeId}`,
+      });
       if (box) boxes.push(box);
     }
     return boxes;
@@ -775,41 +850,6 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
     } finally {
       const connection = this.#connection;
       if (objectId && connection) await connection.send("Runtime.releaseObject", { objectId }, sessionId).catch(() => undefined);
-    }
-  }
-
-  async #click(sessionId: string, box: TurnstileChallengeBox): Promise<boolean> {
-    if (!this.#connection) return false;
-    const x = Math.max(1, box.x + Math.min(Math.max(2, box.width / 2), Math.max(2, Math.min(30, box.width - 2))));
-    const y = Math.max(1, box.y + Math.min(Math.max(2, box.height / 2), Math.max(2, box.height - 2)));
-    try {
-      // Mirror the former Media page.mouse.move(..., {steps}) gesture: a
-      // short eased approach, then one press/release at a stable click point.
-      const startX = Math.max(1, x - 70 - Math.random() * 35);
-      const startY = Math.max(1, y - 25 - Math.random() * 25);
-      const steps = 12;
-      for (let step = 1; step <= steps; step += 1) {
-        const progress = step / steps;
-        const eased = progress * progress * (3 - 2 * progress);
-        await this.#connection.send("Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: jitter(startX + (x - startX) * eased),
-          y: jitter(startY + (y - startY) * eased),
-          button: "none",
-          timestamp: Date.now() / 1_000,
-        }, sessionId);
-        if (step < steps) await sleep(12);
-      }
-      await sleep(40);
-      const clickX = jitter(x, 1);
-      const clickY = jitter(y, 1);
-      await this.#connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: clickX, y: clickY, button: "left", buttons: 1, clickCount: 1, timestamp: Date.now() / 1_000 }, sessionId);
-      await sleep(55);
-      await this.#connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: clickX, y: clickY, button: "left", buttons: 0, clickCount: 1, timestamp: Date.now() / 1_000 }, sessionId);
-      return true;
-    } catch (error) {
-      this.#logError("click failed", error, { sessionId, frameUrl: box.frameUrl });
-      return false;
     }
   }
 

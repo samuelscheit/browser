@@ -1,4 +1,5 @@
-import type { TurnstileChallengeBox, TurnstilePageObservation } from "./turnstile-guardian-types";
+import type { ChallengeFrameBox, ChallengeKind } from "./challenge-handlers";
+import type { TurnstilePageObservation } from "./turnstile-guardian-types";
 
 /**
  * The page-side part deliberately returns only scalar signals. It never returns
@@ -68,7 +69,6 @@ export const TURNSTILE_OBSERVATION_SCRIPT = `(() => {
     signals: Array.from(new Set(signals)),
     challenge: explicitChallenge && !responseValue,
     solved: responseValue,
-    boxes: [],
   };
 })()`;
 
@@ -122,19 +122,22 @@ export function childFrames(tree: unknown): CdpFrame[] {
   return result;
 }
 
-type CdpDomNode = { nodeName?: unknown; backendNodeId?: unknown; attributes?: unknown; children?: unknown; shadowRoots?: unknown };
+type CdpDomNode = { nodeName?: unknown; backendNodeId?: unknown; frameId?: unknown; attributes?: unknown; children?: unknown; shadowRoots?: unknown };
+export type DocumentIframe = { backendNodeId: number; frameId?: string; attributes: unknown };
 
 /**
  * IFRAME elements of one document, including those inside open or closed
  * shadow roots. Nested frame documents are skipped: their boxes are relative
  * to that frame, not to the page the guardian clicks.
  */
-export function documentIframes(root: unknown): Array<{ backendNodeId: number; attributes: unknown }> {
-  const iframes: Array<{ backendNodeId: number; attributes: unknown }> = [];
+export function documentIframes(root: unknown): DocumentIframe[] {
+  const iframes: DocumentIframe[] = [];
   const visit = (candidate: unknown) => {
     if (!candidate || typeof candidate !== "object") return;
     const node = candidate as CdpDomNode;
-    if (node.nodeName === "IFRAME" && typeof node.backendNodeId === "number") iframes.push({ backendNodeId: node.backendNodeId, attributes: node.attributes });
+    if (node.nodeName === "IFRAME" && typeof node.backendNodeId === "number") {
+      iframes.push({ backendNodeId: node.backendNodeId, ...(typeof node.frameId === "string" ? { frameId: node.frameId } : {}), attributes: node.attributes });
+    }
     for (const children of [node.children, node.shadowRoots]) {
       if (Array.isArray(children)) for (const child of children) visit(child);
     }
@@ -143,7 +146,15 @@ export function documentIframes(root: unknown): Array<{ backendNodeId: number; a
   return iframes;
 }
 
-export function boxFromContentQuad(value: unknown, frameUrl: string, instanceId?: string): TurnstileChallengeBox | undefined {
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The bounding rectangle of a CDP box-model quad, or undefined for a malformed or empty one. */
+export function rectFromQuad(value: unknown): Rect | undefined {
   if (!Array.isArray(value) || value.length < 8 || value.some((coordinate) => typeof coordinate !== "number" || !Number.isFinite(coordinate))) return undefined;
   const xs = value.filter((_, index) => index % 2 === 0) as number[];
   const ys = value.filter((_, index) => index % 2 === 1) as number[];
@@ -151,7 +162,15 @@ export function boxFromContentQuad(value: unknown, frameUrl: string, instanceId?
   const y = Math.min(...ys);
   const width = Math.max(...xs) - x;
   const height = Math.max(...ys) - y;
-  return width > 0 && height > 0 ? { x, y, width, height, frameUrl, ...(instanceId ? { instanceId } : {}) } : undefined;
+  return width > 0 && height > 0 ? { x, y, width, height } : undefined;
+}
+
+export function boxFromContentQuad(
+  value: unknown,
+  frame: { kind: ChallengeKind; frameUrl: string; frameId?: string; instanceId?: string },
+): ChallengeFrameBox | undefined {
+  const rect = rectFromQuad(value);
+  return rect ? { ...rect, ...frame } : undefined;
 }
 
 export function attributeValue(attributes: unknown, name: string): string | undefined {
@@ -162,19 +181,19 @@ export function attributeValue(attributes: unknown, name: string): string | unde
   return undefined;
 }
 
-export function resolveTurnstileFrameUrl(rawUrl: unknown, documentUrl: string): string | undefined {
+/** An iframe `src` attribute resolved against its document; handlers classify the result. */
+export function resolveFrameUrl(rawUrl: unknown, documentUrl: string): string | undefined {
   if (typeof rawUrl !== "string" || rawUrl.length === 0 || rawUrl.length > 2_048) return undefined;
   try {
-    const resolved = new URL(rawUrl, documentUrl).toString();
-    return isTurnstileFrameUrl(resolved) ? resolved : undefined;
+    return new URL(rawUrl, documentUrl).toString();
   } catch {
     return undefined;
   }
 }
 
 /** Deduplicate the same physical iframe seen through DOM and frame-tree APIs. */
-export function distinctBoxes(boxes: readonly TurnstileChallengeBox[]): TurnstileChallengeBox[] {
-  const distinct: TurnstileChallengeBox[] = [];
+export function distinctBoxes(boxes: readonly ChallengeFrameBox[]): ChallengeFrameBox[] {
+  const distinct: ChallengeFrameBox[] = [];
   for (const box of boxes) {
     const duplicate = distinct.some((existing) => {
       const centerDistanceX = Math.abs((existing.x + existing.width / 2) - (box.x + box.width / 2));
@@ -233,45 +252,25 @@ export function normalizeObservation(value: unknown): TurnstilePageObservation |
   const signals = Array.isArray(record.signals)
     ? record.signals.filter((signal): signal is string => typeof signal === "string" && knownSignals.has(signal)).slice(0, 32)
     : [];
-  // The production page script intentionally emits no boxes, but retaining this
-  // parser keeps injected deterministic transports bounded and safe.
-  const boxes = Array.isArray(record.boxes)
-    ? record.boxes.flatMap((candidate) => {
-      if (!candidate || typeof candidate !== "object") return [];
-      const box = candidate as Record<string, unknown>;
-      const x = typeof box.x === "number" ? box.x : Number.NaN;
-      const y = typeof box.y === "number" ? box.y : Number.NaN;
-      const width = typeof box.width === "number" ? box.width : Number.NaN;
-      const height = typeof box.height === "number" ? box.height : Number.NaN;
-      const frameUrl = typeof box.frameUrl === "string" ? box.frameUrl : "";
-      const instanceId = typeof box.instanceId === "string" && box.instanceId.length <= 2_048 ? box.instanceId : undefined;
-      if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0 || frameUrl.length > 2_048) return [];
-      return [{ x, y, width, height, frameUrl, ...(instanceId ? { instanceId } : {}) }];
-    }).slice(0, 64)
-    : [];
-  return { url, title, signals, challenge: record.challenge === true, solved: record.solved === true, boxes };
+  return { url, title, signals, challenge: record.challenge === true, solved: record.solved === true };
 }
 
 export function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-export function jitter(value: number, range = 2): number {
-  return value + (Math.random() * 2 - 1) * range;
-}
-
-export function isUsableBox(box: TurnstileChallengeBox): boolean {
+export function isUsableBox(box: ChallengeFrameBox): boolean {
   // Reject tiny/degenerate boxes so an attacker cannot use a hidden 1x1 frame
   // to turn this into an arbitrary trusted input event.
   return Number.isFinite(box.x) && Number.isFinite(box.y) && box.width >= 8 && box.height >= 8;
 }
 
-export function turnstileChallengeKey(box: TurnstileChallengeBox): string {
-  if (box.instanceId?.startsWith("frame:")) return box.instanceId;
-  return `box:${Math.round(box.x / 2)}\u0000${Math.round(box.y / 2)}\u0000${Math.round(box.width / 2)}\u0000${Math.round(box.height / 2)}`;
+export function challengeKey(box: ChallengeFrameBox): string {
+  if (box.instanceId?.startsWith("frame:")) return `${box.kind}:${box.instanceId}`;
+  return `${box.kind}:box:${Math.round(box.x / 2)}\u0000${Math.round(box.y / 2)}\u0000${Math.round(box.width / 2)}\u0000${Math.round(box.height / 2)}`;
 }
 
-export function turnstileGeometryKey(box: TurnstileChallengeBox): string {
-  return `${Math.round((box.x + box.width / 2) / 4)}\u0000${Math.round((box.y + box.height / 2) / 4)}\u0000${Math.round(box.width / 4)}\u0000${Math.round(box.height / 4)}`;
+export function challengeGeometryKey(box: ChallengeFrameBox): string {
+  return `${box.kind}:${Math.round((box.x + box.width / 2) / 4)}\u0000${Math.round((box.y + box.height / 2) / 4)}\u0000${Math.round(box.width / 4)}\u0000${Math.round(box.height / 4)}`;
 }
 

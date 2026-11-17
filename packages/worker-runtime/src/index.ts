@@ -219,3 +219,6 @@ export * from "./captcha-solvers/recaptcha-page";
 export * from "./cdp-connection";
 export * from "./chromium";
 export * from "./turnstile-guardian";
+export * from "./challenge-handlers";
+export * from "./datadome-slider";
+export type { MousePoint, MouseStep, RandomSource } from "./trusted-mouse";
