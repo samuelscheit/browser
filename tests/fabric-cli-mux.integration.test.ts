@@ -1,30 +1,25 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
 import puppeteer from "puppeteer-core";
 import { CdpConnection } from "@browser-fabric/worker-runtime";
-import { readDevToolsActivePort } from "../apps/cli/src/devtools-active-port";
 import { EndpointServer } from "../apps/cli/src/endpoint-server";
 import { SystemChromeBackend } from "../apps/cli/src/system-chrome-backend";
 import { ToggleProxy } from "./support/toggle-proxy";
+import { browserIntegration, launchChromium, type TestChromium } from "./support/chromium";
 
 /**
  * The endpoint's multiplexer against a real Chromium that stands in for the user's Chrome: a
  * throwaway profile with --remote-debugging-port, behind a proxy that behaves like Chrome's
  * remote-debugging toggle (no /json, no page sockets, one prompt per browser socket, counted).
  */
-const enabled = process.env.RUN_BROWSER_INTEGRATION === "1";
-const chrome = process.env.FABRIC_TEST_CHROMIUM
-  ?? join(homedir(), "Library/Caches/ms-playwright/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing");
-const run = enabled && existsSync(chrome) ? describe : describe.skip;
+const run = browserIntegration ? describe : describe.skip;
 
-let profile: string;
 let systemDir: string;
-let browserProcess: ChildProcess;
+let testBrowser: TestChromium;
 let direct: string;
 let proxy: ToggleProxy;
 let server: EndpointServer;
@@ -106,11 +101,9 @@ run("fabric endpoint multiplexer on a Chrome with the remote-debugging toggle", 
         return new Response(`<!doctype html><title>${url.searchParams.get("title") ?? ""}</title>${url.searchParams.get("body") ?? ""}`, { headers: { "content-type": "text/html" } });
       },
     });
-    profile = mkdtempSync(join(tmpdir(), "fabric-mux-chrome-"));
     systemDir = mkdtempSync(join(tmpdir(), "fabric-mux-system-"));
-    browserProcess = spawn(chrome, [`--user-data-dir=${profile}`, "--remote-debugging-port=0", "--headless=new", "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: "ignore" });
-    const active = await waitFor(() => readDevToolsActivePort(profile), 30_000);
-    direct = `ws://127.0.0.1:${active.port}${active.path}`;
+    testBrowser = await launchChromium();
+    direct = testBrowser.webSocket;
     proxy = new ToggleProxy(direct).start();
     writeFileSync(join(systemDir, "DevToolsActivePort"), proxy.devToolsActivePort);
     const port = await freePort();
@@ -129,9 +122,7 @@ run("fabric endpoint multiplexer on a Chrome with the remote-debugging toggle", 
     proxy?.stop();
     site?.stop(true);
     // Only the Chromium this file started; nothing else is touched.
-    browserProcess?.kill("SIGTERM");
-    await new Promise((resolve) => browserProcess?.once("exit", resolve));
-    rmSync(profile, { recursive: true, force: true });
+    await testBrowser?.close();
     rmSync(systemDir, { recursive: true, force: true });
   });
 
@@ -206,7 +197,7 @@ run("fabric endpoint multiplexer on a Chrome with the remote-debugging toggle", 
     const puppeteerTarget = (await pageTargets()).find((target) => target.title === "puppeteer-page")!;
     await browser.close();
     await waitFor(async () => !(await pageTargets()).some((target) => target.targetId === puppeteerTarget.targetId));
-    expect(browserProcess.exitCode).toBeNull();
+    expect(testBrowser.running).toBe(true);
     expect(await keep.evaluate(() => document.title)).toBe("playwright-keeps");
     expect(proxy.sent.some((frame) => frame.method === "Browser.close")).toBe(false);
     await playwright.close();
@@ -343,7 +334,7 @@ run("fabric endpoint multiplexer on a Chrome with the remote-debugging toggle", 
     const tabsBefore = (await pageTargets()).map((target) => target.targetId).sort();
     await server.stop();
     await Bun.sleep(300);
-    expect(browserProcess.exitCode).toBeNull();
+    expect(testBrowser.running).toBe(true);
     expect((await pageTargets()).map((target) => target.targetId).sort()).toEqual(tabsBefore);
     expect(log.some((line) => line.includes("click Allow"))).toBe(true);
   }, 30_000);

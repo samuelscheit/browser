@@ -1,9 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { LlmError, runTask, type ChatModel, type ChatRequest, type ChatResponse, type StepLog, type ToolCall } from "@browser-fabric/task-agent";
-import { findChromium, launchChromium, type TestChromium } from "./support/chromium";
+import { chromiumExecutable as executable, launchChromium, type TestChromium } from "./support/chromium";
 import { PASSWORD, startFixtureSite, type FixtureSite } from "./support/task-agent-fixtures";
 
-const executable = await findChromium();
 let chromium: TestChromium;
 let site: FixtureSite;
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { CdpConnection, closeBrowserGracefully, resolveBrowserWebSocketEndpoint } from "@browser-fabric/worker-runtime";
+import { createServer } from "node:net";
+import { CdpConnectError, CdpConnection, closeBrowserGracefully, resolveBrowserWebSocketEndpoint } from "@browser-fabric/worker-runtime";
 import { FakeCdpBrowser } from "./support/fake-cdp-browser";
 
 const browsers: FakeCdpBrowser[] = [];
@@ -36,6 +37,53 @@ describe("closeBrowserGracefully", () => {
     browser.stop();
     expect(await closeBrowserGracefully(url, { timeoutMs: 500 })).toBe(false);
     expect(await closeBrowserGracefully("not a url")).toBe(false);
+  });
+});
+
+/** What `connect` rejected with; fails the test when it connected. */
+async function connectError(endpoint: string, timeoutMs = 2_000): Promise<CdpConnectError> {
+  const error = await CdpConnection.connect({ endpoint, timeoutMs }).then((connection) => { connection.close(); return undefined; }, (failure: unknown) => failure);
+  expect(error).toBeInstanceOf(CdpConnectError);
+  return error as CdpConnectError;
+}
+
+describe("CdpConnection connect failures", () => {
+  // Chrome answers a declined "Allow remote debugging?" prompt with 403; gateways answer 401/404.
+  test.each([403, 401, 404, 500])("a refused upgrade reports the HTTP status %d, whatever the runtime's error text", async (status) => {
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("Connection rejected", { status }) });
+    try {
+      const error = await connectError(`ws://127.0.0.1:${server.port}/devtools/browser/x`);
+      expect(error.status).toBe(status);
+      expect(error.timedOut).toBe(false);
+      expect(error.message).toBe(`CDP websocket failed to connect (HTTP ${status} instead of 101 Switching Protocols)`);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a closed port is a connect failure without a status, not a timeout", async () => {
+    const port = await new Promise<number>((resolve) => {
+      const server = createServer().listen(0, "127.0.0.1", () => { const { port } = server.address() as { port: number }; server.close(() => resolve(port)); });
+    });
+    const started = Date.now();
+    const error = await connectError(`ws://127.0.0.1:${port}/devtools/browser/x`);
+    expect(error.status).toBeUndefined();
+    expect(error.timedOut).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
+
+  test("an upgrade nobody answers times out without a status", async () => {
+    const sockets = new Set<import("node:net").Socket>();
+    const server = createServer((socket) => { sockets.add(socket); });
+    const port = await new Promise<number>((resolve) => server.listen(0, "127.0.0.1", () => resolve((server.address() as { port: number }).port)));
+    try {
+      const error = await connectError(`ws://127.0.0.1:${port}/devtools/browser/x`, 300);
+      expect(error.timedOut).toBe(true);
+      expect(error.status).toBeUndefined();
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      server.close();
+    }
   });
 });
 

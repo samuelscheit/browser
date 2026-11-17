@@ -3,10 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ACTIONS, observe, Secrets, TaskBrowser, UploadPolicy, type ActionContext } from "@browser-fabric/task-agent";
-import { findChromium, launchChromium, type TestChromium } from "./support/chromium";
+import { chromiumExecutable as executable, launchChromium, type TestChromium } from "./support/chromium";
 import { startFixtureSite, type FixtureSite } from "./support/task-agent-fixtures";
 
-const executable = await findChromium();
 let chromium: TestChromium;
 let site: FixtureSite;
 let browser: TaskBrowser | undefined;

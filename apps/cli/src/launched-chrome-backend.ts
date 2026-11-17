@@ -6,7 +6,8 @@ import type { BrowserBackend } from "./backend";
 import { localProfileDirectory, type BrowserRequest } from "./config";
 import { readDevToolsActivePort } from "./devtools-active-port";
 
-const CHROME_CANDIDATES = [
+/** Where an installed Chrome or Chromium lives on macOS and Linux, in order of preference. */
+export const CHROME_CANDIDATES = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
   "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",

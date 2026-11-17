@@ -1,7 +1,10 @@
 /**
- * A small dependency-free CDP client shared by Fabric-owned browser companions
- * (the Turnstile guardian), the agent CLI and its live view.
+ * A small CDP client shared by Fabric-owned browser companions (the Turnstile guardian), the agent
+ * CLI and its live view.
  */
+
+import type { IncomingMessage } from "node:http";
+import WebSocket from "ws";
 
 export const DEFAULT_CDP_CONNECT_TIMEOUT_MS = 10_000;
 export const DEFAULT_CDP_COMMAND_TIMEOUT_MS = 15_000;
@@ -91,42 +94,48 @@ export class CdpConnectError extends Error {
   }
 }
 
-class NativeCdpTransport implements CdpTransport {
+/**
+ * The `ws` client (Bun ships it built in): unlike the WHATWG WebSocket it takes upgrade headers,
+ * which authenticated Fabric gateways require, and hands over the HTTP answer to a refused upgrade
+ * (`unexpected-response`), so its status is known without parsing runtime-specific error text.
+ */
+class WsCdpTransport implements CdpTransport {
   readonly #socket: WebSocket;
 
   private constructor(socket: WebSocket) {
     this.#socket = socket;
   }
 
-  public static async connect(url: string, timeoutMs: number, headers?: Readonly<Record<string, string>>): Promise<NativeCdpTransport> {
-    // Bun's WebSocket accepts upgrade headers, which authenticated Fabric gateways require.
-    const socket = headers ? new WebSocket(url, { headers } as never) : new WebSocket(url);
+  public static async connect(url: string, timeoutMs: number, headers?: Readonly<Record<string, string>>): Promise<WsCdpTransport> {
+    const socket = new WebSocket(url, { headers: { ...headers }, perMessageDeflate: false });
+    // Errors reach the handshake below and, once open, the connection's close handling; without a
+    // listener an EventEmitter error (say, the aborted request after terminate()) would throw.
+    socket.on("error", () => {});
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       const finish = (error?: CdpConnectError) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        socket.removeEventListener("open", onOpen);
-        socket.removeEventListener("error", onError);
-        if (error) {
-          try { socket.close(); } catch { /* the socket may not have opened */ }
-        }
-        if (error) reject(error); else resolve();
+        socket.off("open", onOpen);
+        socket.off("error", onError);
+        socket.off("unexpected-response", onUnexpectedResponse);
+        if (!error) return resolve();
+        socket.terminate();
+        reject(error);
       };
       const onOpen = () => finish();
-      // Bun reports the upgrade's HTTP answer in the error text ("Expected 101 status code: 403").
-      const onError = (event: Event) => {
-        const detail = (event as Event & { message?: unknown }).message;
-        const text = typeof detail === "string" ? detail : "";
-        const status = Number(/Expected 101 status code: (\d{3})/.exec(text)?.[1]) || undefined;
-        finish(new CdpConnectError(`CDP websocket failed to connect${text ? ` (${text})` : ""}`, status));
+      const onError = (error: Error) => finish(new CdpConnectError(`CDP websocket failed to connect (${error.message})`));
+      const onUnexpectedResponse = (_request: unknown, response: IncomingMessage) => {
+        const status = response.statusCode;
+        finish(new CdpConnectError(`CDP websocket failed to connect (HTTP ${status ?? "?"} instead of 101 Switching Protocols)`, status));
       };
       const timer = setTimeout(() => finish(new CdpConnectError("CDP websocket connection timed out", undefined, true)), timeoutMs);
-      socket.addEventListener("open", onOpen, { once: true });
-      socket.addEventListener("error", onError, { once: true });
+      socket.once("open", onOpen);
+      socket.once("error", onError);
+      socket.once("unexpected-response", onUnexpectedResponse);
     });
-    return new NativeCdpTransport(socket);
+    return new WsCdpTransport(socket);
   }
 
   get readyState(): number { return this.#socket.readyState; }
@@ -181,7 +190,7 @@ export class CdpConnection {
     const url = await resolveBrowserWebSocketEndpoint(options.endpoint, { fetcher: options.fetcher, timeoutMs });
     const transport = options.transportFactory
       ? await options.transportFactory(url, timeoutMs)
-      : await NativeCdpTransport.connect(url, timeoutMs, options.headers);
+      : await WsCdpTransport.connect(url, timeoutMs, options.headers);
     return new CdpConnection(transport);
   }
 

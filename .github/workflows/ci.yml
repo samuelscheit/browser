@@ -22,10 +22,21 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with: { bun-version: 1.4.0 }
       - run: bun install --frozen-lockfile
+      # The runner's own /usr/bin/chromium cannot start: Ubuntu 23.10+ lets only binaries with an
+      # AppArmor profile create the unprivileged user namespaces Chromium's sandbox needs ("No usable
+      # sandbox!"). Browser tests get Playwright's Chrome for Testing instead, pinned through
+      # bun.lock's playwright-core, and keep their sandbox with the restriction lifted on this
+      # throwaway VM.
+      - name: Browser for tests
+        run: |
+          bunx playwright-core install --with-deps --no-shell chromium
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          echo "FABRIC_TEST_CHROMIUM=$(bun -e 'console.log((await import("playwright-core")).chromium.executablePath())')" >> "$GITHUB_ENV"
       - run: bun run check
         env:
           FABRIC_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-      - run: RUN_BROWSER_INTEGRATION=1 bun test tests/raw-cdp.integration.test.ts --timeout 120000
+      # The federated-worker test runs an interactive (headful) recipe; Xvfb comes with --with-deps.
+      - run: RUN_BROWSER_INTEGRATION=1 xvfb-run -a bun test tests/raw-cdp.integration.test.ts --timeout 120000
       - run: ./scripts/validate-sql.sh browser_fabric_ci
         env:
           PGHOST: localhost

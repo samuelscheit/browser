@@ -18,6 +18,7 @@ import {
 } from "@browser-fabric/worker-runtime";
 import puppeteer, { type Browser as PuppeteerBrowser } from "puppeteer-core";
 import { FakeCdpTransport, challengeObservation, inputEvents, type Command } from "./support/fake-guardian-transport";
+import { browserIntegration, launchChromium, type TestChromium } from "./support/chromium";
 
 /** Deterministic random source, so path properties are checked over many reproducible plans. */
 function seeded(seed: number): () => number {
@@ -397,9 +398,6 @@ describe("guardian on a DataDome page", () => {
 // The slider only accepts a trusted drag to the end, then the page reloads to its content.
 // ---------------------------------------------------------------------------------------------
 
-const realBrowserEnabled = process.env.RUN_BROWSER_INTEGRATION === "1";
-const chromeExecutable = process.env.FABRIC_TEST_CHROMIUM ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const chromeAvailable = await Bun.file(chromeExecutable).exists();
 
 const sliderDocument = (mode: string) => `<!doctype html><html><head><title>DataDome CAPTCHA</title><style>
   body { margin: 0; font-family: sans-serif; }
@@ -455,14 +453,13 @@ const protectedDocument = (mode: string) => `<!doctype html><html><head><title>e
 <iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=local&cid=fixture&mode=${mode}" style="position:fixed;inset:0;width:100%;height:100%;border:0"></iframe>
 </body></html>`;
 
-describe.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium with a DataDome slider in an out-of-process frame", () => {
+describe.skipIf(!browserIntegration)("real Chromium with a DataDome slider in an out-of-process frame", () => {
   const directory = mkdtempSync(join(tmpdir(), "fabric-datadome-"));
   const verifications: Array<{ mode: string; accepted: boolean; left: number; moves: number; trusted: boolean; focused: boolean; ms: number }> = [];
   const tokens = new Set<string>();
   let captchaServer: ReturnType<typeof Bun.serve>;
   let siteServer: ReturnType<typeof Bun.serve>;
-  let chrome: ReturnType<typeof Bun.spawn>;
-  let cdpPort = 0;
+  let chrome: TestChromium;
 
   beforeAll(async () => {
     const certificate = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=geo.captcha-delivery.com",
@@ -497,24 +494,14 @@ describe.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium with a D
         return new Response(protectedDocument(url.searchParams.get("mode") ?? "accept"), { status: 403, headers: { "content-type": "text/html" } });
       },
     });
-    cdpPort = 24_000 + Math.floor(Math.random() * 1_000);
-    chrome = Bun.spawn([chromeExecutable,
-      "--headless=new", `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${join(directory, "profile")}`,
-      "--no-first-run", "--no-default-browser-check", "--window-size=1280,900", "--site-per-process",
-      `--host-resolver-rules=MAP geo.captcha-delivery.com 127.0.0.1:${captchaServer.port}`, "--ignore-certificate-errors",
-      "about:blank"], { stdout: "ignore", stderr: "ignore" });
-    const deadline = Date.now() + 20_000;
-    for (;;) {
-      const ready = await fetch(`http://127.0.0.1:${cdpPort}/json/version`).then((response) => response.ok).catch(() => false);
-      if (ready) break;
-      if (Date.now() > deadline) throw new Error("Chromium did not expose CDP");
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    chrome = await launchChromium(undefined, {
+      hostResolverRules: `MAP geo.captcha-delivery.com 127.0.0.1:${captchaServer.port}`,
+      args: ["--ignore-certificate-errors"],
+    });
   });
 
   afterAll(async () => {
-    chrome?.kill();
-    await chrome?.exited;
+    await chrome?.close();
     captchaServer?.stop(true);
     siteServer?.stop(true);
     rmSync(directory, { recursive: true, force: true });
@@ -523,9 +510,9 @@ describe.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium with a D
   /** Opens the protected page under a fresh guardian until `until` holds, then keeps guarding it for `holdMs`. */
   async function openProtected(mode: string, until: (page: Awaited<ReturnType<PuppeteerBrowser["newPage"]>>, logs: GuardianLog[]) => Promise<boolean>, timeoutMs: number, holdMs = 0) {
     const logs: GuardianLog[] = [];
-    const guardian = new TurnstileGuardian({ endpoint: `http://127.0.0.1:${cdpPort}`, pollIntervalMs: 250, logger: (event, details) => logs.push({ event, details }) });
+    const guardian = new TurnstileGuardian({ endpoint: chrome.endpoint, pollIntervalMs: 250, logger: (event, details) => logs.push({ event, details }) });
     await guardian.start();
-    const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${cdpPort}`, defaultViewport: null });
+    const browser = await puppeteer.connect({ browserURL: chrome.endpoint, defaultViewport: null });
     const page = await browser.newPage();
     try {
       // Each scenario starts without the clearance cookie an earlier one earned.

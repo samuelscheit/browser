@@ -15,6 +15,7 @@ import {
 } from "@browser-fabric/worker-runtime";
 import puppeteer, { type Browser as PuppeteerBrowser } from "puppeteer-core";
 import { FakeCdpTransport, ISOLATED_CONTEXT_ID, buttonEvents, challengeObservation, inputEvents } from "./support/fake-guardian-transport";
+import { browserIntegration, requireChromium } from "./support/chromium";
 
 class FakeChromiumProcess {
   public readonly pid = 4242;
@@ -441,6 +442,45 @@ describe("Fabric Turnstile guardian", () => {
     expect(supervisor.isRunning(started.processId)).toBe(false);
   });
 
+  test("local Chromium supervision hands the browser the host's display session and nothing else of the host environment", async () => {
+    const fake = new FakeChromiumProcess();
+    const environments: NodeJS.ProcessEnv[] = [];
+    const host = { DISPLAY: ":42", WAYLAND_DISPLAY: "wayland-1", XAUTHORITY: "/home/u/.Xauthority", XDG_RUNTIME_DIR: "/run/user/1000", FABRIC_HOST_ONLY: "must-not-leak" };
+    const previous = Object.fromEntries(Object.keys(host).map((name) => [name, process.env[name]]));
+    Object.assign(process.env, host);
+    try {
+      const supervisor = new ChromiumProcessSupervisor({
+        executablePath: "/usr/bin/chromium",
+        startupTimeoutMs: 1_000,
+        spawner: { spawn: (_command, _args, options) => { environments.push(options.env); return fake; } },
+        fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/local" })),
+        turnstileGuardianFactory: () => new FakeGuardian(),
+        closeBrowser: async () => { fake.exit(); return true; },
+      });
+      const started = await supervisor.start({
+        workerId: "worker_local_display" as never,
+        leaseId: "browser-lease_local_display" as never,
+        image: "integration",
+        browserVersion: "system-test",
+        command: ["/usr/bin/chromium"],
+        environment: { FABRIC_RUNTIME: "chrome" },
+        volumes: [],
+        networks: [],
+        limits: { maxBrowserLeases: 1, cpuMilli: 1_000, memoryMiB: 512, pids: 64, shmMiB: 64, temporaryStorageMiB: 128 },
+        security: { dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false },
+        cdpBind: { host: "127.0.0.1", port: 9222 },
+        turnstileGuardian: defaultTurnstileGuardianSpec(),
+      });
+      await supervisor.stop(started.processId);
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
+    }
+    const { FABRIC_HOST_ONLY: _hostOnly, ...display } = host;
+    expect(environments).toEqual([{ PATH: process.env.PATH, LANG: "C.UTF-8", ...display, FABRIC_RUNTIME: "chrome" }]);
+  });
+
   test("local Chromium supervision falls back to signals when the browser cannot be closed through CDP", async () => {
     const process = new FakeChromiumProcess();
     const supervisor = new ChromiumProcessSupervisor({
@@ -464,19 +504,16 @@ describe("Fabric Turnstile guardian", () => {
   });
 });
 
-const realBrowserEnabled = process.env.RUN_BROWSER_INTEGRATION === "1";
-const chromeExecutable = process.env.FABRIC_TEST_CHROMIUM ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const chromeAvailable = await Bun.file(chromeExecutable).exists();
 
-test.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium receives the guardian before a raw-CDP client opens a page and clicks an arbitrary Cloudflare Turnstile widget", async () => {
+test.skipIf(!browserIntegration)("real Chromium receives the guardian before a raw-CDP client opens a page and clicks an arbitrary Cloudflare Turnstile widget", async () => {
   const port = 23_000 + Math.floor(Math.random() * 1_000);
-  const supervisor = new ChromiumProcessSupervisor({ executablePath: chromeExecutable, startupTimeoutMs: 20_000, cwd: "/tmp" });
+  const supervisor = new ChromiumProcessSupervisor({ executablePath: requireChromium(), startupTimeoutMs: 20_000, cwd: "/tmp" });
   const spec: BrowserContainerSpec = {
     workerId: "worker_turnstile_integration" as never,
     leaseId: `browser-lease_turnstile_${crypto.randomUUID().replaceAll("-", "")}` as never,
     image: "integration",
     browserVersion: "system-test",
-    command: [chromeExecutable, "--headless=new"],
+    command: [requireChromium(), "--headless=new"],
     environment: {},
     volumes: [],
     networks: [],
@@ -514,16 +551,16 @@ test.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium receives the
   }
 }, 120_000);
 
-test.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium reports an ordinary GPU to a page's very first script, without exposing the override", async () => {
+test.skipIf(!browserIntegration)("real Chromium reports an ordinary GPU to a page's very first script, without exposing the override", async () => {
   const port = 23_000 + Math.floor(Math.random() * 1_000);
-  const supervisor = new ChromiumProcessSupervisor({ executablePath: chromeExecutable, startupTimeoutMs: 20_000, cwd: "/tmp" });
+  const supervisor = new ChromiumProcessSupervisor({ executablePath: requireChromium(), startupTimeoutMs: 20_000, cwd: "/tmp" });
   const spec: BrowserContainerSpec = {
     workerId: "worker_fingerprint_integration" as never,
     leaseId: `browser-lease_fingerprint_${crypto.randomUUID().replaceAll("-", "")}` as never,
     image: "integration",
     browserVersion: "system-test",
     // SwiftShader is what Fabric's GPU-less servers render with.
-    command: [chromeExecutable, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+    command: [requireChromium(), "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
     environment: {},
     volumes: [],
     networks: [],

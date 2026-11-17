@@ -10,10 +10,8 @@ import {
 } from "@browser-fabric/worker-runtime";
 import puppeteer, { type Browser as PuppeteerBrowser } from "puppeteer-core";
 import type { ChallengeHandler } from "@browser-fabric/contracts";
+import { browserIntegration, requireChromium } from "./support/chromium";
 
-const realBrowserEnabled = process.env.RUN_BROWSER_INTEGRATION === "1";
-const chromeExecutable = process.env.FABRIC_TEST_CHROMIUM ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const chromeAvailable = await Bun.file(chromeExecutable).exists();
 
 // Google's public reCAPTCHA v2 test sitekey. Its widget loads from google.com, which this test never
 // needs to solve: the solver is a deterministic fake that returns a token shaped like a real one.
@@ -40,7 +38,7 @@ function recordingSolver(): { solver: TokenCaptchaSolver; tasks: CaptchaTask[] }
  */
 async function launchGuardedChrome(port: number, handlersSolver?: TokenCaptchaSolver, handlers: ChallengeHandler[] | undefined = [{ id: "death-by-captcha", kind: "dbc", mode: "automatic", configuration: {} }]) {
   const supervisor = new ChromiumProcessSupervisor({
-    executablePath: chromeExecutable,
+    executablePath: requireChromium(),
     startupTimeoutMs: 20_000,
     cwd: "/tmp",
     tokenSolverFor: (handlers) => (handlersSolver && handlers?.some((handler) => handler.mode === "automatic" && (handler.kind === "dbc" || handler.kind === "anticaptcha")) ? handlersSolver : undefined),
@@ -50,7 +48,7 @@ async function launchGuardedChrome(port: number, handlersSolver?: TokenCaptchaSo
     leaseId: `browser-lease_captcha_${crypto.randomUUID().replaceAll("-", "")}` as never,
     image: "integration",
     browserVersion: "system-test",
-    command: [chromeExecutable, "--headless=new"],
+    command: [requireChromium(), "--headless=new"],
     environment: {},
     volumes: [],
     networks: [],
@@ -77,7 +75,7 @@ function captchaPage(): string {
 }
 
 describe("token CAPTCHA solving on a real Chromium page", () => {
-  test.skipIf(!realBrowserEnabled || !chromeAvailable)("a recipe-enabled guardian solves a reCAPTCHA v2 widget and the page callback receives the token", async () => {
+  test.skipIf(!browserIntegration)("a recipe-enabled guardian solves a reCAPTCHA v2 widget and the page callback receives the token", async () => {
     const port = 25_000 + Math.floor(Math.random() * 1_000);
     const { solver, tasks } = recordingSolver();
     const server = Bun.serve({ port: 0, fetch: () => new Response(captchaPage(), { headers: { "content-type": "text/html" } }) });
@@ -99,7 +97,7 @@ describe("token CAPTCHA solving on a real Chromium page", () => {
     }
   }, 120_000);
 
-  test.skipIf(!realBrowserEnabled || !chromeAvailable)("a provider that keeps failing is asked once per page document, not on every poll", async () => {
+  test.skipIf(!browserIntegration)("a provider that keeps failing is asked once per page document, not on every poll", async () => {
     const port = 27_000 + Math.floor(Math.random() * 1_000);
     const tasks: CaptchaTask[] = [];
     const failing: TokenCaptchaSolver = {
@@ -127,7 +125,7 @@ describe("token CAPTCHA solving on a real Chromium page", () => {
     }
   }, 120_000);
 
-  test.skipIf(!realBrowserEnabled || !chromeAvailable)("a browser without a recipe solver never asks any provider for a token", async () => {
+  test.skipIf(!browserIntegration)("a browser without a recipe solver never asks any provider for a token", async () => {
     const port = 26_000 + Math.floor(Math.random() * 1_000);
     const server = Bun.serve({ port: 0, fetch: () => new Response(captchaPage(), { headers: { "content-type": "text/html" } }) });
     const { solver, tasks } = recordingSolver();

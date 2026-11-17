@@ -10,10 +10,8 @@ import { buildBrowserProcessSpec } from "../apps/worker-manager/src";
 import { parseEgressConfig } from "../apps/egress-sidecar/src/config";
 import { startEgressSidecar, type EgressSidecarHandle } from "../apps/egress-sidecar/src/server";
 import { TEST_PRINCIPAL, TEST_PROJECT, makeProfile, makeWorker } from "@browser-fabric/testkit";
+import { browserIntegration, requireChromium } from "./support/chromium";
 
-const enabled = process.env.RUN_BROWSER_INTEGRATION === "1";
-const executablePath = process.env.FABRIC_TEST_CHROMIUM ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const executableExists = await Bun.file(executablePath).exists();
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {
@@ -31,15 +29,15 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 describe("real browser-level CDP compatibility", () => {
-  test.skipIf(!enabled || !executableExists)("connects Puppeteer and Playwright to a dedicated browser endpoint", async () => {
+  test.skipIf(!browserIntegration)("connects Puppeteer and Playwright to a dedicated browser endpoint", async () => {
     const port = 19_000 + Math.floor(Math.random() * 1_000);
-    const supervisor = new ChromiumProcessSupervisor({ executablePath, startupTimeoutMs: 20_000, cwd: "/tmp" });
+    const supervisor = new ChromiumProcessSupervisor({ executablePath: requireChromium(), startupTimeoutMs: 20_000, cwd: "/tmp" });
     const spec: BrowserContainerSpec = {
       workerId: "worker_integration" as never,
       leaseId: `browser-lease_integration_${crypto.randomUUID().replaceAll("-", "")}`,
       image: "integration",
       browserVersion: "system-test",
-      command: [executablePath, "--headless=new"],
+      command: [requireChromium(), "--headless=new"],
       environment: {},
       volumes: [],
       networks: [],
@@ -80,7 +78,7 @@ describe("real browser-level CDP compatibility", () => {
     }
   }, 120_000);
 
-  test.skipIf(!enabled || !executableExists)("relays browser-level CDP through the authenticated Fabric gateway", async () => {
+  test.skipIf(!browserIntegration)("relays browser-level CDP through the authenticated Fabric gateway", async () => {
     const browserPort = 20_000 + Math.floor(Math.random() * 500);
     const gatewayPort = browserPort + 1;
     const clock = new FakeClock("2026-01-01T00:00:00.000Z");
@@ -92,13 +90,13 @@ describe("real browser-level CDP compatibility", () => {
     const profile = makeProfile(worker);
     await scheduler.createProfile(profile);
     const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway-integration", runtime: "chrome", browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 });
-    const supervisor = new ChromiumProcessSupervisor({ executablePath, startupTimeoutMs: 20_000, cwd: "/tmp" });
+    const supervisor = new ChromiumProcessSupervisor({ executablePath: requireChromium(), startupTimeoutMs: 20_000, cwd: "/tmp" });
     const spec: BrowserContainerSpec = {
       workerId: worker.id,
       leaseId: "browser-lease_gateway_bootstrap",
       image: "integration",
       browserVersion: "system-test",
-      command: [executablePath, "--headless=new"],
+      command: [requireChromium(), "--headless=new"],
       environment: {},
       volumes: [],
       networks: [],
@@ -141,7 +139,7 @@ describe("real browser-level CDP compatibility", () => {
     }
   }, 120_000);
 
-  test.skipIf(!enabled || !executableExists)("relays a federated local worker through the gateway before issuing readiness", async () => {
+  test.skipIf(!browserIntegration)("relays a federated local worker through the gateway before issuing readiness", async () => {
     const browserPort = 21_000 + Math.floor(Math.random() * 400);
     const gatewayPort = browserPort + 1;
     const egressListenerPort = gatewayPort + 1;
@@ -183,7 +181,7 @@ describe("real browser-level CDP compatibility", () => {
     const claimed = await scheduler.claimAssignment(worker.id, allocated.lease.id, workerActor);
     const claimedLeaseId = claimed.lease?.id;
     if (!claimedLeaseId) throw new Error("federated assignment lost its lease");
-    const supervisor = new ChromiumProcessSupervisor({ executablePath, startupTimeoutMs: 20_000, cwd: "/tmp", profileRoot: `/tmp/fabric-federated-${crypto.randomUUID()}` });
+    const supervisor = new ChromiumProcessSupervisor({ executablePath: requireChromium(), startupTimeoutMs: 20_000, cwd: "/tmp", profileRoot: `/tmp/fabric-federated-${crypto.randomUUID()}` });
     let browserProcess: { processId: string; cdpBrowserEndpoint: string } | undefined;
     let gatewayServer: ReturnType<typeof Bun.serve> | undefined;
     let relay: OutboundCdpRelay | undefined;

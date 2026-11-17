@@ -5,10 +5,9 @@ import { join } from "node:path";
 import type { Server } from "bun";
 import { taskCommand, TASK_HELP } from "@browser-fabric/task-agent";
 import { HELP } from "../apps/cli/src/cli";
-import { findChromium, launchChromium, type TestChromium } from "./support/chromium";
+import { chromiumExecutable as executable, launchChromium, type TestChromium } from "./support/chromium";
 import { startFixtureSite, type FixtureSite } from "./support/task-agent-fixtures";
 
-const executable = await findChromium();
 let chromium: TestChromium;
 let site: FixtureSite;
 let llm: Server<undefined>;

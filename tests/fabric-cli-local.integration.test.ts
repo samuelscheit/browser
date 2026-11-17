@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { browserIntegration, chromiumExecutable } from "./support/chromium";
 
-const enabled = process.env.RUN_BROWSER_INTEGRATION === "1";
-const chrome = process.env.FABRIC_TEST_CHROMIUM ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const run = enabled && existsSync(chrome) ? describe : describe.skip;
+const chrome = chromiumExecutable ?? "";
+const run = browserIntegration ? describe : describe.skip;
 const CLI = new URL("../apps/cli/src/cli.ts", import.meta.url).pathname;
 
 let home: string;

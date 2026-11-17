@@ -37,6 +37,16 @@ export type ChromiumFetcher = (input: RequestInfo | URL, init?: RequestInit) => 
 
 const defaultSpawner: ChromiumSpawner = { spawn: (command, args, options) => spawn(command, [...args], options) as unknown as ChromiumProcess };
 
+/**
+ * The host's display session. A local worker's headful browser draws on the user's desktop (X11 or
+ * Wayland), so these pass through; nothing else of the host environment reaches the browser.
+ */
+const DISPLAY_ENVIRONMENT = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR"] as const;
+
+function displayEnvironment(): NodeJS.ProcessEnv {
+  return Object.fromEntries(DISPLAY_ENVIRONMENT.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
+}
+
 function waitForExit(process: ChromiumProcess): Promise<void> {
   return new Promise((resolve) => process.once("exit", () => resolve()));
 }
@@ -145,7 +155,7 @@ export class ChromiumProcessSupervisor {
       "--no-default-browser-check"
     ];
     // The browser receives only non-secret recipe/policy metadata, never client input values.
-    const environment: NodeJS.ProcessEnv = { PATH: process.env.PATH, LANG: "C.UTF-8", ...spec.environment };
+    const environment: NodeJS.ProcessEnv = { PATH: process.env.PATH, LANG: "C.UTF-8", ...displayEnvironment(), ...spec.environment };
     this.#throwIfCancelled(processId);
     const child = this.#spawner.spawn(command, args, { cwd: this.#cwd, env: environment, stdio: ["ignore", "pipe", "pipe"] });
     this.#processes.set(processId, child);
