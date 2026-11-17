@@ -2,37 +2,55 @@
   "version": 1,
   "bootstrapAdminId": "principal_admin",
   "projects": [
-    { "id": "project_default", "name": "Default" }
+    {
+      "id": "project_default",
+      "name": "Default"
+    }
   ],
   "principals": [
     {
       "id": "principal_admin",
       "displayName": "admin",
-      "projectGrants": ["project_default"],
-      "roles": ["fabric_admin", "project_admin"],
+      "projectGrants": [
+        "project_default"
+      ],
+      "roles": [
+        "fabric_admin",
+        "project_admin"
+      ],
       "certificateFingerprint": "edge-basic-auth:principal_admin",
       "createdAt": "2026-01-01T00:00:00.000Z"
     }
   ],
   "workers": [
     {
-      "id": "worker_chromium_cdp",
+      "id": "worker_chrome",
       "certificateFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
       "enrollmentTokenHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "endpoint": "https://worker-agent.internal",
       "cdpRelayEndpoint": "http://fabric-browser-{leaseId}:9223",
       "capabilities": {
-        "runtimeFamilies": ["chromium-cdp"],
-        "recipeRefs": ["recipe_chromium-cdp@1", "recipe_interactive-chromium@1"],
-        "browserVersions": { "chromium": "pinned" },
+        "runtimeFamilies": [
+          "chrome"
+        ],
+        "recipeRefs": [
+          "recipe_chrome@1",
+          "recipe_chrome-headless@1"
+        ],
+        "browserVersions": {
+          "chrome": "pinned"
+        },
         "supportsInteractive": true,
-        "supportedProfileFamilies": ["default", "interactive"]
+        "supportedProfileFamilies": [
+          "default"
+        ]
       },
       "capacity": 3,
-      "mediaCapacity": 0,
       "health": "healthy",
       "isLocal": false,
-      "volumeNames": ["profile_chromium", "profile_interactive"],
+      "volumeNames": [
+        "profile_default"
+      ],
       "resourceLimits": {
         "maxBrowserLeases": 3,
         "cpuMilli": 2000,
@@ -45,12 +63,14 @@
   ],
   "profiles": [
     {
-      "ref": "profile_chromium",
+      "ref": "profile_default",
       "ownerProject": "project_default",
-      "workerId": "worker_chromium_cdp",
-      "volumeName": "profile_chromium",
+      "workerId": "worker_chrome",
+      "volumeName": "profile_default",
       "profileFamily": "default",
-      "grants": ["project_default"],
+      "grants": [
+        "project_default"
+      ],
       "volumeGeneration": 1,
       "status": "active"
     }

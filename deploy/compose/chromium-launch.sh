@@ -140,7 +140,10 @@ FABRIC_CHROMIUM_CDP_PORT="$chromium_cdp_port" \
   /usr/local/bin/bun /app/apps/cdp-private-bridge/src/server.ts &
 cdp_bridge_pid=$!
 bridge_ready=false
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+# Up to ten seconds: slow or emulated hosts start the X server and bridge well beyond one.
+attempt=0
+while [ "$attempt" -lt 200 ]; do
+  attempt=$((attempt + 1))
   if [ -s "$cdp_bridge_ready_file" ]; then
     cdp_bridge_bind_address=$(tr -d '\r\n' < "$cdp_bridge_ready_file")
     case "$cdp_bridge_bind_address" in
@@ -203,7 +206,10 @@ Xvfb ":$display_number" -screen 0 1440x1024x24 -nolisten tcp &
 xvfb_pid=$!
 
 ready=false
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+# Up to ten seconds: slow or emulated hosts start the X server and bridge well beyond one.
+attempt=0
+while [ "$attempt" -lt 200 ]; do
+  attempt=$((attempt + 1))
   if [ -S "$display_socket" ]; then
     ready=true
     break

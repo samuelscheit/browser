@@ -1,9 +1,14 @@
 # Self-hosting Browser Fabric with Docker Compose
 
 One host runs the whole platform: PostgreSQL, an S3-compatible object store (RustFS), the API, the
-scheduler, the CDP gateway, the media playback gateway, the worker manager, the encrypted input
-broker, the egress sidecar, the Caddy edge and one worker agent per runtime. Optional profiles add a
-Tor client (`tor`) and an OpenTelemetry collector (`observability`).
+scheduler, the CDP gateway, the worker manager, the encrypted input broker, the egress sidecar, the
+Caddy edge and the Chrome worker agent. Optional profiles add a Tor client (`tor`) and an
+OpenTelemetry collector (`observability`).
+
+The browser image (`workers/chrome/Dockerfile`) contains Google Chrome stable on amd64 hosts and
+Debian Chromium on arm64 hosts (Google publishes no Linux arm64 Chrome). Both are pinned to exact
+builds from one dated Debian snapshot; the Chrome package is also verified by SHA-256. Bump
+`DEBIAN_SNAPSHOT`, `CHROME_VERSION`/`CHROME_SHA256` and `CHROMIUM_VERSION` together.
 
 Requirements: Docker Engine 24+ with Compose v2 (Docker Desktop works), `openssl` 1.1.1+ / 3.x and
 `jq` for the bootstrap. Plan for a few GB of RAM for the services plus about 1 GB per concurrent
@@ -19,8 +24,9 @@ docker compose up -d --build            # add `--profile tor` for the Tor egress
 bun ../../scripts/compose-smoke.ts      # end-to-end check through the edge
 ```
 
-The smoke test leases a Chromium over raw CDP through the edge, navigates to `https://example.com/`
-through the egress sidecar and releases the browser. `--egress egress_tor@1 --page
+The smoke test leases a browser over raw CDP through the edge (`recipe_chrome@1`, headful; pass
+`--recipe recipe_chrome-headless@1` for headless), navigates to `https://example.com/` through the
+egress sidecar and releases the browser. `--egress egress_tor@1 --page
 https://check.torproject.org/` checks the Tor route.
 
 The edge listens on `http://127.0.0.1:18086`. The API is under `/v1`; the admin password is
@@ -32,16 +38,15 @@ curl -u "principal_admin:$(cat secrets/principals/admin)" http://127.0.0.1:18086
 
 ## Exposing it
 
-The edge speaks plain HTTP on loopback. CDP capability and playback URLs are bearer secrets, so a
-deployment reachable from other machines must put TLS in front of it — a reverse proxy (Caddy,
-nginx, Traefik) or a tunnel — and set the public URLs in `.env`:
+The edge speaks plain HTTP on loopback. CDP capability URLs are bearer secrets, so a deployment
+reachable from other machines must put TLS in front of it — a reverse proxy (Caddy, nginx, Traefik)
+or a tunnel — and set the public gateway URL in `.env`:
 
 ```sh
 FABRIC_GATEWAY_BASE_URL=wss://fabric.example.com
-FABRIC_MEDIA_PLAYBACK_BASE_URL=https://fabric.example.com/v1/media-playback
 ```
 
-The control plane refuses `ws://`/`http://` base URLs for anything but a loopback host.
+The control plane refuses a `ws://` base URL for anything but a loopback host.
 
 ## What the bootstrap creates
 
@@ -53,11 +58,9 @@ identity the database already trusts, and it always rebuilds the provisioning ma
 | `.ca/` | CA private keys (never mounted into a container) |
 | `fabric_*_cert`, `fabric_*_key`, `*_ca` | mTLS between edge and origins, workers and manager, services and input broker |
 | `fabric_assignment_*_key` | Ed25519 key that signs worker assignments |
-| `fabric_media_playback_*_key` | Ed25519 key for playback capabilities |
-| `media_worker_input_*_key` | RSA key the playback worker decrypts sources with |
 | `*_worker_enrollment` | per-worker enrollment tokens (the manifest stores only their hash) |
 | `principals/<name>` | password of `principal_<name>` (one file per principal) |
-| `workers/<name>.json` | worker configs: defaults plus the catalog recipes each worker serves |
+| `workers/chrome.json` | worker config: `workers/chrome/config/worker.json` plus the catalog recipes |
 | `fabric_provision_manifest` | projects, principals, workers and profiles the provisioner registers |
 | `egress_proxy_upstreams` | upstream proxy URL(s) for `egress_proxy@1`, one per line, tried in order (empty: fails closed) |
 | `deathbycaptcha_*`, `anticaptcha_client_key` | optional solver credentials (empty: provider disabled) |
@@ -77,8 +80,8 @@ granted the default project.
   `docker compose restart fabric-worker-manager`.
 - **Recipes, egress policies, challenge sets, projects:** edit `catalog.json` — see
   [docs/catalog.md](../../docs/catalog.md).
-- **Capacity:** `FABRIC_MAX_ACTIVE_BROWSER_LEASES` (1–8) in `.env`; per-worker `capacity` in
-  `workers/*/config/worker.json` (0–4), applied with `./bootstrap-secrets.sh` and a recreate.
+- **Capacity:** `FABRIC_MAX_ACTIVE_BROWSER_LEASES` (1–8) in `.env`; the worker's `capacity` in
+  `workers/chrome/config/worker.json` (0–4), applied with `./bootstrap-secrets.sh` and a recreate.
 
 ## Security notes
 

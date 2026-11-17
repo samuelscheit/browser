@@ -99,7 +99,6 @@ create_ca fabric_input_broker_client_ca 'Browser Fabric Input Broker CA'
 
 issue fabric_origin_server_ca fabric_api_cert fabric_api_key fabric-api server
 issue fabric_origin_server_ca fabric_cdp_gateway_cert fabric_cdp_gateway_key fabric-cdp-gateway server
-issue fabric_origin_server_ca fabric_media_playback_gateway_cert fabric_media_playback_gateway_key fabric-media-playback-gateway server
 issue fabric_origin_client_ca fabric_edge_origin_client_cert fabric_edge_origin_client_key fabric-edge client
 
 issue fabric_worker_ca fabric_worker_manager_cert fabric_worker_manager_key fabric-worker-manager server
@@ -109,10 +108,7 @@ issue fabric_input_broker_client_ca fabric_input_broker_manager_client_cert fabr
 
 # Worker identities: <secret-name> <worker-id> <worker config>
 readonly workers=(
-  "chromium worker_chromium_cdp workers/chromium-cdp/config/worker.json"
-  "patchright worker_patchright workers/patchright/config/worker.json"
-  "rebrowser worker_rebrowser_puppeteer workers/rebrowser-puppeteer/config/worker.json"
-  "media worker_media_relay workers/media-relay/config/worker.json"
+  "chrome worker_chrome workers/chrome/config/worker.json"
 )
 for entry in "${workers[@]}"; do
   read -r name id _ <<< "$entry"
@@ -121,8 +117,6 @@ for entry in "${workers[@]}"; do
 done
 
 keypair fabric_assignment_private_key fabric_assignment_public_key ed25519
-keypair fabric_media_playback_private_key fabric_media_playback_public_key ed25519
-keypair media_worker_input_private_key media_worker_input_public_key rsa
 
 if missing fabric_db_password; then
   random_hex > "$secrets_dir/fabric_db_password"
@@ -134,7 +128,6 @@ write_random object_store_root_access_key
 write_random object_store_root_secret_key
 write_random fabric_object_store_access_key
 write_random fabric_object_store_secret_key
-write_random fabric_media_result_secret
 
 # Operator-provided values. A comment-only file means "not configured": the proxy listener fails
 # closed and the solver provider is never called until a real value replaces it.
@@ -158,10 +151,8 @@ mkdir -p "$secrets_dir/workers"
 workers_json="[]"
 for entry in "${workers[@]}"; do
   read -r name id config <<< "$entry"
-  input_key="$([[ "$name" == media ]] && cat "$secrets_dir/media_worker_input_public_key" || true)"
   jq --slurpfile catalog "$catalog_file" --arg id "$id" \
-    --arg fingerprint "$(certificate_fingerprint "$secrets_dir/fabric_worker_${name}_cert")" \
-    --arg input_key "$input_key" '
+    --arg fingerprint "$(certificate_fingerprint "$secrets_dir/fabric_worker_${name}_cert")" '
     (if .id != $id then error("worker config id mismatch") else . end)
     | . as $worker
     | [($catalog[0].recipes // [])[]
@@ -169,13 +160,12 @@ for entry in "${workers[@]}"; do
         | select(.mode != "interactive" or $worker.capabilities.supportsInteractive)] as $recipes
     | .capabilities.recipeRefs = (.capabilities.recipeRefs + [$recipes[] | "recipe_\(.name)@\(.version // 1)"] | unique)
     | .capabilities.supportedProfileFamilies = (.capabilities.supportedProfileFamilies + [$recipes[] | .profileFamily] | unique)
-    | .certificateFingerprint = $fingerprint
-    | if $input_key == "" then . else .inputEncryptionPublicKeyPem = $input_key end' \
+    | .certificateFingerprint = $fingerprint' \
     "$repo_dir/$config" > "$work_dir/$name.json"
   rm -f "$secrets_dir/workers/$name.json"
   mv "$work_dir/$name.json" "$secrets_dir/workers/$name.json"
   worker="$(jq --arg enrollment "sha256:$(sha256_file "$secrets_dir/${name}_worker_enrollment")" \
-    'del(.activeLeases, .activeMediaTasks, .lastHeartbeatAt, .createdAt, .updatedAt) | .enrollmentTokenHash = $enrollment' \
+    'del(.activeLeases, .lastHeartbeatAt, .createdAt, .updatedAt) | .enrollmentTokenHash = $enrollment' \
     "$secrets_dir/workers/$name.json")"
   workers_json="$(jq --argjson worker "$worker" '. + [$worker]' <<< "$workers_json")"
 done
@@ -203,8 +193,7 @@ jq -n \
     principals: $principals,
     workers: $workers,
     profiles: [
-      { ref: "profile_chromium", ownerProject: $project_id, workerId: "worker_chromium_cdp", volumeName: "profile_chromium", profileFamily: "default", grants: [$project_id], volumeGeneration: 1, status: "active" },
-      { ref: "profile_interactive", ownerProject: $project_id, workerId: "worker_chromium_cdp", volumeName: "profile_interactive", profileFamily: "interactive", grants: [$project_id], volumeGeneration: 1, status: "active" }
+      { ref: "profile_default", ownerProject: $project_id, workerId: "worker_chrome", volumeName: "profile_default", profileFamily: "default", grants: [$project_id], volumeGeneration: 1, status: "active" }
     ]
   }' > "$secrets_dir/fabric_provision_manifest"
 
@@ -214,5 +203,5 @@ find "$secrets_dir" -maxdepth 1 -type f -exec chmod 0444 {} +
 find "$secrets_dir/principals" "$secrets_dir/workers" -type f -exec chmod 0444 {} +
 chmod 0755 "$secrets_dir/principals" "$secrets_dir/workers"
 chmod 0700 "$secrets_dir/.ca"
-chmod 0711 "$secrets_dir"
+chmod 0700 "$secrets_dir"
 printf 'Browser Fabric secrets are ready in %s (principals: %s)\n' "$secrets_dir" "$principals"

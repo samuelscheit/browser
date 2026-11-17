@@ -1,0 +1,8 @@
+# gitleaks: the default rules, plus reviewed allowances for documentation.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Docs that pass a password read from a file at run time ($(cat ...)); nothing is embedded"
+regexTarget = "line"
+regexes = ['''curl -u "principal_[a-z]+:\$\(cat [^)]+\)"''']

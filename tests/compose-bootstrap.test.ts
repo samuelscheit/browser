@@ -34,19 +34,17 @@ describe.skipIf(!available)("deploy/compose bootstrap-secrets.sh", () => {
       ["principal_admin", ["fabric_admin", "project_admin"]],
       ["principal_ci", ["project_operator"]],
     ] as never);
-    expect(manifest.workers.map((worker) => worker.id)).toEqual(["worker_chromium_cdp", "worker_patchright", "worker_rebrowser_puppeteer", "worker_media_relay"] as never);
-    // The catalog's chromium recipe is served by the chromium worker only.
-    const chromium = manifest.workers.find((worker) => worker.id === "worker_chromium_cdp")!;
-    expect(chromium.capabilities.recipeRefs).toContain("recipe_chromium-de@1" as never);
-    expect(manifest.workers.find((worker) => worker.id === "worker_patchright")!.capabilities.recipeRefs).not.toContain("recipe_chromium-de@1" as never);
-    expect(manifest.workers.find((worker) => worker.id === "worker_media_relay")!.inputEncryptionPublicKeyPem).toContain("BEGIN PUBLIC KEY");
+    expect(manifest.workers.map((worker) => worker.id)).toEqual(["worker_chrome"] as never);
+    // The catalog's interactive Chrome recipe joins the built-ins on the one Chrome worker.
+    expect([...manifest.workers[0]!.capabilities.recipeRefs].sort()).toEqual(["recipe_chrome-de@1", "recipe_chrome-headless@1", "recipe_chrome@1"] as never);
+    expect(manifest.profiles.map((profile) => [profile.ref, profile.workerId, profile.profileFamily])).toEqual([["profile_default", "worker_chrome", "default"]] as never);
     expect(JSON.stringify(manifest)).not.toMatch(/PRIVATE KEY/);
 
     // Every agent's generated config must register as exactly its provisioned worker.
     const runtime = { scheduler: new BrowserScheduler({ catalog: parseFabricCatalog(catalogDocument) }) };
     await runtime.scheduler.bootstrap();
     await provisionManifest(runtime, manifest);
-    for (const [name, worker] of [["chromium", "worker_chromium_cdp"], ["patchright", "worker_patchright"], ["rebrowser", "worker_rebrowser_puppeteer"], ["media", "worker_media_relay"]] as const) {
+    for (const [name, worker] of [["chrome", "worker_chrome"]] as const) {
       const config = JSON.parse(await readFile(join(secrets, "workers", `${name}.json`), "utf8"));
       const enrollment = (await readFile(join(secrets, `${name}_worker_enrollment`), "utf8")).trim();
       const registration = parseWorkerRegistration(config, config.certificateFingerprint);

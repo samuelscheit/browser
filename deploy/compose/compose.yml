@@ -5,7 +5,7 @@
 #   docker compose up -d --build
 #
 # Static services sit on private bridge networks with fixed names, so the worker manager can create
-# short-lived, labelled browser/media containers per lease without Swarm or a registry. Only
+# short-lived, labelled browser containers per lease without Swarm or a registry. Only
 # fabric-edge publishes a port (loopback by default); put a TLS terminator in front of it. See
 # README.md in this directory.
 #
@@ -149,8 +149,7 @@ services:
     network_mode: none
     command: [/bin/sh, -ceu, 'for volume in /profiles/*; do mkdir -p "$$volume"; chown -R 10001:10001 "$$volume"; done']
     volumes:
-      - profile_chromium:/profiles/profile_chromium
-      - profile_interactive:/profiles/profile_interactive
+      - profile_default:/profiles/profile_default
     cap_drop: [ALL]
     cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
     security_opt:
@@ -209,7 +208,6 @@ services:
       - fabric_input_broker_client_ca
       - fabric_object_store_access_key
       - fabric_object_store_secret_key
-      - fabric_media_playback_private_key
     environment:
       <<: *app-environment
       PORT: '8080'
@@ -227,8 +225,6 @@ services:
       FABRIC_OBJECT_STORE_REGION: us-east-1
       FABRIC_OBJECT_STORE_ACCESS_KEY_FILE: /run/secrets/fabric_object_store_access_key
       FABRIC_OBJECT_STORE_SECRET_KEY_FILE: /run/secrets/fabric_object_store_secret_key
-      FABRIC_MEDIA_PLAYBACK_PRIVATE_KEY_FILE: /run/secrets/fabric_media_playback_private_key
-      FABRIC_MEDIA_PLAYBACK_BASE_URL: ${FABRIC_MEDIA_PLAYBACK_BASE_URL:?set FABRIC_MEDIA_PLAYBACK_BASE_URL}
     command: [bun, apps/api/src/server.ts]
     volumes: [*catalog-mount]
     tmpfs: *app-tmpfs
@@ -260,30 +256,6 @@ services:
     mem_limit: 768m
     pids_limit: 256
 
-  fabric-media-playback-gateway:
-    <<: *hardened
-    image: browser-fabric-app:local
-    user: '10001:10001'
-    networks: [fabric-control, fabric-workers]
-    depends_on:
-      fabric-provisioner:
-        condition: service_completed_successfully
-    secrets: [fabric_db_url, fabric_capability_secret, fabric_media_playback_public_key, fabric_media_playback_gateway_cert, fabric_media_playback_gateway_key, fabric_origin_client_ca]
-    environment:
-      <<: *app-environment
-      PORT: '8084'
-      FABRIC_DB_URL_FILE: /run/secrets/fabric_db_url
-      FABRIC_CAPABILITY_SECRET_FILE: /run/secrets/fabric_capability_secret
-      FABRIC_MEDIA_PLAYBACK_PUBLIC_KEY_FILE: /run/secrets/fabric_media_playback_public_key
-      FABRIC_MEDIA_PLAYBACK_GATEWAY_CERT_FILE: /run/secrets/fabric_media_playback_gateway_cert
-      FABRIC_MEDIA_PLAYBACK_GATEWAY_KEY_FILE: /run/secrets/fabric_media_playback_gateway_key
-      FABRIC_MEDIA_PLAYBACK_GATEWAY_CLIENT_CA_FILE: /run/secrets/fabric_origin_client_ca
-    command: [bun, apps/media-playback-gateway/src/server.ts]
-    volumes: [*catalog-mount]
-    tmpfs: *app-tmpfs
-    mem_limit: 768m
-    pids_limit: 192
-
   fabric-scheduler:
     <<: *hardened
     image: browser-fabric-app:local
@@ -303,7 +275,7 @@ services:
     mem_limit: 512m
     pids_limit: 192
 
-  # The only container with the Docker socket. It creates constrained, unpublished browser/media
+  # The only container with the Docker socket. It creates constrained, unpublished browser
   # containers and attaches them only to the fixed networks below.
   fabric-worker-manager:
     image: browser-fabric-manager:local
@@ -316,8 +288,6 @@ services:
     depends_on:
       fabric-provisioner:
         condition: service_completed_successfully
-      fabric-object-store-init:
-        condition: service_completed_successfully
     secrets:
       - fabric_db_url
       - fabric_capability_secret
@@ -328,9 +298,6 @@ services:
       - fabric_input_broker_client_ca
       - fabric_worker_manager_cert
       - fabric_worker_manager_key
-      - fabric_object_store_access_key
-      - fabric_object_store_secret_key
-      - fabric_media_result_secret
       - deathbycaptcha_username
       - deathbycaptcha_password
       - anticaptcha_client_key
@@ -348,25 +315,14 @@ services:
       FABRIC_WORKER_MANAGER_CERT_FILE: /run/secrets/fabric_worker_manager_cert
       FABRIC_WORKER_MANAGER_KEY_FILE: /run/secrets/fabric_worker_manager_key
       FABRIC_WORKER_MANAGER_CLIENT_CA_FILE: /run/secrets/fabric_worker_ca
-      FABRIC_CHROMIUM_WORKER_IMAGE: browser-fabric-browser:local
+      FABRIC_BROWSER_IMAGE: browser-fabric-browser:local
       FABRIC_CHROMIUM_SECCOMP_PROFILE: /etc/browser-fabric/chromium-userns-seccomp.json
-      FABRIC_PATCHRIGHT_WORKER_IMAGE: browser-fabric-browser:local
-      FABRIC_REBROWSER_WORKER_IMAGE: browser-fabric-browser:local
-      FABRIC_MEDIA_WORKER_IMAGE: browser-fabric-media:local
       FABRIC_VOLUME_HELPER_IMAGE: docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
       FABRIC_DOCKER_NETWORK_CONTROL: ${FABRIC_DOCKER_NETWORK_CONTROL:-browser-fabric-control}
       FABRIC_DOCKER_NETWORK_WORKERS: ${FABRIC_DOCKER_NETWORK_WORKERS:-browser-fabric-workers}
       FABRIC_DOCKER_NETWORK_EGRESS: ${FABRIC_DOCKER_NETWORK_EGRESS:-browser-fabric-egress}
       FABRIC_EGRESS_PROXY_HOST: fabric-egress-sidecar
       FABRIC_EGRESS_PAC_BASE_URL: http://fabric-egress-sidecar:8080
-      FABRIC_OBJECT_STORE_ENDPOINT: ${FABRIC_OBJECT_STORE_ENDPOINT:-http://fabric-object-store:9000}
-      FABRIC_OBJECT_STORE_BUCKET: fabric-artifacts
-      FABRIC_OBJECT_STORE_REGION: us-east-1
-      FABRIC_OBJECT_STORE_ACCESS_KEY_FILE: /run/secrets/fabric_object_store_access_key
-      FABRIC_OBJECT_STORE_SECRET_KEY_FILE: /run/secrets/fabric_object_store_secret_key
-      FABRIC_MEDIA_RESULT_SECRET_FILE: /run/secrets/fabric_media_result_secret
-      FABRIC_MEDIA_RESULT_PORT: '8083'
-      FABRIC_MEDIA_RESULT_BASE_URL: http://fabric-worker-manager:8083
       FABRIC_DEATHBYCAPTCHA_USERNAME_FILE: /run/secrets/deathbycaptcha_username
       FABRIC_DEATHBYCAPTCHA_PASSWORD_FILE: /run/secrets/deathbycaptcha_password
       FABRIC_ANTICAPTCHA_CLIENT_KEY_FILE: /run/secrets/anticaptcha_client_key
@@ -469,104 +425,25 @@ services:
     mem_limit: 512m
     pids_limit: 256
 
-  fabric-worker-chromium:
+  fabric-worker-chrome:
     <<: *worker-agent
     build:
       context: ../..
-      dockerfile: workers/chromium-cdp/Dockerfile
-    secrets: [fabric_worker_ca, fabric_assignment_public_key, fabric_worker_chromium_cert, fabric_worker_chromium_key, chromium_worker_enrollment]
+      dockerfile: workers/chrome/Dockerfile
+    secrets: [fabric_worker_ca, fabric_assignment_public_key, fabric_worker_chrome_cert, fabric_worker_chrome_key, chrome_worker_enrollment]
     environment:
       <<: *worker-agent-environment
       FABRIC_WORKER_CONFIG_FILE: /etc/browser-fabric/worker.json
-      FABRIC_WORKER_CLIENT_CERT_FILE: /run/secrets/fabric_worker_chromium_cert
-      FABRIC_WORKER_CLIENT_KEY_FILE: /run/secrets/fabric_worker_chromium_key
-      FABRIC_WORKER_ENROLLMENT_TOKEN_FILE: /run/secrets/chromium_worker_enrollment
+      FABRIC_WORKER_CLIENT_CERT_FILE: /run/secrets/fabric_worker_chrome_cert
+      FABRIC_WORKER_CLIENT_KEY_FILE: /run/secrets/fabric_worker_chrome_key
+      FABRIC_WORKER_ENROLLMENT_TOKEN_FILE: /run/secrets/chrome_worker_enrollment
     # Generated by bootstrap-secrets.sh: the defaults plus the catalog recipes this worker serves.
     volumes:
       - type: bind
-        source: ${FABRIC_SECRETS_DIR:-./secrets}/workers/chromium.json
+        source: ${FABRIC_SECRETS_DIR:-./secrets}/workers/chrome.json
         target: /etc/browser-fabric/worker.json
         read_only: true
 
-  fabric-worker-patchright:
-    <<: *worker-agent
-    secrets: [fabric_worker_ca, fabric_assignment_public_key, fabric_worker_patchright_cert, fabric_worker_patchright_key, patchright_worker_enrollment]
-    environment:
-      <<: *worker-agent-environment
-      FABRIC_WORKER_CONFIG_FILE: /etc/browser-fabric/worker.json
-      FABRIC_WORKER_CLIENT_CERT_FILE: /run/secrets/fabric_worker_patchright_cert
-      FABRIC_WORKER_CLIENT_KEY_FILE: /run/secrets/fabric_worker_patchright_key
-      FABRIC_WORKER_ENROLLMENT_TOKEN_FILE: /run/secrets/patchright_worker_enrollment
-    # Generated by bootstrap-secrets.sh: the defaults plus the catalog recipes this worker serves.
-    volumes:
-      - type: bind
-        source: ${FABRIC_SECRETS_DIR:-./secrets}/workers/patchright.json
-        target: /etc/browser-fabric/worker.json
-        read_only: true
-
-  fabric-worker-rebrowser:
-    <<: *worker-agent
-    secrets: [fabric_worker_ca, fabric_assignment_public_key, fabric_worker_rebrowser_cert, fabric_worker_rebrowser_key, rebrowser_worker_enrollment]
-    environment:
-      <<: *worker-agent-environment
-      FABRIC_WORKER_CONFIG_FILE: /etc/browser-fabric/worker.json
-      FABRIC_WORKER_CLIENT_CERT_FILE: /run/secrets/fabric_worker_rebrowser_cert
-      FABRIC_WORKER_CLIENT_KEY_FILE: /run/secrets/fabric_worker_rebrowser_key
-      FABRIC_WORKER_ENROLLMENT_TOKEN_FILE: /run/secrets/rebrowser_worker_enrollment
-    # Generated by bootstrap-secrets.sh: the defaults plus the catalog recipes this worker serves.
-    volumes:
-      - type: bind
-        source: ${FABRIC_SECRETS_DIR:-./secrets}/workers/rebrowser.json
-        target: /etc/browser-fabric/worker.json
-        read_only: true
-
-  # The long-lived playback worker holds an encrypted provider source only in memory. It is separate
-  # from one-shot media relay containers, which receive no object-store credential.
-  fabric-worker-media:
-    <<: *hardened
-    image: browser-fabric-media:local
-    build:
-      context: ../..
-      dockerfile: workers/media-relay/Dockerfile
-    user: '10001:10001'
-    networks: [fabric-workers, fabric-egress]
-    depends_on:
-      fabric-worker-manager:
-        condition: service_started
-      fabric-egress-sidecar:
-        condition: service_started
-    secrets: [fabric_worker_ca, fabric_assignment_public_key, fabric_worker_media_cert, fabric_worker_media_key, media_worker_enrollment, media_worker_input_public_key, media_worker_input_private_key, fabric_media_playback_public_key]
-    environment:
-      FABRIC_WORKER_MANAGER_URL: https://fabric-worker-manager:8082
-      FABRIC_WORKER_CLIENT_CA_FILE: /run/secrets/fabric_worker_ca
-      FABRIC_WORKER_CLIENT_CERT_FILE: /run/secrets/fabric_worker_media_cert
-      FABRIC_WORKER_CLIENT_KEY_FILE: /run/secrets/fabric_worker_media_key
-      FABRIC_ASSIGNMENT_PUBLIC_KEY_FILE: /run/secrets/fabric_assignment_public_key
-      FABRIC_WORKER_ENROLLMENT_TOKEN_FILE: /run/secrets/media_worker_enrollment
-      FABRIC_INPUT_PUBLIC_KEY_FILE: /run/secrets/media_worker_input_public_key
-      FABRIC_INPUT_PRIVATE_KEY_FILE: /run/secrets/media_worker_input_private_key
-      FABRIC_MEDIA_PLAYBACK_PUBLIC_KEY_FILE: /run/secrets/fabric_media_playback_public_key
-      # Playback upstream traffic leaves through this sidecar listener (direct by default). Point it
-      # at another listener (for example the proxy listener, 11001) to give playback one egress
-      # identity; FABRIC_MEDIA_DIRECT_EXCEPTION_SUFFIXES lists hosts that bypass it.
-      FABRIC_EGRESS_PROXY_URL: ${FABRIC_MEDIA_EGRESS_PROXY_URL:-http://fabric-egress-sidecar:11000}
-      FABRIC_EGRESS_DIRECT_PROXY_URL: http://fabric-egress-sidecar:11000
-      FABRIC_MEDIA_DIRECT_EXCEPTION_SUFFIXES: ${FABRIC_MEDIA_DIRECT_EXCEPTION_SUFFIXES:-[]}
-      FABRIC_WORKER_CONFIG_FILE: /etc/browser-fabric/worker.json
-      PORT: '8084'
-    command: [bun, workers/media-relay/src/playback-server.ts]
-    volumes:
-      - type: bind
-        source: ${FABRIC_SECRETS_DIR:-./secrets}/workers/media.json
-        target: /etc/browser-fabric/worker.json
-        read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1770,uid=10001,gid=10001
-    mem_limit: 1024m
-    pids_limit: 512
-
-  # The only Fabric listener Compose publishes. It authenticates application callers with
-  # per-principal Basic credentials and speaks origin mTLS to API/CDP/media services.
   fabric-edge:
     <<: *hardened
     image: browser-fabric-edge:local
@@ -582,13 +459,10 @@ services:
         condition: service_started
       fabric-cdp-gateway:
         condition: service_started
-      fabric-media-playback-gateway:
-        condition: service_started
     secrets: [fabric_origin_server_ca, fabric_edge_origin_client_cert, fabric_edge_origin_client_key]
     environment:
       FABRIC_API_ORIGIN: fabric-api
       FABRIC_CDP_ORIGIN: fabric-cdp-gateway
-      FABRIC_MEDIA_PLAYBACK_ORIGIN: fabric-media-playback-gateway
     ports:
       - ${FABRIC_EDGE_BIND:-127.0.0.1}:${FABRIC_EDGE_PORT:-18086}:8080
     volumes:
@@ -641,10 +515,8 @@ volumes:
   fabric_object_store_data:
     name: ${FABRIC_OBJECT_STORE_VOLUME:-browser-fabric-object-store-data}
   # Profile records store the unprefixed volume names; never let Compose rewrite them.
-  profile_chromium:
-    name: profile_chromium
-  profile_interactive:
-    name: profile_interactive
+  profile_default:
+    name: profile_default
 
 secrets:
   fabric_db_url: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_db_url" }
@@ -655,10 +527,6 @@ secrets:
   fabric_api_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_api_key" }
   fabric_cdp_gateway_cert: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_cdp_gateway_cert" }
   fabric_cdp_gateway_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_cdp_gateway_key" }
-  fabric_media_playback_private_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_media_playback_private_key" }
-  fabric_media_playback_public_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_media_playback_public_key" }
-  fabric_media_playback_gateway_cert: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_media_playback_gateway_cert" }
-  fabric_media_playback_gateway_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_media_playback_gateway_key" }
   fabric_origin_client_ca: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_origin_client_ca" }
   fabric_origin_server_ca: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_origin_server_ca" }
   fabric_edge_origin_client_cert: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_edge_origin_client_cert" }
@@ -675,25 +543,13 @@ secrets:
   fabric_input_broker_api_client_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_input_broker_api_client_key" }
   fabric_input_broker_manager_client_cert: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_input_broker_manager_client_cert" }
   fabric_input_broker_manager_client_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_input_broker_manager_client_key" }
-  fabric_worker_chromium_cert: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_chromium_cert" }
-  fabric_worker_chromium_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_chromium_key" }
-  fabric_worker_patchright_cert: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_patchright_cert" }
-  fabric_worker_patchright_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_patchright_key" }
-  fabric_worker_rebrowser_cert: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_rebrowser_cert" }
-  fabric_worker_rebrowser_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_rebrowser_key" }
-  fabric_worker_media_cert: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_media_cert" }
-  fabric_worker_media_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_media_key" }
-  chromium_worker_enrollment: { file: "${FABRIC_SECRETS_DIR:-./secrets}/chromium_worker_enrollment" }
-  patchright_worker_enrollment: { file: "${FABRIC_SECRETS_DIR:-./secrets}/patchright_worker_enrollment" }
-  rebrowser_worker_enrollment: { file: "${FABRIC_SECRETS_DIR:-./secrets}/rebrowser_worker_enrollment" }
-  media_worker_enrollment: { file: "${FABRIC_SECRETS_DIR:-./secrets}/media_worker_enrollment" }
-  media_worker_input_public_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/media_worker_input_public_key" }
-  media_worker_input_private_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/media_worker_input_private_key" }
+  fabric_worker_chrome_cert: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_chrome_cert" }
+  fabric_worker_chrome_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_worker_chrome_key" }
+  chrome_worker_enrollment: { file: "${FABRIC_SECRETS_DIR:-./secrets}/chrome_worker_enrollment" }
   object_store_root_access_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/object_store_root_access_key" }
   object_store_root_secret_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/object_store_root_secret_key" }
   fabric_object_store_access_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_object_store_access_key" }
   fabric_object_store_secret_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_object_store_secret_key" }
-  fabric_media_result_secret: { file: "${FABRIC_SECRETS_DIR:-./secrets}/fabric_media_result_secret" }
   egress_proxy_upstreams: { file: "${FABRIC_SECRETS_DIR:-./secrets}/egress_proxy_upstreams" }
   deathbycaptcha_username: { file: "${FABRIC_SECRETS_DIR:-./secrets}/deathbycaptcha_username" }
   deathbycaptcha_password: { file: "${FABRIC_SECRETS_DIR:-./secrets}/deathbycaptcha_password" }

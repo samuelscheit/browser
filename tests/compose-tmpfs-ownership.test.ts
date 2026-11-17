@@ -22,9 +22,8 @@ describe("Compose tmpfs ownership", () => {
       .map((violation) => violation.split(" ")[0])
       .sort();
     expect(unowned).toEqual([
-      "fabric-api", "fabric-cdp-gateway", "fabric-egress-sidecar", "fabric-input-broker", "fabric-media-playback-gateway",
-      "fabric-observability", "fabric-provisioner", "fabric-scheduler", "fabric-worker-chromium", "fabric-worker-media",
-      "fabric-worker-patchright", "fabric-worker-rebrowser",
+      "fabric-api", "fabric-cdp-gateway", "fabric-egress-sidecar", "fabric-input-broker",
+      "fabric-observability", "fabric-provisioner", "fabric-scheduler", "fabric-worker-chrome",
     ]);
   });
 

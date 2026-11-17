@@ -1,7 +1,4 @@
 # Reviewed false positives (gitleaks fingerprints: file:rule:line).
-# Docs read the password from a file at run time; nothing is embedded.
-README.md:curl-auth-user:110
-deploy/compose/README.md:curl-auth-user:30
 # Google's published reCAPTCHA v2 test sitekey (public, not a credential).
 tests/captcha-solvers.test.ts:generic-api-key:19
 tests/captcha-solver-browser.test.ts:generic-api-key:20

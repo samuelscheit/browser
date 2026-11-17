@@ -4,7 +4,7 @@
  *   bun scripts/compose-smoke.ts [--url http://127.0.0.1:18086/v1] [--principal admin] [--page https://example.com/]
  *
  * Reads the principal's password from deploy/compose/secrets/principals/<name>, discovers its
- * project and profile with GET /v1/me, leases a raw-CDP Chromium (recipe_chromium-cdp@1, egress
+ * project and profile with GET /v1/me, leases a raw-CDP browser (recipe_chrome@1 by default, egress
  * direct), drives it over the gateway WebSocket (version, navigation through the egress sidecar,
  * a JavaScript evaluation, the masked WebGL renderer) and releases the session. Exits non-zero on
  * the first failed step.
@@ -18,7 +18,7 @@ const { values } = parseArgs({
     url: { type: "string", default: "http://127.0.0.1:18086/v1" },
     principal: { type: "string", default: "admin" },
     page: { type: "string", default: "https://example.com/" },
-    recipe: { type: "string", default: "recipe_chromium-cdp@1" },
+    recipe: { type: "string", default: "recipe_chrome@1" },
     egress: { type: "string", default: "egress_direct@1" },
   },
 });
@@ -114,6 +114,8 @@ try {
     expression: "(() => { const gl = document.createElement('canvas').getContext('webgl'); const info = gl && gl.getExtension('WEBGL_debug_renderer_info'); return info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : 'no-webgl'; })()",
     returnByValue: true,
   }, sessionId);
+  // A browser without WebGL is an obvious automation signal; both recipes must expose it.
+  if (!renderer.result.value || renderer.result.value === "no-webgl") throw new Error("pages see no WebGL");
   step(`WebGL renderer reported to pages: ${renderer.result.value}`);
   socket.close();
 } finally {
