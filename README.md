@@ -39,6 +39,9 @@ It runs in two shapes:
   30-day retention and short-lived signed URLs.
 - **Catalog** — add your own recipes, egress policies, challenge sets and projects in one JSON file,
   no code change ([docs/catalog.md](docs/catalog.md)).
+- **Task agent** — `fabric task "<goal>"` lets a small LLM agent (Anthropic or any OpenAI-compatible
+  model) drive the browser in its own tab until the goal is done and returns a result, optionally
+  matching a JSON Schema ([packages/task-agent](packages/task-agent/README.md)).
 - **Clients** — TypeScript (`packages/client-ts`) and Python (`packages/client-python`), plus an
   [OpenAPI spec](packages/contracts/openapi/browser-fabric.openapi.yaml).
 
@@ -91,6 +94,19 @@ claude mcp add --scope user fabric -- fabric mcp
 Any agent framework that accepts a CDP URL (browser-use, Stagehand, LangChain browser tools, your
 own Playwright code) can use `http://127.0.0.1:9222` — or, with `fabric up --remote`, a browser of
 your self-hosted deployment with the same loopback address. See [docs/agents.md](docs/agents.md).
+
+### Tasks in natural language
+
+```sh
+export ANTHROPIC_API_KEY=…   # or OPENAI_API_KEY (+ OPENAI_BASE_URL for any compatible server)
+fabric task "find the latest release version of bun" \
+  --url https://github.com/oven-sh/bun/releases --model anthropic/claude-sonnet-4-5
+```
+
+The agent opens its own tab, reads an indexed snapshot of the page, clicks and types with trusted
+input, and stops at a step limit and timeout. Secrets reach the page only as `{{secret:NAME}}`
+placeholders filled from `FABRIC_SECRET_NAME` at typing time; uploads are limited to directories
+you allow with `--upload-dir`.
 
 ## Self-hosting
 
