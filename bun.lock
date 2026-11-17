@@ -45,6 +45,7 @@
       "dependencies": {
         "@browser-fabric/client": "workspace:*",
         "@browser-fabric/contracts": "workspace:*",
+        "@browser-fabric/task-agent": "workspace:*",
         "@browser-fabric/worker-runtime": "workspace:*",
       },
     },
@@ -144,6 +145,13 @@
         "@browser-fabric/policy": "workspace:*",
       },
     },
+    "packages/task-agent": {
+      "name": "@browser-fabric/task-agent",
+      "version": "0.1.0",
+      "dependencies": {
+        "@browser-fabric/worker-runtime": "workspace:*",
+      },
+    },
     "packages/testkit": {
       "name": "@browser-fabric/testkit",
       "version": "0.1.0",
@@ -200,6 +208,8 @@
     "@browser-fabric/scheduler": ["@browser-fabric/scheduler@workspace:apps/scheduler"],
 
     "@browser-fabric/companion-adapter": ["@browser-fabric/companion-adapter@workspace:apps/companion-adapter"],
+
+    "@browser-fabric/task-agent": ["@browser-fabric/task-agent@workspace:packages/task-agent"],
 
     "@browser-fabric/testkit": ["@browser-fabric/testkit@workspace:packages/testkit"],
 

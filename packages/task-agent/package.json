@@ -1,0 +1,10 @@
+{
+  "name": "@browser-fabric/task-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@browser-fabric/worker-runtime": "workspace:*"
+  }
+}

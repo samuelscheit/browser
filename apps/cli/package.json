@@ -8,6 +8,7 @@
   "dependencies": {
     "@browser-fabric/client": "workspace:*",
     "@browser-fabric/contracts": "workspace:*",
+    "@browser-fabric/task-agent": "workspace:*",
     "@browser-fabric/worker-runtime": "workspace:*"
   }
 }
