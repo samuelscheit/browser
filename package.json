@@ -1,7 +1,7 @@
 {
   "name": "browser-fabric",
   "version": "0.1.0",
-  "description": "Self-hosted browser infrastructure: leased Chromium sessions over raw CDP, profiles, egress policy, challenge handling and media relay.",
+  "description": "Self-hosted browser infrastructure: leased Chrome sessions over raw CDP, profiles, egress policy and challenge handling.",
   "license": "MIT",
   "homepage": "https://github.com/samuelscheit/browser#readme",
   "repository": {

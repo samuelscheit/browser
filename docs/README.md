@@ -1,11 +1,11 @@
 # Browser Fabric documentation
 
 Browser Fabric is a browser control plane. It owns process lifecycle, profile/volume affinity,
-leases, scheduling, browser-level CDP capabilities, egress policy, challenge handling, artifacts,
-media relay and worker health. Applications keep their business workflows and call the control
+leases, scheduling, browser-level CDP capabilities, egress policy, challenge handling, artifacts
+and worker health. Applications keep their business workflows and call the control
 plane through the API or the typed clients.
 
-- [Architecture](architecture.md): services, allocation, CDP relay, guardian, media relay
+- [Architecture](architecture.md): services, the browser runtime, allocation, CDP relay, guardian
 - [Catalog](catalog.md): add recipes, egress policies, challenge sets and projects without code
 - [Agents and the `fabric` CLI](agents.md)
 - [Self-hosting with Docker Compose](../deploy/compose/README.md)
@@ -32,8 +32,7 @@ The Turnstile clicker recognizes only explicit Cloudflare Turnstile signals and 
 bounded time and click attempts; an unresolved challenge remains available for the
 application/manual workflow. Token-solving CAPTCHAs use the separate, recipe-gated path described
 in the CAPTCHA token section below. If the guardian's own CDP channel dies, the owning executor reports the
-browser as unhealthy instead of exposing an unguarded ready lease. Media-relay jobs do not start a
-browser and therefore do not receive this companion.
+browser as unhealthy instead of exposing an unguarded ready lease.
 
 The only deployment knobs are bounded timing values (`FABRIC_TURNSTILE_POLL_INTERVAL_MS`,
 `FABRIC_TURNSTILE_CHALLENGE_TIMEOUT_MS`, and `FABRIC_TURNSTILE_MAX_CLICK_ATTEMPTS`). There is no
@@ -121,21 +120,15 @@ fake clock; PostgreSQL, browser and Compose checks are opt-in.
 
 | Component | Entry point | Responsibility |
 | --- | --- | --- |
-| API | `apps/api/src/server.ts` | Basic-authenticated control-plane API and authorized media-playback capability issuer |
+| API | `apps/api/src/server.ts` | Basic-authenticated control-plane API |
 | Scheduler | `apps/scheduler/src/index.ts` | FIFO dispatch, recovery, callbacks |
 | CDP gateway | `apps/cdp-gateway/src/server.ts` | per-session browser-level WSS relay |
 | CDP client relay | `apps/cdp-client-relay/src/server.ts` | private application-side password bridge for CDP clients that cannot attach an Authorization header to upgrades |
-| Media playback gateway | `apps/media-playback-gateway/src/server.ts` | opaque Ed25519 HLS/direct-MP4 capability relay to private media workers |
 | Worker manager | `apps/worker-manager/src/server.ts` | worker registration, mailbox, assignment claims |
 | Encrypted input broker | `apps/input-broker/src/index.ts` | transient ciphertext-only input handoff |
 | Local agent | `apps/local-agent/src/index.ts` | outbound-only interactive worker |
 | Agent CLI | `apps/cli/src/cli.ts` (`fabric`) | per-user loopback CDP endpoint, live view and MCP for a remote session or local Chrome |
 | Egress sidecar | `apps/egress-sidecar/src/server.ts` | fail-closed PAC and per-policy proxy listeners |
-
-`media-relay` and `media-playback` never create a browser lease. The former is a bounded immutable
-artifact fetch. The latter supports persistent HLS/direct-MP4 player traffic through an encrypted,
-attempt-bound signed source handoff; provider URLs, cookies, and header context do not become job
-payloads, manifests, environment variables, artifacts, events, logs, or public playback URLs.
 
 ## Security boundary
 

@@ -17,7 +17,7 @@ within a few days and a fix or a coordinated disclosure date once the report is 
 In scope: anything that lets a caller exceed its principal's grants (another project's sessions,
 profiles, artifacts or events), reach the control network or the host from a browser container,
 bypass the egress policy (a `DIRECT` route, a private target), read a secret value from durable
-state, logs or artifacts, forge or replay a CDP, assignment, media-result or playback capability, or
+state, logs or artifacts, forge or replay a CDP or assignment capability, or
 attack the loopback endpoint of the `fabric` CLI from a web page.
 
 Out of scope: the documented authority model itself. A raw CDP connection has full authority over

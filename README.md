@@ -1,8 +1,8 @@
 # Browser Fabric
 
 Browser Fabric is self-hosted browser infrastructure for automation and AI agents. It hands out
-real Chromium browsers as leased sessions behind a plain CDP endpoint — so Playwright, Puppeteer,
-Patchright, MCP servers and agent frameworks work unchanged — and takes care of everything around
+real Chrome browsers as leased sessions behind a plain CDP endpoint — so Playwright, Patchright,
+Puppeteer, MCP servers and agent frameworks work unchanged — and takes care of everything around
 them: scheduling and capacity, persistent profiles, network egress policy, challenge handling,
 artifacts, and an audited, multi-tenant control plane.
 
@@ -12,29 +12,31 @@ It runs in two shapes:
   Chrome* (or a separate Chrome) and serves it on `http://127.0.0.1:9222` to any number of CDP
   clients at once, with a live view to watch and take over.
 - **Self-hosted, for teams and services:** a Docker Compose stack runs the control plane and
-  launches one hardened, sandboxed Chromium container per lease, reachable through an
-  authenticated CDP gateway.
+  launches one hardened, sandboxed Chrome container per lease — headful on a private display or
+  headless — reachable through an authenticated CDP gateway.
 
 ## Features
 
+- **Real Chrome, your driver** — Google Chrome stable (amd64) or Debian Chromium (arm64), pinned
+  to exact builds. Bring Playwright, Patchright, Puppeteer, Rebrowser or raw CDP; the browser is the
+  same for all of them.
 - **Raw CDP sessions** — `POST /v1/browser-sessions` returns a short-lived, capability-scoped
-  WebSocket; up to eight clients may share one browser.
+  WebSocket; up to eight clients may share one browser. `recipe_chrome@1` is headful on a private
+  X display (live view and takeover), `recipe_chrome-headless@1` headless.
 - **Typed jobs** — versioned recipes with retries, normalized challenge/manual/auth states and
   just-in-time encrypted input requests, so passwords, OTPs and cookies never land in job payloads.
 - **Profiles** — persistent browser profiles on worker-local volumes with exclusive writer leases,
-  disposable clones and verified relocation. Chromium is closed through CDP so logins survive.
+  disposable clones and verified relocation. The browser is closed through CDP so logins survive.
 - **Egress policy** — every browser reaches the internet only through an egress sidecar and a
-  fail-closed PAC: direct, upstream proxy (or proxy list), Tor, per-host and static-asset exceptions,
-  sticky upstream affinity.
-- **Turnstile and DataDome guardian** — a process-level companion in every Fabric Chromium clicks
+  fail-closed PAC: direct, upstream proxy (or an ordered proxy list), Tor, per-host and static-asset
+  exceptions.
+- **Turnstile and DataDome guardian** — a process-level companion in every Fabric browser clicks
   Cloudflare Turnstile checkboxes and slides DataDome's slider with bounded, human-like gestures,
   independent of the client that drives the page.
 - **CAPTCHA token solvers** — opt-in reCAPTCHA v2 solving through Death by Captcha or Anti-Captcha,
   per recipe, with provider keys that never enter a browser.
-- **Consistent fingerprint** — headless server Chromium reports an ordinary desktop GPU instead of
-  SwiftShader, without leaving detectable patches.
-- **Media relay** — one-shot immutable media artifacts and a persistent, signed HLS/MP4 playback
-  gateway for provider streams, with encrypted, attempt-bound source handoff.
+- **Consistent fingerprint** — a GPU-less server browser reports an ordinary desktop GPU instead of
+  SwiftShader, keeps WebGL when headful, and presents a normal Chrome User-Agent when headless.
 - **Artifacts** — immutable screenshots, traces, HARs and downloads in S3-compatible storage with
   30-day retention and short-lived signed URLs.
 - **Catalog** — add your own recipes, egress policies, challenge sets and projects in one JSON file,
@@ -134,11 +136,11 @@ fabric up --remote                     # an interactive browser of your deployme
 clients ─► edge (Basic auth per principal) ─► API ─┬─► scheduler ─► PostgreSQL
                                           └─► CDP gateway ◄─┐   └─► object store (S3)
                                                             │
-                    worker manager (Docker) ─► one Chromium container per lease ─► egress sidecar ─► internet
+                    worker manager (Docker) ─► one Chrome container per lease ─► egress sidecar ─► internet
                                                  + Turnstile/DataDome guardian      (PAC, proxy, Tor)
 ```
 
-- [docs/architecture.md](docs/architecture.md) — services, allocation, CDP relay, guardian, media relay
+- [docs/architecture.md](docs/architecture.md) — services, the browser runtime, allocation, CDP relay, guardian
 - [docs/README.md](docs/README.md) — features in depth: guardian, solvers, capacity, principals
 - [docs/catalog.md](docs/catalog.md) — recipes, egress policies, challenge sets, projects
 - [docs/agents.md](docs/agents.md) — the `fabric` CLI

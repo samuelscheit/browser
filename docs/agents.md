@@ -154,10 +154,10 @@ The agent is the [`@browser-fabric/task-agent`](../packages/task-agent/README.md
 - **TTL:** a remote session lives at most `--ttl` (default and maximum 4 h); the next client then
   gets a new one.
 - **Capacity:** a deployment runs at most `FABRIC_MAX_ACTIVE_BROWSER_LEASES` browsers, and each
-  interactive browser needs a worker that serves interactive recipes. When none is free,
+  headful browser needs a free worker slot. When none is free,
   `fabric up --remote` explains it after 60 s; use `--fresh` (does not wait for the persistent
   profile) or the local browser.
-- A persistent profile (for example `profile_interactive` of deploy/compose) is used by one session at a time. If another machine holds it,
+- A persistent profile (for example `profile_default` of deploy/compose) is used by one session at a time. If another machine holds it,
   `fabric up --remote` says so; `fabric up --remote --fresh` or the local browser always work.
 - Every endpoint uses one upstream connection however many clients it serves, so a remote
   session's limit of eight CDP clients is never the bottleneck.
@@ -183,5 +183,5 @@ Everything the CLI does is plain Fabric API: `GET /v1/me` lists the projects, pr
 policies the caller may use, `POST /v1/browser-sessions` (with an `Idempotency-Key` header) starts a
 session, and its `cdpEndpoint` accepts a browser-level CDP WebSocket with the same Basic credential.
 The Basic username is the principal ID, e.g. `principal_agent`. `fabric up --remote` defaults to
-`recipe_interactive-chromium@1`, `egress_direct@1` and the matching profile `GET /v1/me` offers;
+`recipe_chrome@1` (headful), `egress_direct@1` and the matching profile `GET /v1/me` offers;
 `--project`, `--profile`, `--recipe` and `--egress` select others.

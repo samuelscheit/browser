@@ -2,7 +2,7 @@
 
 Browser Fabric ships a small set of built-in recipes, egress policies and challenge handler sets.
 A deployment adds its own — and projects — in one JSON file, without changing code. Every process
-that builds a scheduler (API, scheduler, CDP gateway, media gateway, worker manager, provisioner)
+that builds a scheduler (API, scheduler, CDP gateway, worker manager, provisioner)
 reads the file named by `FABRIC_CATALOG_FILE` at startup, validates it completely, and refuses to
 start on any error. No file (or `{ "version": 1 }`) means built-ins only.
 
@@ -14,12 +14,8 @@ is [`deploy/compose/catalog.example.json`](../deploy/compose/catalog.example.jso
 
 | Kind | Ref | What it is |
 | --- | --- | --- |
-| Recipe | `recipe_chromium-cdp@1` | headless Chromium, raw CDP, profile family `default` |
-| Recipe | `recipe_interactive-chromium@1` | headful Chromium on a private X display (live view, takeover), family `interactive` |
-| Recipe | `recipe_patchright@1` | Chromium for the Patchright runtime, raw CDP, family `default` |
-| Recipe | `recipe_rebrowser-puppeteer@1` | Chromium for the Rebrowser Puppeteer runtime, raw CDP, family `default` |
-| Recipe | `recipe_media-relay@1` | one-shot immutable media artifact relay (typed job `relay`) |
-| Recipe | `recipe_media-playback@1` | persistent signed HLS/MP4 playback (typed job `playback`) |
+| Recipe | `recipe_chrome@1` | headful Chrome on a private X display (live view, takeover); mode `interactive`, profile family `default` |
+| Recipe | `recipe_chrome-headless@1` | headless Chrome; profile family `default` |
 | Egress | `egress_direct@1` | every traffic class through the sidecar's `direct` listener |
 | Egress | `egress_proxy@1` | every traffic class through the `proxy` listener (upstream URL/pool in a secret) |
 | Egress | `egress_tor@1` | documents, APIs, assets and downloads through Tor (`--profile tor`) |
@@ -27,8 +23,12 @@ is [`deploy/compose/catalog.example.json`](../deploy/compose/catalog.example.jso
 | Challenge set | `challenge_captcha-solver@1` | guardian plus reCAPTCHA v2 token solving through Death by Captcha and Anti-Captcha, each only if its credential is configured |
 | Challenge set | `challenge_manual-handoff@1` | guardian plus a manual handoff (`awaiting_manual`) |
 
-The built-in browser recipes use `challenge_captcha-solver@1`. Every Fabric Chromium runs the
-guardian regardless of its recipe.
+Fabric has one browser runtime, `chrome`: Google Chrome stable on amd64 hosts, Debian Chromium on
+arm64 hosts (Google publishes no Linux arm64 Chrome). Clients choose their own driver —
+Playwright, Patchright, Puppeteer, Rebrowser or raw CDP — over the session's CDP endpoint; the
+driver is never a server-side runtime. Both recipes use the `default` profile family, so one profile
+serves either, and both use `challenge_captcha-solver@1`. Every Fabric browser runs the guardian
+regardless of its recipe.
 
 ## Format
 
@@ -51,24 +51,16 @@ guardian regardless of its recipe.
       "name": "proxy-static-direct",              // ref egress_proxy-static-direct@1
       "routes": {                                // per traffic class; a missing class is blocked
         "document": { "kind": "proxy", "proxyRef": "default", "protocol": "http" },
-        "static_asset": { "kind": "direct" },
-        "direct_exception": { "kind": "direct" }
-      },
-      "constraints": { "preserveProxyAffinity": true, "disableServiceWorkersInProxyMode": true },
-      "sidecar": {
-        "listener": { "id": "proxy", "port": 11001 },       // non-direct routes
-        "directListener": { "id": "direct", "port": 11000 } // direct routes and exception hosts
-      },
-      "directExceptionHostnames": ["cdn.example.com"],      // suffixes that bypass the proxy
-      "proxyFallbackRefs": ["primary", "secondary"]         // optional ordered fallback
+        "static_asset": { "kind": "direct" }
+      }
     }
   ],
   "recipes": [
     {
-      "name": "chromium-de",                     // ref recipe_chromium-de@1
-      "runtime": "chromium-cdp",                 // chromium-cdp | patchright | rebrowser-puppeteer | media-relay | media-playback
+      "name": "chrome-de",                       // ref recipe_chrome-de@1
+      "runtime": "chrome",                       // the one browser runtime
       "profileFamily": "default",
-      "mode": "headless",                        // headless | headful | interactive
+      "mode": "interactive",                     // interactive (headful, live view) | headless
       "access": "raw_cdp",                       // raw_cdp | typed_job
       "challengeHandlerSetRef": "challenge_solver-anticaptcha-only@1",
       "launch": { "locale": "de-DE", "timezone": "Europe/Berlin", "viewport": { "width": 1366, "height": 768 } }
@@ -91,11 +83,10 @@ guardian regardless of its recipe.
   (`--remote-debugging-*`, `--user-data-dir`, `--proxy-*`, `--no-sandbox`, …) are refused; the
   runtime sets them. `challengeHandlerSetRef` must name a built-in or catalog set.
 - **egressPolicies**: traffic classes are `document`, `api`, `websocket`, `static_asset`,
-  `browser_download`, `media_manifest`, `media_key`, `media_segment`, `media_range`,
-  `provider_handshake`, `captcha_solver`, `direct_exception`. Routes are `direct`
+  `browser_download`, `captcha_solver`, `direct_exception`. Routes are `direct`
   (`retryThroughProxy`), `proxy` (`proxyRef`, `protocol`, `remoteDns`), `tor` or `block`
-  (`reason`). `sidecar` names the egress sidecar listeners that native workers (the media relay) use;
-  browsers select listeners through the sidecar's PAC.
+  (`reason`). The routes declare the policy; the egress sidecar's per-policy PAC enforces it (next
+  section).
 - **challengeSets**: handler kinds are `guardian`, `dbc`, `anticaptcha`, `manual-handoff`; modes are
   `automatic`, `manual`, `fallback`. Token solving is enabled only by an automatic `dbc` or
   `anticaptcha` handler.
@@ -103,8 +94,8 @@ guardian regardless of its recipe.
 
 ## Egress policies need a sidecar entry
 
-The control plane decides which policy a session uses; the egress sidecar enforces it. A catalog
-policy therefore also needs an entry in the sidecar config (`deploy/compose/egress-sidecar.json`,
+The control plane decides which policy a session uses; the egress sidecar enforces it through the
+PAC it serves to that browser. A catalog policy therefore also needs an entry in the sidecar config (`deploy/compose/egress-sidecar.json`,
 or the file named by `FABRIC_EGRESS_CONFIG_PATH`): its `ref`, its `defaultListenerId` and, when
 some requests must take another listener, `rules`:
 
@@ -114,14 +105,14 @@ some requests must take another listener, `rules`:
   "defaultListenerId": "proxy",
   "rules": [
     { "listenerId": "direct", "pathExtensions": [".css", ".js", ".png", ".woff2"] },
-    { "listenerId": "direct", "hostnameSuffixes": ["cdn.example.com"] }
+    { "listenerId": "direct", "hostnameSuffixes": ["static.example.com"] }
   ]
 }
 ```
 
 A new listener (for example a second proxy pool) is added to the sidecar's `listeners` with its own
-port and an `upstreamSecretFile` under `/run/secrets/`, then referenced from the policy's `sidecar`.
-The PAC the sidecar generates never contains `DIRECT`: a missing listener fails closed.
+port and an `upstreamSecretFile` under `/run/secrets/` (mounted into `fabric-egress-sidecar`), then
+named as a policy's `defaultListenerId` or in its `rules`. The PAC the sidecar generates never contains `DIRECT`: a missing listener fails closed.
 
 ## Applying a catalog change (Compose)
 
@@ -132,9 +123,8 @@ $EDITOR catalog.json
 docker compose up -d --force-recreate  # services reload the catalog; the provisioner reconfigures idle workers
 ```
 
-`bootstrap-secrets.sh` regenerates the provisioning manifest and the worker configs: every catalog
-recipe is offered by each worker whose runtime matches (interactive recipes only by interactive
-workers), together with its profile family. The provisioner applies that as an idle-only worker
+`bootstrap-secrets.sh` regenerates the provisioning manifest and the worker config: every catalog
+recipe is offered by the Chrome worker, together with its profile family. The provisioner applies that as an idle-only worker
 reconfiguration; a worker that holds an active lease refuses it until the lease ends. Durable
 profiles for a new profile family are added to the provisioning step and to the
 `fabric-volume-bootstrap` service in `compose.yml`.

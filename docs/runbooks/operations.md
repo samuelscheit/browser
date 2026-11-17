@@ -2,7 +2,7 @@
 
 ## Capacity
 
-`FABRIC_MAX_ACTIVE_BROWSER_LEASES` caps concurrent browser leases across the deployment (default four, at most eight); each managed worker additionally serves at most four, and a federated local worker exactly one. A media-only task uses bounded `mediaCapacity` and does not increment browser lease counters. If capacity is saturated, inspect queue age and worker health rather than raising the cap.
+`FABRIC_MAX_ACTIVE_BROWSER_LEASES` caps concurrent browser leases across the deployment (default four, at most eight); each managed worker additionally serves at most four, and a federated local worker exactly one. If capacity is saturated, inspect queue age and worker health rather than raising the cap.
 
 ## Worker failure
 
