@@ -162,6 +162,14 @@ run("fabric endpoint multiplexer on a Chrome with the remote-debugging toggle", 
     }
     expect(proxy.upgrades).toBe(1);
 
+    // Playwright redirects downloads to its temp folder; in the user's Chrome the default context
+    // (the user's own browsing) keeps Chrome's behaviour with events, only Playwright's own contexts are redirected.
+    const downloads = proxy.sent.filter((frame) => frame.method === "Browser.setDownloadBehavior");
+    const defaultContext = downloads.filter((frame) => frame.params.browserContextId === undefined);
+    expect(defaultContext.length).toBeGreaterThan(0);
+    for (const frame of defaultContext) expect(frame.params).toEqual({ behavior: "default", eventsEnabled: true });
+    expect(downloads.some((frame) => frame.params.browserContextId !== undefined && frame.params.behavior === "allowAndName")).toBe(true);
+
     // Sessions are never shared: each client's sessions are its own.
     const perClient = server.mux!.stats().perClient.filter((client) => !client.agentTabsOnly);
     expect(perClient).toHaveLength(2);

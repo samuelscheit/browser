@@ -210,7 +210,8 @@ export class EndpointServer {
     this.#anchoring ??= (async () => {
       const connection = await this.#options.backend.connect();
       try {
-        const mux = new CdpMultiplexer(connection, { ...(this.#options.log ? { log: this.#options.log } : {}) });
+        const usersBrowser = this.#options.backend.owner === "user";
+        const mux = new CdpMultiplexer(connection, { usersBrowser, ...(this.#options.log ? { log: this.#options.log } : {}) });
         this.#recency.clear();
         connection.onMessage((message) => this.#trackTarget(message));
         await mux.start();
@@ -222,10 +223,9 @@ export class EndpointServer {
           this.#options.log?.("browser connection closed; the next client reconnects");
         });
         this.#anchor = anchor;
-        const scope = this.#options.backend.guardian;
-        if (scope) {
+        if (this.#options.backend.guardian) {
           const log = this.#options.log ?? (() => undefined);
-          const guardian = (this.#options.guardian ?? turnstileGuardian)(mux, scope === "agent-tabs", log);
+          const guardian = (this.#options.guardian ?? turnstileGuardian)(mux, usersBrowser, log);
           anchor.guardian = guardian;
           await guardian.start().catch((error) => log(`turnstile guardian unavailable: ${error instanceof Error ? error.message : String(error)}`));
         }

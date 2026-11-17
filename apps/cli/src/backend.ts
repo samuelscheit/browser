@@ -1,10 +1,10 @@
 import type { CdpConnection } from "@browser-fabric/worker-runtime";
 
 /**
- * Which tabs the endpoint's in-process Turnstile guardian watches: every tab of a browser fabric
- * owns, or only the tabs fabric clients created in a browser that belongs to the user.
+ * Whose browser it is. In the user's own Chrome the guardian watches only the tabs fabric clients
+ * created, and no client may change what the user's default context does (downloads).
  */
-export type GuardianScope = "all" | "agent-tabs";
+export type BrowserOwner = "fabric" | "user";
 
 /**
  * The browser behind the local endpoint. `connect` (re)starts it when needed and opens the ONE
@@ -16,7 +16,8 @@ export interface BrowserBackend {
   /** Present when idle capacity is scarce (remote): no client for the idle window releases the browser. */
   suspend?(): Promise<void>;
   close(): Promise<void>;
-  /** Run the Turnstile guardian over the shared connection; absent when the browser has its own. */
-  readonly guardian?: GuardianScope;
+  readonly owner: BrowserOwner;
+  /** Run the challenge guardian over the shared connection; false when the browser has its own (remote). */
+  readonly guardian: boolean;
   describe(): { sessionId?: string; profile?: string; detail: string };
 }

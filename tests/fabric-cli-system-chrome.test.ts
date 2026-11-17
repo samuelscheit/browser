@@ -49,7 +49,8 @@ describe("your own Chrome via the remote-debugging toggle", () => {
     expect(proxy.upgrades).toBe(1);
     expect(notices).toEqual([ALLOW_NOTICE, undefined]);
     expect(calls).toEqual([]);
-    expect(backend.guardian).toBe("agent-tabs");
+    expect(backend.owner).toBe("user");
+    expect(backend.guardian).toBe(true);
     // Closing fabric's side never touches Chrome: close() has nothing to quit.
     await backend.close();
     expect(proxy.upgrades).toBe(1);

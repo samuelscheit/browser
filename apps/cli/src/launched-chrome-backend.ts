@@ -49,7 +49,8 @@ export interface LaunchedChromeBackendOptions {
  * isolated from the user's browser, and owned by fabric, so `fabric down` quits it.
  */
 export class LaunchedChromeBackend implements BrowserBackend {
-  readonly guardian = "all" as const;
+  readonly owner = "fabric" as const;
+  readonly guardian = true;
   readonly #options: LaunchedChromeBackendOptions;
   readonly #profileDirectory: string;
   #process?: ChildProcess;

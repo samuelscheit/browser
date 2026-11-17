@@ -6,6 +6,8 @@ import { EndpointServer, closeReason } from "../apps/cli/src/endpoint-server";
 import { FakeCdpBrowser } from "./support/fake-cdp-browser";
 
 class FakeBackend implements BrowserBackend {
+  readonly owner = "fabric" as const;
+  readonly guardian = false;
   acquires = 0;
   suspends = 0;
   closed = false;

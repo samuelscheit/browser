@@ -110,6 +110,8 @@ function parseFrame(frame: string | Uint8Array): Record<string, any> | undefined
 
 export class CdpMultiplexer {
   readonly #upstream: CdpConnection;
+  /** The user's own Chrome: its default context is the user's browsing, not the clients'. */
+  readonly #usersBrowser: boolean;
   readonly #log: (message: string) => void;
   readonly #clients = new Set<Client>();
   readonly #sessions = new Map<string, Session>();
@@ -121,8 +123,9 @@ export class CdpMultiplexer {
   readonly #agentTargets = new Set<string>();
   #closed = false;
 
-  public constructor(upstream: CdpConnection, options: { log?: (message: string) => void } = {}) {
+  public constructor(upstream: CdpConnection, options: { usersBrowser?: boolean; log?: (message: string) => void } = {}) {
     this.#upstream = upstream;
+    this.#usersBrowser = options.usersBrowser ?? false;
     this.#log = options.log ?? (() => undefined);
     upstream.onMessage((message) => this.#route(message));
     upstream.onClose(() => this.close("browser connection closed"));
@@ -303,6 +306,10 @@ export class CdpMultiplexer {
       case "Browser.setDownloadBehavior":
         if (params.behavior === "default") client.downloads.delete(params.browserContextId ?? "");
         else client.downloads.add(params.browserContextId ?? "");
+        // The default context of the user's Chrome is the user's own browsing: Playwright would send
+        // every download the user makes to its temp folder. Downloads there keep Chrome's own
+        // behaviour (the user's Downloads folder); the client still gets the download events.
+        if (this.#usersBrowser && params.browserContextId === undefined) return this.#forward(client, id, method, { behavior: "default", ...(params.eventsEnabled === undefined ? {} : { eventsEnabled: params.eventsEnabled }) });
         break;
       case "Browser.grantPermissions":
       case "Browser.setPermission":

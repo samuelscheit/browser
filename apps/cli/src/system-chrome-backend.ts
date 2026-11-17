@@ -66,7 +66,8 @@ export interface SystemChromeBackendOptions {
  * connection only detaches.
  */
 export class SystemChromeBackend implements BrowserBackend {
-  readonly guardian = "agent-tabs" as const;
+  readonly owner = "user" as const;
+  readonly guardian = true;
   readonly #options: SystemChromeBackendOptions;
   readonly #chrome: SystemChrome;
   #remoteDebuggingPageOpened = false;

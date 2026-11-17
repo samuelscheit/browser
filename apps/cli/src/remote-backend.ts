@@ -65,6 +65,9 @@ export interface RemoteBackendOptions {
 }
 
 export class RemoteBackend implements BrowserBackend {
+  readonly owner = "fabric" as const;
+  /** The remote browser runs its own server-side guardian. */
+  readonly guardian = false;
   readonly #options: RemoteBackendOptions;
   readonly #client: BrowserFabricClient;
   readonly #authorization: string;
