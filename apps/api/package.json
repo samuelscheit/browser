@@ -1,6 +1,16 @@
 {
   "name": "@browser-fabric/api",
   "version": "0.1.0",
+  "license": "MIT",
+  "homepage": "https://github.com/samuelscheit/browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samuelscheit/browser.git",
+    "directory": "apps/api"
+  },
+  "bugs": {
+    "url": "https://github.com/samuelscheit/browser/issues"
+  },
   "type": "module",
   "dependencies": {
     "@browser-fabric/contracts": "workspace:*",

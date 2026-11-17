@@ -8,7 +8,7 @@ behind one stable, unauthenticated loopback address that every CDP tool understa
 | `fabric up` | **Your everyday Chrome** with your real profile: agents share your logins, and you see what they do (default) | `http://127.0.0.1:9222` |
 | `fabric up --profile <name>` | A separate Chrome fabric starts, profile in `~/.config/fabric/profiles/<name>` | `http://127.0.0.1:9222` |
 | `fabric up --headless` | The same, headless (profile `agent` unless `--profile`) | `http://127.0.0.1:9222` |
-| `fabric up --remote` | Remote Fabric browser on fabric-host with the persistent agent profile (logins survive) | `http://127.0.0.1:9223` |
+| `fabric up --remote` | Remote Fabric browser from your deployment, with a persistent profile (logins survive) | `http://127.0.0.1:9223` |
 | `fabric up --remote --fresh` | Remote Fabric browser with a throwaway profile | `http://127.0.0.1:9223` |
 
 Every command (`up`, `mcp`, `goto`, `shot`, `eval`, `tabs`, `view`, `down`) uses the local browser
@@ -59,9 +59,11 @@ What fabric does in your Chrome:
 
 ```sh
 ln -sf "$PWD/apps/cli/src/cli.ts" ~/.bun/bin/fabric      # from this checkout; needs bun on PATH
-ssh fabric-host cat /etc/compose/browser-fabric-secrets/fabric_api_password_agent \
-  | fabric login --url https://fabric.example.com --username agent
-fabric whoami
+fabric whoami                                            # local mode needs no login
+
+# Only for --remote: a principal of your deployment (deploy/compose). The password of
+# principal_<name> is the file deploy/compose/secrets/principals/<name> on the Fabric host.
+fabric login --url https://fabric.example.com --username agent < /path/to/agent-password
 ```
 
 Credentials live in `~/.config/fabric/credentials.json` (mode 600). `FABRIC_URL`, `FABRIC_USERNAME`
@@ -123,10 +125,11 @@ are followed automatically. For full DevTools on a remote tab, open the `devtool
   quit.
 - **TTL:** a remote session lives at most `--ttl` (default and maximum 4 h); the next client then
   gets a new one.
-- **Capacity:** fabric-host runs at most three interactive Chromium browsers (shared with CHAT) and six
-  browsers in total. When none is free, `fabric up --remote` explains it after 60 s; use `--fresh`
-  (does not wait for the persistent profile) or the local browser.
-- The persistent `profile_agent` is used by one session at a time. If another machine holds it,
+- **Capacity:** a deployment runs at most `FABRIC_MAX_ACTIVE_BROWSER_LEASES` browsers, and each
+  interactive browser needs a worker that serves interactive recipes. When none is free,
+  `fabric up --remote` explains it after 60 s; use `--fresh` (does not wait for the persistent
+  profile) or the local browser.
+- A persistent profile (for example `profile_interactive` of deploy/compose) is used by one session at a time. If another machine holds it,
   `fabric up --remote` says so; `fabric up --remote --fresh` or the local browser always work.
 - Every endpoint uses one upstream connection however many clients it serves, so a remote
   session's limit of eight CDP clients is never the bottleneck.
@@ -151,4 +154,6 @@ your user can drive the browser, exactly as with `--remote-debugging-port`.
 Everything the CLI does is plain Fabric API: `GET /v1/me` lists the projects, profiles, recipes and
 policies the caller may use, `POST /v1/browser-sessions` (with an `Idempotency-Key` header) starts a
 session, and its `cdpEndpoint` accepts a browser-level CDP WebSocket with the same Basic credential.
-The Basic username is the principal ID, e.g. `principal_agent`.
+The Basic username is the principal ID, e.g. `principal_agent`. `fabric up --remote` defaults to
+`recipe_interactive-chromium@1`, `egress_direct@1` and the matching profile `GET /v1/me` offers;
+`--project`, `--profile`, `--recipe` and `--egress` select others.

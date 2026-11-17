@@ -1,6 +1,16 @@
 {
   "name": "@browser-fabric/control-plane",
   "version": "0.1.0",
+  "license": "MIT",
+  "homepage": "https://github.com/samuelscheit/browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samuelscheit/browser.git",
+    "directory": "packages/control-plane"
+  },
+  "bugs": {
+    "url": "https://github.com/samuelscheit/browser/issues"
+  },
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {

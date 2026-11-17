@@ -1,6 +1,15 @@
-# Browser Fabric
+# Browser Fabric documentation
 
-Browser Fabric is the shared browser control plane described in [`/PLAN.md`](../PLAN.md). It owns process lifecycle, profile/volume affinity, leases, scheduling, browser-level CDP capabilities, egress policy, challenge orchestration, artifacts, Companion transport, and worker health. Domain applications remain responsible for business workflows and call the control plane through the typed clients.
+Browser Fabric is a browser control plane. It owns process lifecycle, profile/volume affinity,
+leases, scheduling, browser-level CDP capabilities, egress policy, challenge handling, artifacts,
+media relay and worker health. Applications keep their business workflows and call the control
+plane through the API or the typed clients.
+
+- [Architecture](architecture.md): services, allocation, CDP relay, guardian, media relay
+- [Catalog](catalog.md): add recipes, egress policies, challenge sets and projects without code
+- [Agents and the `fabric` CLI](agents.md)
+- [Self-hosting with Docker Compose](../deploy/compose/README.md)
+- [Operations runbook](runbooks/operations.md), [ADRs](adr/)
 
 **Agents and people who just need a browser:** use the `fabric` CLI ([`agents.md`](agents.md)).
 `fabric up` (your own everyday Chrome) or `fabric up --remote` (a Fabric browser) prints a plain
@@ -9,10 +18,11 @@ Browser Fabric is the shared browser control plane described in [`/PLAN.md`](../
 ## Global Cloudflare Turnstile guardian
 
 Every Fabric-owned **Chromium** process starts a process-level Turnstile guardian before its lease
-is marked ready (managed Docker Compose browsers, federated local browsers, and the manager-owned Chromium
-used by the Social client). The guardian uses a second browser-level CDP connection, watches every
+is marked ready (managed Docker Compose browsers, federated local browsers, and the CLI's local
+browser). The guardian uses a second browser-level CDP connection, watches every
 page/tab—including dynamically created tabs and Turnstile frames hidden in closed shadow roots—and
-performs the same bounded, jittered trusted mouse gesture used by the former Media flow. It is
+performs one bounded, jittered trusted mouse gesture on the Turnstile checkbox (and a human-like
+slide on DataDome's slider CAPTCHA). It is
 independent of the application's Puppeteer, Playwright, Patchright, or raw-CDP connection, so the
 behavior is automatically active for arbitrary sites using Cloudflare Turnstile rather than being
 an application-specific recipe loop.
@@ -32,8 +42,10 @@ disable switch: omitting them uses the reviewed defaults (1 second, 12 seconds, 
 ## CAPTCHA token solving
 
 Token CAPTCHAs are solved by a recipe-gated companion, not by the Turnstile clicker. A browser solves
-only when its recipe's challenge handler set contains an **automatic** `dbc` or `anticaptcha` handler.
-Manual, fallback, and unrelated recipes never spend provider credit.
+only when its recipe's challenge handler set contains an **automatic** `dbc` or `anticaptcha` handler
+**and** the deployment configured that provider's credential. The built-in browser recipes use
+`challenge_captcha-solver@1`; a catalog recipe that must never spend provider credit uses
+`challenge_guardian@1` instead.
 
 - **Supported widget:** Google reCAPTCHA v2 checkboxes (Death by Captcha token type 4, AntiCaptcha
   `RecaptchaV2TaskProxyless`). hCaptcha is not solved: neither provider's public documentation names a
@@ -45,7 +57,7 @@ Manual, fallback, and unrelated recipes never spend provider credit.
 - **Credentials:** provider keys are Docker secrets mounted only into the worker manager. Browser
   containers and the egress sidecar never receive them. An empty or `#`-prefixed secret file means the
   provider is not configured.
-- **Egress:** solver API traffic leaves through the `captcha-solver` sidecar listener (port 11008),
+- **Egress:** solver API traffic leaves through the `captcha-solver` sidecar listener (port 11003),
   which admits only the `dbcapi.me` and `anti-captcha.com` hostnames.
 - **Bounds:** one paid solve per page document. A failed solve is not retried on later polls, and a
   navigation resets the budget. A canceled solve is never retried through a second provider. The
@@ -57,7 +69,7 @@ Manual, fallback, and unrelated recipes never spend provider credit.
 
 Browser sessions accept one external CDP client by default. A session may request up to
 `maxExternalConnections: 8` (`MAX_EXTERNAL_CDP_CONNECTIONS`) when independent clients share the same
-isolated browser—for example a passive network recorder attached before a Companion automation client,
+isolated browser—for example a passive network recorder attached before a browser-agent framework,
 or an agent's MCP, scripts, live view and keep-alive connection. Chromium serves many DevTools
 clients natively and every client already holds the session's full raw-CDP authority, so the limit
 bounds resources, not privilege. The value is persisted and enforced by PostgreSQL; values outside
@@ -68,8 +80,9 @@ A session is released 60 seconds after its last external client disconnects.
 
 `FABRIC_MAX_ACTIVE_BROWSER_LEASES` caps concurrent browser leases across the deployment (default
 4, at most `MAX_ACTIVE_BROWSER_LEASES` = 8, enforced by the scheduler and the `fabric_capacity`
-check). Each worker additionally limits its own browsers (`capacity`, 1–3, with per-browser
-`resourceLimits`); an idle worker is resized by changing it in the provisioning manifest. Every
+check). Each managed worker additionally limits its own browsers (`capacity`, 0–4, with per-browser
+`resourceLimits`); an idle worker is resized, or given further catalog recipes, by changing it in the
+provisioning manifest (deploy/compose regenerates it with `bootstrap-secrets.sh`). Every
 Fabric service validates the cap at startup, so a value outside 1–8 stops the stack from booting.
 
 ## Stopping browsers keeps their profile
@@ -88,24 +101,21 @@ Clients use it to pick valid refs instead of reading deployment files.
 ## Application principals
 
 Each application authenticates at the edge with HTTP Basic: the username is its principal ID
-(`principal_<name>`), the password is the Docker secret `fabric_api_password_<name>`. The edge
-derives one account per mounted secret, so adding a principal means:
+(`principal_<name>`), the password is the file `secrets/principals/<name>` of the Compose
+deployment. The edge derives one account per file, so adding a principal is:
 
-1. add `<name>` to `deploy/compose/ensure-application-passwords.sh` and run it on the host,
-2. declare `fabric_api_password_<name>` in the Compose file and mount it into `fabric-edge`
-   (`bun run validate:deployment` checks both),
-3. add the principal (and its project/profiles) to the provisioning manifest.
+```sh
+cd deploy/compose
+FABRIC_PRINCIPALS="admin <name>" ./bootstrap-secrets.sh   # adds the password and the manifest entry
+docker compose up -d --force-recreate fabric-provisioner fabric-edge
+```
 
 A rejected credential gets a 401 whose body explains the username format.
 
 ## Local development
 
-```sh
-bun install --frozen-lockfile
-bun run check
-```
-
-The default test suite uses an in-memory store and fake clock. PostgreSQL and MinIO adapters are exercised through contract boundaries; production startup uses `apps/api/src/server.ts` and `packages/control-plane/src/runtime.ts`.
+See [CONTRIBUTING.md](../CONTRIBUTING.md). The default test suite uses an in-memory store and a
+fake clock; PostgreSQL, browser and Compose checks are opt-in.
 
 ## Runtime entrypoints
 
@@ -120,7 +130,7 @@ The default test suite uses an in-memory store and fake clock. PostgreSQL and Mi
 | Encrypted input broker | `apps/input-broker/src/index.ts` | transient ciphertext-only input handoff |
 | Local agent | `apps/local-agent/src/index.ts` | outbound-only interactive worker |
 | Agent CLI | `apps/cli/src/cli.ts` (`fabric`) | per-user loopback CDP endpoint, live view and MCP for a remote session or local Chrome |
-| Companion adapter | `apps/companion-adapter/src/index.ts` | session-scoped Companion lifecycle |
+| Egress sidecar | `apps/egress-sidecar/src/server.ts` | fail-closed PAC and per-policy proxy listeners |
 
 `media-relay` and `media-playback` never create a browser lease. The former is a bounded immutable
 artifact fetch. The latter supports persistent HLS/direct-MP4 player traffic through an encrypted,

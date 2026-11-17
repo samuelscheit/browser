@@ -2,12 +2,11 @@
 
 ## Decision
 
-Expose two integration layers: a managed browser-level CDP WebSocket for trusted clients and typed, versioned recipe jobs for workflows needing normalized retries, challenge states, identity checks, approvals, or artifact guarantees.
+Expose two integration layers: a managed browser-level CDP WebSocket for trusted clients and typed, versioned recipe jobs for workflows needing normalized retries, challenge states, input handoff, or artifact guarantees.
 
 ## Consequences
 
-- Existing Puppeteer, Rebrowser, Playwright connectOverCDP, Companion cdp-connect, and direct DevTools clients remain usable.
+- Existing Puppeteer, Rebrowser, Playwright `connectOverCDP`, browser-agent frameworks and direct DevTools clients remain usable unchanged.
 - Raw CDP is intentionally treated as full profile authority; origin-restriction claims would be misleading.
 - Workers—not clients—choose executable, launch flags, placement, networking, and resource limits.
-- SocialApi remains a native Python application client, while its only supported engine is a
-  Fabric-managed Chromium process reached through its private CDP endpoint.
+- Recipes, egress policies and challenge handler sets are immutable and versioned. Deployments add their own through the catalog file (`docs/catalog.md`) instead of patching built-ins.

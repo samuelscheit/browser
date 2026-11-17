@@ -1,6 +1,16 @@
 {
   "name": "browser-fabric",
   "version": "0.1.0",
+  "description": "Self-hosted browser infrastructure: leased Chromium sessions over raw CDP, profiles, egress policy, challenge handling and media relay.",
+  "license": "MIT",
+  "homepage": "https://github.com/samuelscheit/browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samuelscheit/browser.git"
+  },
+  "bugs": {
+    "url": "https://github.com/samuelscheit/browser/issues"
+  },
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.0",
@@ -17,14 +27,13 @@
     "test": "bun test --timeout 30000",
     "test:integration": "RUN_BROWSER_INTEGRATION=1 bun test tests/raw-cdp.integration.test.ts tests/fabric-cli-local.integration.test.ts tests/fabric-cli-mux.integration.test.ts --timeout 120000",
     "typecheck": "tsc --noEmit",
-    "check": "bun run typecheck && bun run test && bun run validate:docker && bun run validate:deployment",
+    "check": "bun run typecheck && bun run test && bun run validate:docker",
     "validate:docker": "bun scripts/validate-dockerfiles.ts",
-    "validate:deployment": "bun scripts/validate-deployment.ts",
     "validate:sql": "./scripts/validate-sql.sh",
-    "migration:inventory": "bun scripts/migration-inventory.ts",
     "generate:assignment-keys": "bun scripts/generate-assignment-keys.ts",
     "generate:worker-input-key": "bun scripts/generate-worker-input-key.ts",
-    "provision": "bun apps/worker-manager/src/provision-fabric.ts"
+    "provision": "bun apps/worker-manager/src/provision-fabric.ts",
+    "compose:smoke": "bun scripts/compose-smoke.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

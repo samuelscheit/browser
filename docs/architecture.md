@@ -1,24 +1,37 @@
 # Browser Fabric architecture
 
 ```text
-                 Cloudflare Tunnel + Basic credentials
+                 clients (Basic credential per principal; TLS in front of the edge)
                            |
-             +-------------+--------------+
-             |                            |
-       fabric-api                    cdp-gateway
-             |
-             +--- media-playback-gateway
-             |                            |
-             +---------- fabric-control --+
+                      fabric-edge (Caddy)
+             +-------------+--------------+--------------------------+
+             |                            |                          |
+        fabric-api                  fabric-cdp-gateway      fabric-media-playback-gateway
+             |                            |                          |
+             +---------------- fabric-control (internal) ------------+
                            |
-        +------------------+------------------+
-        |                  |                  |
-   scheduler         worker-manager       companion-adapter
-        |                  |                  |
- fabric-postgres   input-broker -> workers fabric-companion
-        |                  |                  |
-   fabric-minio   egress sidecars + volumes  companion DB
+        +------------------+--------------------+
+        |                  |                    |
+  fabric-scheduler   fabric-worker-manager   fabric-input-broker
+        |            (Docker socket: creates     (ciphertext only)
+  fabric-postgres     one container per lease)
+        |                  |
+ fabric-object-store       +--> browser / media containers --> fabric-egress-sidecar --> internet
+     (RustFS, S3)                 (fabric-workers network)        (PAC + listeners; Tor optional)
 ```
+
+The services, their networks and secrets are defined in [`deploy/compose/compose.yml`](../deploy/compose/compose.yml).
+Every origin speaks mTLS to the edge; workers authenticate to the manager with per-worker client
+certificates plus an enrollment token. Browser containers never reach the control network.
+
+## Built-ins and the deployment catalog
+
+Recipes, egress policies and challenge handler sets are immutable, versioned values. The platform
+ships a small generic set (raw CDP for each browser runtime, an interactive Chromium, the media
+recipes; direct/proxy/Tor egress; guardian, captcha-solver and manual-handoff challenge sets). A
+deployment adds its own, plus projects, in a JSON catalog loaded by every process at startup
+([`catalog.md`](catalog.md)). Workers, principals and durable profiles come from the provisioning
+manifest the Compose bootstrap generates.
 
 ## Allocation transaction
 
@@ -64,7 +77,7 @@ keys kept in the worker manager and never in a browser or the egress sidecar.
 
 ## Durable versus ephemeral data
 
-PostgreSQL stores metadata, state transitions, hashes, and references only. MinIO stores immutable artifacts with a 30-day lifecycle. Passwords, OTPs, CAPTCHA credentials, proxy credentials, cookies, and transient form values are held in a worker-process memory vault for one request and never appear in rows, object metadata, events, traces, screenshots, callbacks, or error strings. The private input broker can buffer only an authenticated, end-to-end encrypted envelope; it has no decryption key, runs one replica, and deletes the envelope on worker retrieval or expiry.
+PostgreSQL stores metadata, state transitions, hashes, and references only. The S3-compatible object store stores immutable artifacts with a 30-day lifecycle. Passwords, OTPs, CAPTCHA credentials, proxy credentials, cookies, and transient form values are held in a worker-process memory vault for one request and never appear in rows, object metadata, events, traces, screenshots, callbacks, or error strings. The private input broker can buffer only an authenticated, end-to-end encrypted envelope; it has no decryption key, runs one replica, and deletes the envelope on worker retrieval or expiry.
 
 ## Immutable media relay
 
@@ -80,7 +93,7 @@ application -> authenticated artifact upload -> relay-mode media_manifest artifa
 media worker -> Fabric egress sidecar -> provider response -> private manager receiver
                                                            |
                                                            v
-                                             immutable MinIO artifact + verified job result
+                                             immutable object-store artifact + verified job result
 ```
 
 A media job stores only the manifest artifact reference and an optional byte range. It cannot store
@@ -88,7 +101,7 @@ an arbitrary `manifestUrl`, signed provider URL, proxy credential, or object-sto
 validates the manifest ownership, public target, allowed MIME types, requested range, and artifact
 policy before launching the non-browser relay. Redirects are manually bounded and revalidated.
 Provider bytes stream directly from the relay to the manager's private capability-bound receiver;
-the relay logs only a receipt and has neither MinIO credentials nor a public listener. The manager
+the relay logs only a receipt and has neither object-store credentials nor a public listener. The manager
 re-reads the immutable artifact metadata before it marks the job succeeded. A reserved artifact
 expiry survives manager restart so an exact retry cannot mutate an existing object key.
 
@@ -96,12 +109,11 @@ expiry survives manager restart so an exact retry cannot mutate an existing obje
 
 The bounded immutable-object relay above deliberately does **not** accept signed provider URLs,
 cookies, or long-lived HLS playback state. Those values must not be weakened into the durable media
-manifest just to support a player. Persistent media playback instead has a separate,
-attempt-bound path:
+manifest just to support a player. Persistent playback instead has a separate, attempt-bound path:
 
 ```text
-Media resolver
-  |  (same reviewed Fabric egress affinity)
+application (resolves a provider page, e.g. in a Fabric browser session)
+  |
   v
 playback-mode manifest: credential-free anchor + operator-reviewed host suffixes
   |
@@ -111,7 +123,7 @@ media-playback job allocated to one media-capacity worker
   +--> worker requests `media_source` input for exact job / worker / attempt
               |
               v
-      Media encrypts signed URL + allowed headers + host-only cookie
+      application encrypts signed URL + allowed headers + host-only cookie
       directly to that worker's RSA public key
               |
               v
@@ -120,14 +132,14 @@ media-playback job allocated to one media-capacity worker
                                            Ed25519 opaque capability
                                                          |
                                                          v
-                                  media-playback gateway -> player / MediaServer
+                                   media-playback gateway -> any HLS/MP4 player
 ```
 
 The `media-playback` runtime consumes `mediaCapacity`, not a browser lease. Its durable manifest
 contains neither provider-signed query data nor request headers, cookies, output controls, or a
-provider-discovered host list. The Media adapter supplies the actual source only after the
-assigned worker asks for it. That source is encrypted for the exact worker, one-shot consumed, and
-never written to PostgreSQL, MinIO, task environment, events, logs, or public result URLs.
+provider-discovered host list. The application supplies the actual source only after the assigned
+worker asks for it. That source is encrypted for the exact worker, one-shot consumed, and never
+written to PostgreSQL, the object store, task environment, events, logs, or public result URLs.
 
 The public gateway receives only the Ed25519 verification key; the API issuer retains the private
 key. A capability binds the job, worker, attempt, nonce, and expiry, but contains no provider
@@ -138,13 +150,15 @@ semantics are checked before bytes are streamed onward.
 
 Every redirect is bounded and checked against the immutable operator-reviewed hostname suffix set.
 Provider cookies are treated as host-only because a raw `Cookie` header has no Domain/Path
-attributes. Media's opaque egress-affinity selector is consumed and stripped by the sidecar; it
-keeps the provider handshake and media relay on the same configured upstream without exposing a
-proxy credential. The reviewed CDN direct exception remains restricted by the dedicated
-sidecar listener itself.
+attributes.
 
-Profile-update Companion jobs are similarly guarded: only the authenticated `project_admin` (or
-`fabric_admin`) named by `approvedBy` may submit the mutation, the avatar input is a verified
-Fabric image artifact, and the immutable manifest declares the account identity to verify before
-the task starts. The adapter refuses to launch when that precondition is absent and refuses to
-accept completion when the expected identity was not proven.
+### Egress affinity
+
+Some providers bind a signed URL to the IP address that resolved it. The media source may carry an
+opaque `egressAffinityKey`; the worker presents it to the egress sidecar as proxy Basic
+credentials (`fabric:<key>`), and the sidecar pins every connection with that key to the same
+upstream of the listener (for example one exit of a proxy pool). The key is consumed and stripped by
+the sidecar and is never forwarded. Which listener playback uses is a deployment setting
+(`FABRIC_MEDIA_EGRESS_PROXY_URL`); hosts listed in `FABRIC_MEDIA_DIRECT_EXCEPTION_SUFFIXES` leave
+through the direct listener instead. One-shot relays take the same routing from their job's egress
+policy (`sidecar.listener`, `sidecar.directListener`, `directExceptionHostnames`).

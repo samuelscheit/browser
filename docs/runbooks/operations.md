@@ -2,7 +2,7 @@
 
 ## Capacity
 
-The hard global browser cap is four: three managed fabric-host leases plus one local interactive lease. A media-only task uses bounded `mediaCapacity` and does not increment browser lease counters. If capacity is saturated, inspect queue age and worker health rather than raising the cap.
+`FABRIC_MAX_ACTIVE_BROWSER_LEASES` caps concurrent browser leases across the deployment (default four, at most eight); each managed worker additionally serves at most four, and a federated local worker exactly one. A media-only task uses bounded `mediaCapacity` and does not increment browser lease counters. If capacity is saturated, inspect queue age and worker health rather than raising the cap.
 
 ## Worker failure
 
@@ -15,7 +15,7 @@ If a secret appears in a log or artifact, revoke the source credential, quaranti
 ## Input broker outage
 
 The encrypted input broker is intentionally non-durable. If it is unavailable, jobs remain
-`awaiting_input`; do not replace it with PostgreSQL, MinIO, a queue with disk persistence, or a
+`awaiting_input`; do not replace it with PostgreSQL, the object store, a queue with disk persistence, or a
 plaintext fallback. Restore the broker, verify its mTLS certificate and memory-only policy, then
 ask the application to resubmit the envelope. Expired envelopes are discarded and must be
 re-entered by the user/application.

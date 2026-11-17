@@ -1,7 +1,19 @@
 {
   "name": "@browser-fabric/client",
   "version": "0.1.0",
+  "license": "MIT",
+  "homepage": "https://github.com/samuelscheit/browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samuelscheit/browser.git",
+    "directory": "packages/client-ts"
+  },
+  "bugs": {
+    "url": "https://github.com/samuelscheit/browser/issues"
+  },
   "type": "module",
   "exports": "./src/index.ts",
-  "dependencies": { "@browser-fabric/contracts": "workspace:*" }
+  "dependencies": {
+    "@browser-fabric/contracts": "workspace:*"
+  }
 }
