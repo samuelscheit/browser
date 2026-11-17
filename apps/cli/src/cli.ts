@@ -7,12 +7,19 @@ import { assertName, listStates, loadCredentials, normalizeApiUrl, normalizeUser
 import { runDaemon } from "./daemon";
 import { fetchIdentity } from "./remote-backend";
 
-export const HELP = `fabric — a CDP browser for agents: local Chrome, or remote (Browser Fabric) on request
+export const HELP = `fabric — a CDP browser for agents: your own Chrome, or remote (Browser Fabric) on request
 
 Start a browser (idempotent; reuses a running one) and print its endpoint:
-  fabric up                  Chrome on this machine (own profile, visible window) → http://127.0.0.1:9222
+  fabric up                  your everyday Chrome, real profile, shared with you → http://127.0.0.1:9222
+  fabric up --profile <name> a separate Chrome fabric starts (~/.config/fabric/profiles/<name>)
+  fabric up --headless       the same, headless (profile "agent" unless --profile)
   fabric up --remote         remote browser with the persistent agent profile → http://127.0.0.1:9223
   fabric up --remote --fresh remote browser without the persistent profile (throwaway)
+
+Your own Chrome (Chrome 144+), once: open chrome://inspect/#remote-debugging and enable it
+(fabric opens that page when it is off). Chrome then asks "Allow remote debugging?" each time
+fabric connects: click Allow. fabric keeps that one connection for every client until
+\`fabric down\` or until Chrome quits; down only detaches, it never quits Chrome or closes tabs.
 
 Drive it from any CDP client:
   Playwright   chromium.connectOverCDP("http://127.0.0.1:9222")
@@ -20,11 +27,12 @@ Drive it from any CDP client:
   MCP          fabric mcp [--remote] [--server playwright|devtools]   (stdio MCP server)
   Live view    fabric view   (watch and take over: click, type, switch tabs)
 
-Quick actions (start the browser when needed):
-  fabric goto <url>          navigate the first tab, wait for load, print url and title
+Quick actions (start the browser when needed; they use the agent tab last used, never your own
+tabs unless --tab picks one):
+  fabric goto <url>          navigate the agent tab (a new one if none), wait for load, print url and title
   fabric shot [file.png]     screenshot (--full for the whole page)
   fabric eval <expression>   evaluate JavaScript in the page and print the JSON result
-  fabric tabs                list tabs (use with --tab <index|id>)
+  fabric tabs                list tabs, agent tabs marked * (use with --tab <index|id>)
 
 Manage:
   fabric status              running browsers          fabric down [name|--all]   stop
@@ -33,8 +41,8 @@ Manage:
 
 Options for up/mcp/actions:
   --remote  --name <name>  --port <port>  --profile <ref|dir>  --fresh  --project <id>
-  --recipe <ref>  --egress <ref>  --ttl <4h|90m|seconds>  --idle <minutes>  --headless  --chrome <path>
-  --tab <index|id>  --full  --json
+  --recipe <ref>  --egress <ref>  --ttl <4h|90m|seconds>  --idle <minutes>  --headless
+  --chrome <path> (with --profile/--headless)  --tab <index|id>  --full  --json
 The remote browser is released after --idle minutes (default 10) without a client and restarts
 on the next connection; logins in the persistent profile survive, open tabs do not.`;
 
@@ -90,6 +98,9 @@ export async function browserRequest(values: Values): Promise<BrowserRequest> {
   const mode = modeOf(values);
   if (mode === "local" && (values.fresh || values.project || values.recipe || values.egress)) throw new Error("--fresh, --project, --recipe and --egress need --remote");
   if (mode === "remote" && (values.headless || values.chrome)) throw new Error("--headless and --chrome apply to the local browser only");
+  if (mode === "local" && values.chrome && !values.profile && !values.headless) throw new Error("--chrome needs --profile or --headless: your own Chrome is used as it runs");
+  // A headless browser cannot be the user's own Chrome: it gets a fabric profile.
+  const profile = values.profile ?? (mode === "local" && values.headless ? "agent" : undefined);
   const name = assertName(nameOf(values));
   const ttlSeconds = parseDuration(values.ttl, 4 * 3600);
   if (ttlSeconds < 60 || ttlSeconds > 14_400) throw new Error("--ttl must be between 1m and 4h");
@@ -97,7 +108,7 @@ export async function browserRequest(values: Values): Promise<BrowserRequest> {
     name,
     mode,
     port: await choosePort(name, mode, integer(values.port, "port", 1024, 65_535)),
-    ...(values.profile ? { profile: values.profile } : {}),
+    ...(profile ? { profile } : {}),
     fresh: values.fresh ?? false,
     ...(values.project ? { project: values.project } : {}),
     ...(values.recipe ? { recipe: values.recipe } : {}),
@@ -189,7 +200,7 @@ export async function main(argv: string[]): Promise<void> {
     }
     case "tabs": {
       const pages = await tabs(await actionPort(values));
-      print(values, pages.map((page, index) => `${index}  ${page.targetId.slice(0, 8)}  ${page.title || "(untitled)"}\n   ${page.url}`).join("\n") || "no tabs", pages);
+      print(values, pages.map((page, index) => `${index}${page.agentTab ? "*" : " "} ${page.targetId.slice(0, 8)}  ${page.title || "(untitled)"}\n    ${page.url}`).join("\n") || "no tabs", pages);
       return;
     }
     case "mcp": {

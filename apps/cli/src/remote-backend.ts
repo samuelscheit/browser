@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { BrowserFabricClient } from "@browser-fabric/client";
 import { MAX_EXTERNAL_CDP_CONNECTIONS, type BrowserSessionCreateInput, type BrowserSessionResponse, type PrincipalCapabilities } from "@browser-fabric/contracts";
-import type { BrowserBackend, UpstreamEndpoint } from "./backend";
+import { CdpConnection } from "@browser-fabric/worker-runtime";
+import type { BrowserBackend } from "./backend";
 import { basicAuthorization, type BrowserRequest, type Credentials } from "./config";
 
 export const DEFAULT_RECIPE = "recipe_interactive-chromium@1";
@@ -85,8 +86,14 @@ export class RemoteBackend implements BrowserBackend {
     };
   }
 
-  public async acquire(): Promise<UpstreamEndpoint> {
-    // Each client gets a fresh read: the CDP capability inside the endpoint is short-lived.
+  public async connect(): Promise<CdpConnection> {
+    const { url, headers } = await this.endpoint();
+    return CdpConnection.connect({ endpoint: url, headers, timeoutMs: 30_000 });
+  }
+
+  /** The session's authenticated browser websocket, starting a session when none runs. */
+  public async endpoint(): Promise<{ url: string; headers: Record<string, string> }> {
+    // A fresh read per connection: the CDP capability inside the endpoint is short-lived.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const session = await this.#ensureSession();
       const current = await this.#client.browserSessions.get(session.id);

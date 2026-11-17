@@ -71,7 +71,11 @@ export interface BrowserRequest {
   name: string;
   mode: BrowserMode;
   port: number;
-  /** Remote: profile ref (default: the project's interactive profile). Local: profile directory name (default "agent"). */
+  /**
+   * Remote: profile ref (default: the project's interactive profile). Local: a profile directory
+   * name under ~/.config/fabric/profiles for a Chrome fabric starts itself; without one, the
+   * local browser is the user's own running Chrome.
+   */
   profile?: string;
   /** Remote only: a throwaway browser without a persistent profile. */
   fresh: boolean;
@@ -94,6 +98,8 @@ export interface DaemonState {
   sessionId?: string;
   browser?: string;
   error?: string;
+  /** What the user must do right now, e.g. click Allow in Chrome. */
+  notice?: string;
   updatedAt: string;
 }
 

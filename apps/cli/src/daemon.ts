@@ -2,8 +2,9 @@ import { readFileSync } from "node:fs";
 import type { BrowserBackend } from "./backend";
 import { loadCredentials, readState, removeState, writeState, processAlive, type BrowserRequest, type DaemonState } from "./config";
 import { EndpointServer } from "./endpoint-server";
-import { LocalBackend } from "./local-backend";
+import { LaunchedChromeBackend } from "./launched-chrome-backend";
 import { fabricClient, RemoteBackend } from "./remote-backend";
+import { SystemChromeBackend } from "./system-chrome-backend";
 
 const liveViewHtml = () => readFileSync(new URL("./live-view.html", import.meta.url), "utf8");
 
@@ -18,6 +19,7 @@ export async function runDaemon(request: BrowserRequest, warm: boolean): Promise
   const state: DaemonState = { request, pid: process.pid, startedAt: new Date().toISOString(), status: "starting", updatedAt: new Date().toISOString() };
   const publish = (patch: Partial<DaemonState>) => {
     Object.assign(state, patch, { updatedAt: new Date().toISOString() });
+    if (state.notice === undefined) delete state.notice;
     writeState(state);
   };
   publish({});
@@ -32,8 +34,10 @@ export async function runDaemon(request: BrowserRequest, warm: boolean): Promise
         log(`released session ${previous.sessionId} left by a previous daemon`);
       }
       backend = new RemoteBackend({ credentials, request, log, onSession: (sessionId) => publish({ sessionId }) });
+    } else if (request.profile) {
+      backend = new LaunchedChromeBackend({ request: { ...request, profile: request.profile }, log });
     } else {
-      backend = new LocalBackend({ request, log });
+      backend = new SystemChromeBackend({ log, notify: (notice) => publish({ notice }) });
     }
   } catch (error) {
     publish({ status: "failed", error: error instanceof Error ? error.message : String(error) });

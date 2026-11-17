@@ -5,7 +5,9 @@ behind one stable, unauthenticated loopback address that every CDP tool understa
 
 | Command | Browser | Endpoint |
 | --- | --- | --- |
-| `fabric up` | Chrome on this machine, own profile in `~/.config/fabric/profiles/agent`, visible window (default) | `http://127.0.0.1:9222` |
+| `fabric up` | **Your everyday Chrome** with your real profile: agents share your logins, and you see what they do (default) | `http://127.0.0.1:9222` |
+| `fabric up --profile <name>` | A separate Chrome fabric starts, profile in `~/.config/fabric/profiles/<name>` | `http://127.0.0.1:9222` |
+| `fabric up --headless` | The same, headless (profile `agent` unless `--profile`) | `http://127.0.0.1:9222` |
 | `fabric up --remote` | Remote Fabric browser on fabric-host with the persistent agent profile (logins survive) | `http://127.0.0.1:9223` |
 | `fabric up --remote --fresh` | Remote Fabric browser with a throwaway profile | `http://127.0.0.1:9223` |
 
@@ -15,6 +17,43 @@ unless it gets `--remote`.
 `fabric up` is idempotent: run it before every task. A running browser with the same settings is
 reused, so several agents share one browser (each with its own CDP connection and tabs) instead of
 fighting over the persistent profile.
+
+## Your own Chrome (the default)
+
+Chrome ignores `--remote-debugging-port` on the everyday profile since Chrome 136, so fabric never
+restarts Chrome with flags. It uses Chrome's own switch (Chrome 144+) instead:
+
+1. **Once:** open `chrome://inspect/#remote-debugging` in Chrome and enable remote debugging. If it
+   is off, `fabric up` opens that page for you and waits (up to 3 minutes) until you enable it.
+   Chrome remembers the setting. If Chrome is not running, fabric starts it the normal way
+   (`open -a "Google Chrome"`).
+2. **Each time fabric connects:** Chrome asks “Allow remote debugging?”. Click **Allow**. `fabric up`
+   prints a reminder and waits up to 3 minutes. Declining fails with “declined”, and no answer fails
+   with “unanswered”. Neither is retried automatically, because every retry would be another
+   prompt. While connected, Chrome shows its “controlled by automated test software” banner.
+
+Chrome asks once per WebSocket, so the fabric daemon opens exactly **one** connection to Chrome and
+multiplexes every client over it: Playwright, Puppeteer, both MCP servers, the live view, the quick
+actions and the Turnstile guardian. After the first Allow, nothing prompts again until `fabric down`
+or until Chrome quits. If Chrome quits, the next client reconnects once, which means one new Allow.
+Chrome's toggle server has no `/json/*` and no page sockets; fabric serves both itself on `:9222`.
+
+What fabric does in your Chrome:
+
+- `fabric down` (and every client that leaves) only **detaches**. It never quits Chrome, and it
+  never closes your tabs.
+- Each client gets its own sessions. One client's `setAutoAttach`, target events and sessions never
+  reach another client. A client's `Browser.close` closes only the tabs and contexts that client
+  created; `Browser.crash` is refused. Browser-wide settings a client made, such as download
+  behaviour, permission overrides and browser-level `Fetch`, are undone when it leaves.
+- Tabs an agent opens (and popups they open) are **agent tabs** (`agentTab: true` in `/json/list`,
+  `*` in `fabric tabs`). The quick actions (`goto`, `eval`, `shot`) use the most recent agent tab
+  and open a new one when there is none, so they never take over the tab you are working in.
+  `--tab` can still pick any tab.
+- The Turnstile guardian watches **agent tabs only**. It runs over the same connection, so it adds
+  no prompt.
+- Playwright (`connectOverCDP`) redirects downloads of the whole browser into its temp folder while
+  it is connected. fabric restores Chrome's default when the last client that changed it leaves.
 
 ## Setup (once per machine)
 
@@ -56,14 +95,14 @@ fabric tabs                             # list tabs
 both attached to the same browser:
 
 ```sh
-claude mcp add --scope user fabric -- fabric mcp                     # local Chrome
+claude mcp add --scope user fabric -- fabric mcp                     # your own Chrome
 claude mcp add --scope user fabric-remote -- fabric mcp --remote     # remote browser
 ```
 
 Arguments after `--` go to the MCP server, e.g. `fabric mcp -- --caps vision`.
 
 The MCP server only starts the endpoint; the browser itself starts on the first browser tool call,
-so a Claude session that never browses opens no Chrome window and holds no remote browser.
+so a Claude session that never browses causes no Allow prompt and holds no remote browser.
 
 ### Live view: watch and take over
 
@@ -79,8 +118,9 @@ are followed automatically. For full DevTools on a remote tab, open the `devtool
   `~/.config/fabric/run/<name>.log`). `fabric down [name|--all]` stops it and releases the browser.
 - **Idle release:** after `--idle` minutes (default 10) without any CDP client the remote browser is
   released, so it never blocks shared capacity. The next client starts a new one automatically
-  (about 5 s). Logins in the persistent profile survive; open tabs do not. A local Chrome keeps
-  running until `fabric down`.
+  (about 5 s). Logins in the persistent profile survive; open tabs do not. A local Chrome stays
+  connected until `fabric down`. Your own Chrome is then detached, and a Chrome fabric started is
+  quit.
 - **TTL:** a remote session lives at most `--ttl` (default and maximum 4 h); the next client then
   gets a new one.
 - **Capacity:** fabric-host runs at most three interactive Chromium browsers (shared with CHAT) and six
@@ -88,9 +128,10 @@ are followed automatically. For full DevTools on a remote tab, open the `devtool
   (does not wait for the persistent profile) or the local browser.
 - The persistent `profile_agent` is used by one session at a time. If another machine holds it,
   `fabric up --remote` says so; `fabric up --remote --fresh` or the local browser always work.
-- One remote session accepts up to eight CDP clients (an MCP, scripts, the live view and the
-  daemon's keep-alive connection share it).
-- Turnstile checkboxes are clicked automatically in both modes (the same guardian every Fabric
+- Every endpoint uses one upstream connection however many clients it serves, so a remote
+  session's limit of eight CDP clients is never the bottleneck.
+- Turnstile checkboxes are clicked automatically in every mode (in your own Chrome, only in agent
+  tabs; the same guardian every Fabric
   browser runs).
 
 ## Security

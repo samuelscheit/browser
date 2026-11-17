@@ -1,34 +1,43 @@
 import type { Server, ServerWebSocket } from "bun";
-import { CdpConnection } from "@browser-fabric/worker-runtime";
-import type { BrowserBackend, UpstreamEndpoint } from "./backend";
+import { TurnstileGuardian, type CdpConnection } from "@browser-fabric/worker-runtime";
+import type { BrowserBackend } from "./backend";
+import { CdpMultiplexer, type ClientKind, type MuxClient, type TargetInfo } from "./cdp-mux";
 
-/** Chromium's DevTools ids are int32; a page-socket attach uses one no client reaches. */
-const MUX_ATTACH_ID = 2_147_480_000;
 const MAX_PENDING_MESSAGES = 512;
 const MAX_MESSAGE_BYTES = 512 * 1024 * 1024;
 
-type ClientKind = { kind: "browser" } | { kind: "page"; targetId: string };
-type ClientData = ClientKind & {
-  upstream?: WebSocket;
-  /** Client frames that arrived before the upstream socket (and page attach) were ready. */
+type ClientData = {
+  kind: ClientKind;
+  client?: MuxClient;
+  /** Client frames that arrived before the browser connection (and page attach) were ready. */
   pending: (string | Uint8Array)[];
-  sessionId?: string;
-  ready: boolean;
   closed: boolean;
 };
+
+/** The companion that clicks Turnstile checkboxes, attached through the shared connection. */
+export interface Guardian { start(): Promise<void>; stop(): Promise<void> }
+export type GuardianFactory = (mux: CdpMultiplexer, agentTabsOnly: boolean, log: (message: string) => void) => Guardian;
+
+export const turnstileGuardian: GuardianFactory = (mux, agentTabsOnly, log) => new TurnstileGuardian({
+  // Never dialled: the transport is an in-process client of the multiplexer.
+  endpoint: "ws://127.0.0.1/devtools/browser/fabric-guardian",
+  transportFactory: async () => mux.transport({ agentTabsOnly }),
+  logger: (event) => log(`turnstile ${event}`),
+});
 
 export interface EndpointServerOptions {
   backend: BrowserBackend;
   port: number;
   host?: string;
-  /** Close the browser anchor and suspend the backend after this long without a client. */
+  /** With a backend that can suspend: release the browser after this long without a client. */
   idleMs: number;
   liveViewHtml: string;
+  guardian?: GuardianFactory;
   log?: (message: string) => void;
   onStateChange?: (state: "ready" | "idle") => void;
 }
 
-interface TargetInfo { targetId: string; type: string; title: string; url: string; attached?: boolean }
+interface Anchor { connection: CdpConnection; mux: CdpMultiplexer; guardian?: Guardian }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body, null, 2), { status, headers: { "content-type": "application/json; charset=UTF-8", "cache-control": "no-store" } });
 const text = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "text/plain; charset=UTF-8" } });
@@ -40,17 +49,19 @@ export function closeReason(message: string): string {
 }
 
 /**
- * A Chrome-compatible DevTools HTTP/WebSocket surface on loopback, backed by a remote Fabric
- * session or a local Chrome. Any CDP tool (Playwright, Puppeteer, chrome-devtools-mcp,
- * Playwright MCP, DevTools) can use `http://127.0.0.1:<port>` without knowing about Fabric.
+ * A Chrome-compatible DevTools HTTP/WebSocket surface on loopback, backed by the user's Chrome, a
+ * Chrome fabric launched, or a remote Fabric session. Any CDP tool (Playwright, Puppeteer,
+ * chrome-devtools-mcp, Playwright MCP, DevTools) can use `http://127.0.0.1:<port>`. Every client
+ * shares ONE upstream browser connection (see CdpMultiplexer), which Chrome's remote-debugging
+ * toggle requires: each upstream WebSocket costs the user an "Allow" click.
  */
 export class EndpointServer {
   readonly #options: EndpointServerOptions;
   readonly #clients = new Set<ServerWebSocket<ClientData>>();
   readonly #allowedHosts: Set<string>;
   #server?: Server<ClientData>;
-  #anchor?: CdpConnection;
-  #anchoring?: Promise<CdpConnection>;
+  #anchor?: Anchor;
+  #anchoring?: Promise<Anchor>;
   #idleTimer?: ReturnType<typeof setTimeout>;
   #suspended = false;
   /** Most-recent-use rank per target (created, navigated or activated), like Chrome's /json/list order. */
@@ -63,12 +74,14 @@ export class EndpointServer {
   }
 
   public get clientCount(): number { return this.#clients.size; }
+  /** The multiplexer while the browser is connected (tests and diagnostics). */
+  public get mux(): CdpMultiplexer | undefined { return this.#anchor?.mux; }
 
   public listen(): void {
     this.#server = Bun.serve<ClientData>({
       hostname: this.#options.host ?? "127.0.0.1",
       port: this.#options.port,
-      // A first request may wait for a remote browser to start.
+      // A first request may wait for a browser to start, or for the user to allow remote debugging.
       idleTimeout: 255,
       fetch: (request, server) => this.#fetch(request, server),
       websocket: {
@@ -82,7 +95,7 @@ export class EndpointServer {
     });
   }
 
-  /** Start the browser now so the first client does not wait. */
+  /** Connect the browser now so the first client does not wait. */
   public async warm(): Promise<void> {
     await this.#ensureAnchor();
     this.#scheduleIdle();
@@ -91,8 +104,7 @@ export class EndpointServer {
   public async stop(): Promise<void> {
     clearTimeout(this.#idleTimer);
     for (const client of this.#clients) client.close(1001, "fabric endpoint stopping");
-    this.#anchor?.close();
-    this.#anchor = undefined;
+    await this.#dropAnchor("fabric endpoint stopping");
     await this.#server?.stop(true);
   }
 
@@ -129,11 +141,13 @@ export class EndpointServer {
       const page = /^\/devtools\/page\/([A-Za-z0-9._-]{1,128})$/.exec(path);
       const kind: ClientKind | undefined = path.startsWith("/devtools/browser") ? { kind: "browser" } : page ? { kind: "page", targetId: page[1]! } : undefined;
       if (!kind) return text("not found", 404);
-      return server.upgrade(request, { data: { ...kind, pending: [], ready: false, closed: false } }) ? undefined : text("websocket upgrade failed", 400);
+      return server.upgrade(request, { data: { kind, pending: [], closed: false } }) ? undefined : text("websocket upgrade failed", 400);
     }
 
     if (path === "/") return new Response(this.#options.liveViewHtml, { headers: { "content-type": "text/html; charset=UTF-8", "cache-control": "no-store" } });
-    if (path === "/healthz") return json({ status: "ok", clients: this.#clients.size, suspended: this.#suspended, ...this.#options.backend.describe() });
+    if (path === "/healthz") {
+      return json({ status: "ok", clients: this.#clients.size, connected: this.#anchor !== undefined, suspended: this.#suspended, ...this.#options.backend.describe() });
+    }
 
     try {
       const host = this.#publicHost(request);
@@ -150,17 +164,19 @@ export class EndpointServer {
       }
       if (path === "/json" || path === "/json/list") {
         const { targetInfos } = await this.#command("Target.getTargets") as { targetInfos: TargetInfo[] };
+        const mux = this.#anchor?.mux;
         return json(targetInfos
           .filter((target) => target.type !== "browser" && target.type !== "tab")
           .sort((left, right) => (this.#recency.get(right.targetId)?.rank ?? 0) - (this.#recency.get(left.targetId)?.rank ?? 0))
-          .map((target) => targetEntry(target, host)));
+          .map((target) => ({ ...targetEntry(target, host), agentTab: mux?.isAgentTarget(target.targetId) ?? false })));
       }
       if (path === "/json/new") {
         if (request.method !== "PUT" && request.method !== "GET") return text("use PUT /json/new?<url>", 405);
         const target = url.search.length > 1 ? decodeURIComponent(url.search.slice(1)) : "about:blank";
         const { targetId } = await this.#command("Target.createTarget", { url: target });
+        this.#anchor?.mux.adopt(targetId);
         const { targetInfo } = await this.#command("Target.getTargetInfo", { targetId }) as { targetInfo: TargetInfo };
-        return json(targetEntry(targetInfo, host));
+        return json({ ...targetEntry(targetInfo, host), agentTab: true });
       }
       const action = /^\/json\/(close|activate)\/([A-Za-z0-9._-]{1,128})$/.exec(path);
       if (action) {
@@ -175,39 +191,63 @@ export class EndpointServer {
   }
 
   async #command(method: string, params: Record<string, unknown> = {}): Promise<any> {
-    const anchor = await this.#ensureAnchor();
+    const { connection } = await this.#ensureAnchor();
     try {
-      return await anchor.send(method, params);
+      return await connection.send(method, params);
     } finally {
       this.#scheduleIdle();
     }
   }
 
   /**
-   * One long-lived connection keeps the browser alive between short-lived clients (Fabric
-   * releases a session 60 s after its last CDP client leaves) and answers /json queries.
+   * The one browser connection. It answers /json queries, carries every client, keeps a remote
+   * session alive between short-lived clients, and is opened again only when a client needs it
+   * after the browser went away (one new "Allow" click for the user's Chrome, never a retry loop).
    */
-  async #ensureAnchor(): Promise<CdpConnection> {
+  async #ensureAnchor(): Promise<Anchor> {
     clearTimeout(this.#idleTimer);
-    if (this.#anchor && !this.#anchor.closed) return this.#anchor;
+    if (this.#anchor) return this.#anchor;
     this.#anchoring ??= (async () => {
-      const upstream = await this.#options.backend.acquire();
-      const anchor = await CdpConnection.connect({ endpoint: upstream.url, ...(upstream.headers ? { headers: upstream.headers } : {}), timeoutMs: 30_000 });
-      this.#recency.clear();
-      anchor.onMessage((message) => this.#trackTarget(message));
-      await anchor.send("Target.setDiscoverTargets", { discover: true });
-      anchor.onClose(() => {
-        if (this.#anchor !== anchor) return;
-        this.#anchor = undefined;
-        this.#options.log?.("browser connection closed; the next client reconnects");
-      });
-      this.#anchor = anchor;
-      if (this.#suspended) this.#options.log?.("browser resumed");
-      this.#suspended = false;
-      this.#options.onStateChange?.("ready");
-      return anchor;
+      const connection = await this.#options.backend.connect();
+      try {
+        const mux = new CdpMultiplexer(connection, { ...(this.#options.log ? { log: this.#options.log } : {}) });
+        this.#recency.clear();
+        connection.onMessage((message) => this.#trackTarget(message));
+        await mux.start();
+        const anchor: Anchor = { connection, mux };
+        connection.onClose(() => {
+          if (this.#anchor !== anchor) return;
+          this.#anchor = undefined;
+          void anchor.guardian?.stop().catch(() => undefined);
+          this.#options.log?.("browser connection closed; the next client reconnects");
+        });
+        this.#anchor = anchor;
+        const scope = this.#options.backend.guardian;
+        if (scope) {
+          const log = this.#options.log ?? (() => undefined);
+          const guardian = (this.#options.guardian ?? turnstileGuardian)(mux, scope === "agent-tabs", log);
+          anchor.guardian = guardian;
+          await guardian.start().catch((error) => log(`turnstile guardian unavailable: ${error instanceof Error ? error.message : String(error)}`));
+        }
+        if (this.#suspended) this.#options.log?.("browser resumed");
+        this.#suspended = false;
+        this.#options.onStateChange?.("ready");
+        return anchor;
+      } catch (error) {
+        connection.close();
+        throw error;
+      }
     })().finally(() => { this.#anchoring = undefined; });
     return this.#anchoring;
+  }
+
+  async #dropAnchor(reason: string): Promise<void> {
+    const anchor = this.#anchor;
+    this.#anchor = undefined;
+    if (!anchor) return;
+    await anchor.guardian?.stop().catch(() => undefined);
+    anchor.mux.close(reason);
+    anchor.connection.close();
   }
 
   #touchTarget(targetId: string, url?: string): void {
@@ -215,6 +255,7 @@ export class EndpointServer {
   }
 
   #trackTarget(message: Record<string, any>): void {
+    if (message.sessionId) return;
     const info = message.params?.targetInfo as TargetInfo | undefined;
     if (message.method === "Target.targetCreated" && info) this.#touchTarget(info.targetId, info.url);
     else if (message.method === "Target.targetInfoChanged" && info && this.#recency.get(info.targetId)?.url !== info.url) this.#touchTarget(info.targetId, info.url);
@@ -223,17 +264,15 @@ export class EndpointServer {
 
   #scheduleIdle(): void {
     clearTimeout(this.#idleTimer);
-    if (this.#clients.size > 0 || this.#suspended) return;
+    if (!this.#options.backend.suspend || this.#clients.size > 0 || this.#suspended) return;
     this.#idleTimer = setTimeout(() => void this.#suspend(), this.#options.idleMs);
   }
 
   async #suspend(): Promise<void> {
     if (this.#clients.size > 0 || this.#anchoring) return;
     this.#suspended = true;
-    const anchor = this.#anchor;
-    this.#anchor = undefined;
-    anchor?.close();
-    await this.#options.backend.suspend();
+    await this.#dropAnchor("browser suspended");
+    await this.#options.backend.suspend?.();
     this.#options.log?.(`no client for ${Math.round(this.#options.idleMs / 60_000)} min; browser suspended`);
     this.#options.onStateChange?.("idle");
   }
@@ -241,80 +280,31 @@ export class EndpointServer {
   #open(socket: ServerWebSocket<ClientData>): void {
     this.#clients.add(socket);
     clearTimeout(this.#idleTimer);
-    void this.#connectUpstream(socket).catch((error) => {
-      this.#options.log?.(`client connection failed: ${error instanceof Error ? error.message : String(error)}`);
-      socket.close(1011, closeReason(error instanceof Error ? error.message : String(error)));
+    void this.#attach(socket).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.#options.log?.(`client connection failed: ${message}`);
+      if (!socket.data.closed) socket.close(1011, closeReason(message));
     });
   }
 
-  async #connectUpstream(socket: ServerWebSocket<ClientData>): Promise<void> {
-    await this.#ensureAnchor();
-    const endpoint: UpstreamEndpoint = await this.#options.backend.acquire();
+  async #attach(socket: ServerWebSocket<ClientData>): Promise<void> {
+    const { mux } = await this.#ensureAnchor();
     if (socket.data.closed) return;
-    const upstream = new WebSocket(endpoint.url, endpoint.headers ? { headers: endpoint.headers } as never : undefined);
-    upstream.binaryType = "arraybuffer";
-    socket.data.upstream = upstream;
-    upstream.addEventListener("open", () => {
-      if (socket.data.kind === "page") {
-        upstream.send(JSON.stringify({ id: MUX_ATTACH_ID, method: "Target.attachToTarget", params: { targetId: socket.data.targetId, flatten: true } }));
-        return;
-      }
-      this.#markReady(socket);
-    });
-    upstream.addEventListener("message", (event) => {
-      if (socket.data.closed) return;
-      if (socket.data.kind === "browser") {
-        socket.send(event.data as string | ArrayBuffer);
-        return;
-      }
-      const message = parseJson(event.data);
-      if (!message) return;
-      if (!socket.data.sessionId) {
-        if (message.id !== MUX_ATTACH_ID) return;
-        if (message.error || typeof message.result?.sessionId !== "string") {
-          socket.close(1011, closeReason(`No such target ${socket.data.targetId}`));
-          return;
-        }
-        socket.data.sessionId = message.result.sessionId;
-        this.#markReady(socket);
-        return;
-      }
-      if (message.sessionId === socket.data.sessionId) {
-        delete message.sessionId;
-        socket.send(JSON.stringify(message));
-      } else if (message.method === "Target.detachedFromTarget" && message.params?.sessionId === socket.data.sessionId) {
-        socket.close(1000, "target closed");
-      }
-    });
-    upstream.addEventListener("close", (event) => {
-      if (!socket.data.closed) socket.close(1000, closeReason(event.reason || "browser connection closed"));
-    });
-    upstream.addEventListener("error", () => {
-      if (!socket.data.closed) socket.close(1011, "browser connection failed");
-    });
-  }
-
-  #markReady(socket: ServerWebSocket<ClientData>): void {
-    socket.data.ready = true;
-    for (const message of socket.data.pending.splice(0)) this.#forward(socket, message);
-  }
-
-  #forward(socket: ServerWebSocket<ClientData>, message: string | Uint8Array): void {
-    const upstream = socket.data.upstream;
-    if (!upstream || upstream.readyState !== WebSocket.OPEN) return;
-    if (socket.data.kind === "browser") {
-      upstream.send(message);
+    const client = await mux.connect({
+      send: (frame) => { if (!socket.data.closed) socket.send(frame); },
+      close: (code, reason) => { if (!socket.data.closed) socket.close(code, closeReason(reason)); },
+    }, socket.data.kind);
+    if (socket.data.closed) {
+      client.close();
       return;
     }
-    const parsed = parseJson(message);
-    if (!parsed) return;
-    parsed.sessionId = socket.data.sessionId;
-    upstream.send(JSON.stringify(parsed));
+    socket.data.client = client;
+    for (const frame of socket.data.pending.splice(0)) client.receive(frame);
   }
 
   #message(socket: ServerWebSocket<ClientData>, message: string | Buffer): void {
-    if (socket.data.ready) {
-      this.#forward(socket, message);
+    if (socket.data.client) {
+      socket.data.client.receive(message);
       return;
     }
     if (socket.data.pending.length >= MAX_PENDING_MESSAGES) {
@@ -327,18 +317,8 @@ export class EndpointServer {
   #close(socket: ServerWebSocket<ClientData>): void {
     socket.data.closed = true;
     this.#clients.delete(socket);
-    try { socket.data.upstream?.close(); } catch { /* already closed */ }
+    socket.data.client?.close();
     this.#scheduleIdle();
-  }
-}
-
-function parseJson(data: unknown): Record<string, any> | undefined {
-  try {
-    const raw = typeof data === "string" ? data : new TextDecoder().decode(data as ArrayBuffer | Uint8Array);
-    const value = JSON.parse(raw);
-    return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-  } catch {
-    return undefined;
   }
 }
 

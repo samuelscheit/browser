@@ -71,17 +71,17 @@ function setup(options: { password?: string; statuses?: string[]; fresh?: boolea
 }
 
 describe("remote backend", () => {
-  test("creates one session with agent defaults and returns an authenticated, fresh endpoint per client", async () => {
+  test("creates one session with agent defaults and returns an authenticated, fresh endpoint per connection", async () => {
     const { fabric, backend, sessions } = setup();
-    const first = await backend.acquire();
+    const first = await backend.endpoint();
     expect(first).toEqual({ url: expect.stringMatching(/^wss:\/\/fabric\.test\/v1\/cdp\/browser-session_1\?cap=/), headers: { authorization: AUTH } });
     expect(fabric.created).toHaveLength(1);
     const { body, idempotencyKey } = fabric.created[0]!;
     expect(idempotencyKey).toBe(body.idempotencyKey);
     expect(body).toMatchObject({ project: "project_agent", profileRef: "profile_agent", browserRecipeRef: "recipe_interactive-chromium@1", leaseMode: "interactive", maxExternalConnections: 8, ttlSeconds: 14_400 });
-    const second = await backend.acquire();
+    const second = await backend.endpoint();
     expect(fabric.created).toHaveLength(1);
-    // Each client reads the session again, so it gets the current short-lived capability.
+    // Each connection reads the session again, so it gets the current short-lived capability.
     expect(second.url).not.toBe(first.url);
     expect(sessions).toEqual(["browser-session_1"]);
     expect(backend.describe()).toMatchObject({ sessionId: "browser-session_1", profile: "profile_agent" });
@@ -89,42 +89,42 @@ describe("remote backend", () => {
 
   test("concurrent clients during startup share one session", async () => {
     const { fabric, backend } = setup();
-    await Promise.all([backend.acquire(), backend.acquire(), backend.acquire()]);
+    await Promise.all([backend.endpoint(), backend.endpoint(), backend.endpoint()]);
     expect(fabric.created).toHaveLength(1);
   });
 
   test("replaces a session that ended (TTL, reconnect grace) on the next client", async () => {
     const { fabric, backend, sessions } = setup();
-    await backend.acquire();
+    await backend.endpoint();
     fabric.sessions.get("browser-session_1")!.status = "timed_out";
     fabric.sessions.get("browser-session_1")!.statuses = [];
-    const endpoint = await backend.acquire();
+    const endpoint = await backend.endpoint();
     expect(endpoint.url).toContain("browser-session_2");
     expect(sessions).toEqual(["browser-session_1", undefined, "browser-session_2"]);
   });
 
   test("suspend releases the session; the next client starts a new one", async () => {
     const { fabric, backend, sessions } = setup();
-    await backend.acquire();
+    await backend.endpoint();
     await backend.suspend();
     expect(fabric.calls).toContain("POST /v1/browser-sessions/browser-session_1/release");
     expect(backend.describe().sessionId).toBeUndefined();
     await backend.suspend();
     expect(fabric.calls.filter((call) => call.endsWith("/release"))).toHaveLength(1);
-    expect((await backend.acquire()).url).toContain("browser-session_2");
+    expect((await backend.endpoint()).url).toContain("browser-session_2");
     expect(sessions).toEqual(["browser-session_1", undefined, "browser-session_2"]);
   });
 
   test("--fresh sessions carry no profile", async () => {
     const { fabric, backend } = setup({ fresh: true });
-    await backend.acquire();
+    await backend.endpoint();
     expect(fabric.created[0]!.body.profileRef).toBeUndefined();
     expect(backend.describe().detail).toContain("fresh profile");
   });
 
   test("a session stuck in the queue is cancelled with an explanation instead of hanging", async () => {
     const { fabric, backend } = setup({ statuses: Array(1000).fill("queued"), queueTimeoutMs: 600 });
-    const error = await backend.acquire().catch((caught: Error) => caught);
+    const error = await backend.endpoint().catch((caught: Error) => caught);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain("No remote browser became ready within 1 s");
     expect((error as Error).message).toContain("profile_agent is used by one session at a time");
@@ -134,7 +134,7 @@ describe("remote backend", () => {
 
   test("a session that fails reports Fabric's last event", async () => {
     const { backend } = setup({ statuses: ["failed"] });
-    await expect(backend.acquire()).rejects.toThrow(/browser-session_1 ended as failed: .*no capacity/);
+    await expect(backend.endpoint()).rejects.toThrow(/browser-session_1 ended as failed: .*no capacity/);
   });
 
   test("a wrong credential explains the principal ID format", async () => {

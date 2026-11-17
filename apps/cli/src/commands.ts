@@ -63,7 +63,7 @@ function tail(path: string, lines = 15): string {
  * `warm` (the default) returns once a browser is running; without it the endpoint is enough and
  * the browser starts on its first client, so an unused MCP server costs no browser.
  */
-export async function up(request: BrowserRequest, options: { timeoutMs?: number; warm?: boolean } = {}): Promise<DaemonState> {
+export async function up(request: BrowserRequest, options: { timeoutMs?: number; warm?: boolean; onNotice?: (notice: string) => void } = {}): Promise<DaemonState> {
   const warm = options.warm ?? true;
   const running = liveState(request.name);
   if (running) {
@@ -81,9 +81,16 @@ export async function up(request: BrowserRequest, options: { timeoutMs?: number;
     child.unref();
     closeSync(log);
   }
-  const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+  // The daemon owns the real deadlines (a browser start, the user enabling remote debugging and
+  // clicking Allow); this one only guards against a daemon that hangs.
+  const timeoutMs = options.timeoutMs ?? 600_000;
+  const deadline = Date.now() + timeoutMs;
+  const onNotice = options.onNotice ?? ((notice: string) => console.error(`fabric: ${notice}`));
+  let shown: string | undefined;
   while (Date.now() < deadline) {
     const state = readState(request.name);
+    if (state?.notice && state.notice !== shown) onNotice(state.notice);
+    shown = state?.notice;
     if (state?.status === "failed") {
       throw new Error(`${state.error ?? "browser failed to start"}\n--- ${logPath(request.name)} ---\n${tail(logPath(request.name))}`);
     }
@@ -91,7 +98,7 @@ export async function up(request: BrowserRequest, options: { timeoutMs?: number;
     if (state && !processAlive(state.pid)) throw new Error(`browser daemon exited during startup\n--- ${logPath(request.name)} ---\n${tail(logPath(request.name))}`);
     await Bun.sleep(150);
   }
-  throw new Error(`browser "${request.name}" did not start within ${Math.round((options.timeoutMs ?? 120_000) / 1000)} s; see ${logPath(request.name)}`);
+  throw new Error(`browser "${request.name}" did not start within ${Math.round(timeoutMs / 1000)} s; see ${logPath(request.name)}`);
 }
 
 export async function down(name: string): Promise<boolean> {
@@ -111,9 +118,12 @@ export function describeState(state: DaemonState): string {
   const url = endpointUrl(state.request.port);
   const what = state.request.mode === "remote"
     ? `remote browser${state.sessionId ? ` (session ${state.sessionId})` : ""}`
-    : `local Chrome (profile ${state.request.profile ?? "agent"}${state.request.headless ? ", headless" : ""})`;
+    : state.request.profile
+      ? `Chrome fabric starts (profile ${state.request.profile}${state.request.headless ? ", headless" : ""})`
+      : "your own Chrome (everyday profile, via chrome://inspect/#remote-debugging; down only detaches)";
   return [
     `${state.request.name}: ${what} — ${state.status}`,
+    ...(state.notice ? [`  Action needed ${state.notice}`] : []),
     `  CDP endpoint  ${url}`,
     `  Live view     ${url}/`,
     `  Playwright    chromium.connectOverCDP("${url}")`,

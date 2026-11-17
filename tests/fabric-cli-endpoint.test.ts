@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer } from "node:net";
+import { CdpConnection } from "@browser-fabric/worker-runtime";
 import type { BrowserBackend } from "../apps/cli/src/backend";
 import { EndpointServer, closeReason } from "../apps/cli/src/endpoint-server";
 import { FakeCdpBrowser } from "./support/fake-cdp-browser";
@@ -9,7 +10,10 @@ class FakeBackend implements BrowserBackend {
   suspends = 0;
   closed = false;
   public constructor(readonly browser: FakeCdpBrowser, readonly headers?: Record<string, string>) {}
-  async acquire() { this.acquires += 1; return { url: this.browser.url, ...(this.headers ? { headers: this.headers } : {}) }; }
+  async connect() {
+    this.acquires += 1;
+    return CdpConnection.connect({ endpoint: this.browser.url, ...(this.headers ? { headers: this.headers } : {}) });
+  }
   async suspend() { this.suspends += 1; }
   async close() { this.closed = true; }
   describe() { return { detail: "fake backend" }; }
@@ -133,21 +137,45 @@ describe("fabric endpoint: Chrome-compatible HTTP surface", () => {
 });
 
 describe("fabric endpoint: websocket relays", () => {
-  test("a browser socket relays both ways and flushes frames sent before the browser was ready, in order", async () => {
+  test("browser sockets share the one upstream connection, with ids remapped and frames sent early flushed in order", async () => {
     const { ws, browser, backend } = await setup({ headers: { authorization: "Basic abc" } });
-    const client = new Client(`${ws}/devtools/browser/fabric`);
-    await client.opened();
-    client.send({ id: 1, method: "Browser.getVersion" });
-    client.send({ id: 2, method: "Target.getTargets" });
-    expect((await client.reply(1)).result.product).toBe("FakeChrome/1.0");
-    expect((await client.reply(2)).result.targetInfos.length).toBeGreaterThan(0);
-    const anchorConnection = browser.received[0]!.connection;
-    const fromClient = browser.received.filter((entry) => entry.connection !== anchorConnection);
-    expect(fromClient.map((entry) => entry.message.method)).toEqual(["Browser.getVersion", "Target.getTargets"]);
-    // The anchor plus this client: each client gets its own upstream connection.
-    expect(new Set(browser.received.map((entry) => entry.connection)).size).toBe(2);
-    expect(backend.acquires).toBe(2);
-    expect(browser.authorizations).toEqual(["Basic abc", "Basic abc"]);
+    const first = new Client(`${ws}/devtools/browser/fabric`);
+    const second = new Client(`${ws}/devtools/browser/fabric`);
+    await Promise.all([first.opened(), second.opened()]);
+    // Both clients use the same ids on purpose.
+    first.send({ id: 1, method: "Browser.getVersion" });
+    first.send({ id: 2, method: "Target.getTargets" });
+    second.send({ id: 1, method: "Target.getTargets" });
+    expect((await first.reply(1)).result.product).toBe("FakeChrome/1.0");
+    expect((await first.reply(2)).result.targetInfos.length).toBeGreaterThan(0);
+    expect((await second.reply(1)).result.targetInfos.length).toBeGreaterThan(0);
+    expect(first.messages.filter((message) => message.id !== undefined)).toHaveLength(2);
+    expect(second.messages.filter((message) => message.id !== undefined)).toHaveLength(1);
+    const methods = browser.received.map((entry) => entry.message.method);
+    expect(methods.slice(1).sort()).toEqual(["Browser.getVersion", "Target.getTargets", "Target.getTargets"]);
+    const upstreamIds = browser.received.map((entry) => entry.message.id);
+    expect(new Set(upstreamIds).size).toBe(upstreamIds.length);
+    expect(new Set(browser.received.map((entry) => entry.connection)).size).toBe(1);
+    expect(backend.acquires).toBe(1);
+    expect(browser.authorizations).toEqual(["Basic abc"]);
+  });
+
+  test("Browser.close from a client closes only that client, never the shared browser", async () => {
+    const { ws, browser } = await setup();
+    const closer = new Client(`${ws}/devtools/browser/fabric`);
+    const bystander = new Client(`${ws}/devtools/browser/fabric`);
+    await Promise.all([closer.opened(), bystander.opened()]);
+    closer.send({ id: 1, method: "Target.createTarget", params: { url: "https://mine.test/" } });
+    const { targetId } = (await closer.reply(1)).result;
+    closer.send({ id: 2, method: "Browser.close" });
+    expect(await closer.reply(2)).toEqual({ id: 2, result: {} });
+    await waitFor(() => closer.closed !== undefined);
+    expect(browser.targets.has(targetId)).toBe(false);
+    expect(browser.received.some((entry) => entry.message.method === "Browser.close")).toBe(false);
+    bystander.send({ id: 1, method: "Browser.getVersion" });
+    expect((await bystander.reply(1)).result.product).toBe("FakeChrome/1.0");
+    bystander.send({ id: 2, method: "Browser.crash" });
+    expect((await bystander.reply(2)).error.message).toContain("not allowed");
   });
 
   test("a page socket speaks unscoped CDP while the endpoint multiplexes it onto a flat session", async () => {
@@ -160,7 +188,10 @@ describe("fabric endpoint: websocket relays", () => {
     expect(await pageA.reply(7)).toEqual({ id: 7, result: { result: { type: "string", value: "A:1+1" } } });
     expect(await pageB.reply(7)).toEqual({ id: 7, result: { result: { type: "string", value: "B:2+2" } } });
     const [sessionA] = browser.sessionsFor("A");
-    expect(browser.received.find((entry) => entry.message.id === 7 && entry.message.sessionId === sessionA)).toBeDefined();
+    // Upstream, the frame carries the page's flat session and an id from the shared sequence.
+    const upstream = browser.received.find((entry) => entry.message.params?.expression === "1+1")!.message;
+    expect(upstream.sessionId).toBe(sessionA);
+    expect(upstream.id).not.toBe(7);
     // Events reach only the page they belong to, without a sessionId.
     browser.emitToTarget("A", "Page.loadEventFired", { timestamp: 1 });
     await waitFor(() => pageA.messages.some((message) => message.method === "Page.loadEventFired"));
@@ -182,15 +213,32 @@ describe("fabric endpoint: websocket relays", () => {
     expect(client.closed).toEqual({ code: 1011, reason: "No such target NOPE" });
   });
 
-  test("closing a client closes its upstream connection", async () => {
-    const { ws, browser } = await setup();
+  test("a client leaving detaches its sessions and keeps the shared connection", async () => {
+    const { ws, browser, server } = await setup({ targets: [{ targetId: "A" }] });
     const client = new Client(`${ws}/devtools/browser/fabric`);
     await client.opened();
-    client.send({ id: 1, method: "Browser.getVersion" });
-    await client.reply(1);
-    expect(browser.sockets.size).toBe(2);
+    client.send({ id: 1, method: "Target.attachToTarget", params: { targetId: "A", flatten: true } });
+    const { sessionId } = (await client.reply(1)).result;
+    expect(server.mux!.stats().sessions).toBe(1);
     client.socket.close();
-    await waitFor(() => browser.sockets.size === 1);
+    await waitFor(() => browser.received.some((entry) => entry.message.method === "Target.detachFromTarget" && entry.message.params.sessionId === sessionId));
+    expect(server.mux!.stats()).toMatchObject({ clients: 0, sessions: 0 });
+    expect(browser.sockets.size).toBe(1);
+  });
+
+  test("a client cannot use another client's session", async () => {
+    const { ws } = await setup({ targets: [{ targetId: "A" }] });
+    const owner = new Client(`${ws}/devtools/browser/fabric`);
+    const intruder = new Client(`${ws}/devtools/browser/fabric`);
+    await Promise.all([owner.opened(), intruder.opened()]);
+    owner.send({ id: 1, method: "Target.attachToTarget", params: { targetId: "A", flatten: true } });
+    const { sessionId } = (await owner.reply(1)).result;
+    intruder.send({ id: 1, method: "Runtime.evaluate", params: { expression: "1" }, sessionId });
+    expect(await intruder.reply(1)).toEqual({ id: 1, error: { code: -32001, message: "Session with given id not found." }, sessionId });
+    intruder.send({ id: 2, method: "Target.detachFromTarget", params: { sessionId } });
+    expect((await intruder.reply(2)).error.message).toBe("No session with given id");
+    owner.send({ id: 2, method: "Runtime.evaluate", params: { expression: "1" }, sessionId });
+    expect((await owner.reply(2)).result.result.value).toBe("A:1");
   });
 });
 

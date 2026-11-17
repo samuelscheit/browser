@@ -2,21 +2,26 @@ import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { CdpConnection } from "@browser-fabric/worker-runtime";
 
-export interface PageTarget { targetId: string; title: string; url: string }
+/** `agentTab`: created by a fabric client (or a popup of one), not one of the user's own tabs. */
+export interface PageTarget { targetId: string; title: string; url: string; agentTab: boolean }
 
 /** Pages in the endpoint's most-recently-used order, so "the current tab" is the one last created, navigated or activated. */
 export async function listPages(port: number): Promise<PageTarget[]> {
   const response = await fetch(`http://127.0.0.1:${port}/json/list`);
   if (!response.ok) throw new Error(`fabric endpoint /json/list returned HTTP ${response.status}: ${await response.text()}`);
-  const targets = await response.json() as { id: string; type: string; title: string; url: string }[];
+  const targets = await response.json() as { id: string; type: string; title: string; url: string; agentTab?: boolean }[];
   return targets
     .filter((target) => target.type === "page" && !target.url.startsWith("devtools://"))
-    .map((target) => ({ targetId: target.id, title: target.title, url: target.url }));
+    .map((target) => ({ targetId: target.id, title: target.title, url: target.url, agentTab: target.agentTab === true }));
 }
 
-/** `--tab` accepts a list index, or a target id (prefix). Without it, the most recently used page is used. */
+/**
+ * `--tab` accepts a list index, or a target id (prefix). Without it, the most recently used agent
+ * tab: in the user's own Chrome an action must not take over the tab the user is working in, so
+ * with no agent tab the caller opens a new one.
+ */
 export function pickPage(pages: readonly PageTarget[], tab?: string): PageTarget | undefined {
-  if (tab === undefined) return pages[0];
+  if (tab === undefined) return pages.find((page) => page.agentTab);
   if (/^\d+$/.test(tab)) return pages[Number(tab)];
   const matches = pages.filter((page) => page.targetId.toLowerCase().startsWith(tab.toLowerCase()));
   if (matches.length > 1) throw new Error(`tab ${tab} is ambiguous`);

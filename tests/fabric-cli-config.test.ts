@@ -6,7 +6,8 @@ import { pickPage } from "../apps/cli/src/actions";
 import { browserRequest, parseDuration } from "../apps/cli/src/cli";
 import { choosePort } from "../apps/cli/src/commands";
 import { assertName, basicAuthorization, listStates, loadCredentials, normalizeApiUrl, normalizeUsername, readState, saveCredentials, writeState } from "../apps/cli/src/config";
-import { chromeArguments, parseDevToolsActivePort } from "../apps/cli/src/local-backend";
+import { parseDevToolsActivePort } from "../apps/cli/src/devtools-active-port";
+import { chromeArguments } from "../apps/cli/src/launched-chrome-backend";
 import { DEFAULT_EGRESS, DEFAULT_RECIPE, sessionInput } from "../apps/cli/src/remote-backend";
 import { agentIdentity, remoteRequest } from "./support/fabric-identity";
 
@@ -48,7 +49,9 @@ describe("browser requests", () => {
 
   test("defaults: the local browser on 9222; the remote one only with --remote, on 9223", async () => {
     expect(await browserRequest(values())).toEqual({ name: "local", mode: "local", port: 9222, fresh: false, ttlSeconds: 14_400, idleMinutes: 10, headless: false });
-    expect(await browserRequest(values({ headless: true }))).toMatchObject({ name: "local", mode: "local", port: 9222, headless: true });
+    // Headless cannot be the user's own Chrome: it gets fabric's "agent" profile.
+    expect(await browserRequest(values({ headless: true }))).toMatchObject({ name: "local", mode: "local", port: 9222, headless: true, profile: "agent" });
+    expect(await browserRequest(values({ profile: "research" }))).toMatchObject({ mode: "local", profile: "research", headless: false });
     expect(await browserRequest(values({ remote: true }))).toEqual({ name: "remote", mode: "remote", port: 9223, fresh: false, ttlSeconds: 14_400, idleMinutes: 10, headless: false });
     expect(await browserRequest(values({ remote: true, fresh: true, name: "scratch" }))).toMatchObject({ name: "scratch", mode: "remote", fresh: true });
   });
@@ -68,6 +71,8 @@ describe("browser requests", () => {
     }
     await expect(browserRequest(values({ remote: true, headless: true }))).rejects.toThrow(/local browser only/);
     await expect(browserRequest(values({ remote: true, chrome: "/x" }))).rejects.toThrow(/local browser only/);
+    await expect(browserRequest(values({ chrome: "/x" }))).rejects.toThrow(/--chrome needs --profile or --headless/);
+    expect(await browserRequest(values({ chrome: "/x", profile: "p" }))).toMatchObject({ chrome: "/x", profile: "p" });
     await expect(browserRequest(values({ ttl: "5h" }))).rejects.toThrow(/between 1m and 4h/);
     await expect(browserRequest(values({ ttl: "30s" }))).rejects.toThrow(/between 1m and 4h/);
     await expect(browserRequest(values({ idle: "0" }))).rejects.toThrow(/--idle/);
@@ -154,10 +159,17 @@ describe("local Chrome", () => {
 });
 
 describe("tab selection", () => {
-  const pages = [{ targetId: "AAA111", title: "a", url: "https://a" }, { targetId: "AAB222", title: "b", url: "https://b" }, { targetId: "CCC333", title: "c", url: "https://c" }];
-  test("defaults to the most recently used page and accepts an index or an id prefix", () => {
+  const pages = [
+    { targetId: "USR000", title: "the user's own tab", url: "https://mail", agentTab: false },
+    { targetId: "AAA111", title: "a", url: "https://a", agentTab: true },
+    { targetId: "AAB222", title: "b", url: "https://b", agentTab: false },
+    { targetId: "CCC333", title: "c", url: "https://c", agentTab: true },
+  ];
+  test("defaults to the most recently used agent tab, never the user's, and accepts an index or an id prefix", () => {
     expect(pickPage(pages)?.targetId).toBe("AAA111");
-    expect(pickPage(pages, "2")?.targetId).toBe("CCC333");
+    expect(pickPage(pages.filter((page) => !page.agentTab))).toBeUndefined();
+    expect(pickPage(pages, "0")?.targetId).toBe("USR000");
+    expect(pickPage(pages, "3")?.targetId).toBe("CCC333");
     expect(pickPage(pages, "ccc")?.targetId).toBe("CCC333");
     expect(pickPage(pages, "AAB")?.targetId).toBe("AAB222");
     expect(pickPage(pages, "9")).toBeUndefined();

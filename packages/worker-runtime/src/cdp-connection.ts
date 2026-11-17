@@ -79,6 +79,18 @@ export async function resolveBrowserWebSocketEndpoint(
   return discovered.toString();
 }
 
+/**
+ * A browser-level websocket that did not open. `status` is the HTTP answer to the upgrade (Chrome
+ * answers 403 when the user declines its "Allow remote debugging?" prompt); `timedOut` means no
+ * answer arrived in time (the prompt is still open, or nothing speaks WebSocket there).
+ */
+export class CdpConnectError extends Error {
+  public constructor(message: string, readonly status?: number, readonly timedOut = false) {
+    super(message);
+    this.name = "CdpConnectError";
+  }
+}
+
 class NativeCdpTransport implements CdpTransport {
   readonly #socket: WebSocket;
 
@@ -91,7 +103,7 @@ class NativeCdpTransport implements CdpTransport {
     const socket = headers ? new WebSocket(url, { headers } as never) : new WebSocket(url);
     await new Promise<void>((resolve, reject) => {
       let settled = false;
-      const finish = (error?: Error) => {
+      const finish = (error?: CdpConnectError) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -103,8 +115,14 @@ class NativeCdpTransport implements CdpTransport {
         if (error) reject(error); else resolve();
       };
       const onOpen = () => finish();
-      const onError = () => finish(new Error("CDP websocket failed to connect"));
-      const timer = setTimeout(() => finish(new Error("CDP websocket connection timed out")), timeoutMs);
+      // Bun reports the upgrade's HTTP answer in the error text ("Expected 101 status code: 403").
+      const onError = (event: Event) => {
+        const detail = (event as Event & { message?: unknown }).message;
+        const text = typeof detail === "string" ? detail : "";
+        const status = Number(/Expected 101 status code: (\d{3})/.exec(text)?.[1]) || undefined;
+        finish(new CdpConnectError(`CDP websocket failed to connect${text ? ` (${text})` : ""}`, status));
+      };
+      const timer = setTimeout(() => finish(new CdpConnectError("CDP websocket connection timed out", undefined, true)), timeoutMs);
       socket.addEventListener("open", onOpen, { once: true });
       socket.addEventListener("error", onError, { once: true });
     });
@@ -134,15 +152,15 @@ export class CdpConnection {
       const message = parseCdpMessage(event);
       if (!message) return;
       const id = typeof message.id === "number" ? message.id : undefined;
-      if (id !== undefined) {
-        const pending = this.#pending.get(id);
-        if (!pending) return;
-        this.#pending.delete(id);
+      const pending = id === undefined ? undefined : this.#pending.get(id);
+      if (pending) {
+        this.#pending.delete(id!);
         clearTimeout(pending.timer);
         if (message.error) pending.reject(new Error(`${pending.method}: ${typeof message.error.message === "string" ? message.error.message : "CDP command failed"}`));
         else pending.resolve(message.result);
         return;
       }
+      // Events, and answers to frames sent with `sendFrame` (or to commands that already timed out).
       for (const listener of this.#listeners) listener(message);
     });
     const close = () => this.#notifyClosed();
@@ -177,6 +195,18 @@ export class CdpConnection {
   public onClose(listener: () => void): () => void {
     this.#closeListeners.add(listener);
     return () => this.#closeListeners.delete(listener);
+  }
+
+  /**
+   * Send one frame with an id from this connection's sequence and return that id. Its answer is
+   * not awaited here: it reaches `onMessage` listeners in wire order with the events around it,
+   * which a multiplexer needs to route answers and events to their clients in order.
+   */
+  public sendFrame(frame: { method: string; params?: Record<string, unknown>; sessionId?: string }): number {
+    if (this.#closed) throw new Error("CDP connection is closed");
+    const id = this.#nextId++;
+    this.#transport.send(JSON.stringify({ id, method: frame.method, params: frame.params ?? {}, ...(frame.sessionId ? { sessionId: frame.sessionId } : {}) }));
+    return id;
   }
 
   public async send(method: string, params: Record<string, unknown> = {}, sessionId?: string, timeoutMs = DEFAULT_CDP_COMMAND_TIMEOUT_MS): Promise<any> {

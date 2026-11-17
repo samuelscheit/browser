@@ -37,7 +37,7 @@ run("fabric CLI with a local headless Chrome", () => {
 
   test("up is idempotent and refuses a running browser with different settings", () => {
     const started = JSON.parse(ok("up", "--headless", "--port", String(port), "--json"));
-    expect(started).toMatchObject({ status: "ready", endpoint: `http://127.0.0.1:${port}`, request: { mode: "local", name: "local", headless: true } });
+    expect(started).toMatchObject({ status: "ready", endpoint: `http://127.0.0.1:${port}`, request: { mode: "local", name: "local", headless: true, profile: "agent" } });
     const again = JSON.parse(ok("up", "--headless", "--port", String(port), "--json"));
     expect(again.pid).toBe(started.pid);
     const conflict = fabric("up", "--port", String(port));
@@ -111,20 +111,20 @@ run("fabric CLI with a local headless Chrome", () => {
     process.env.FABRIC_CHROME = chrome;
     try {
       const { up } = await import("../apps/cli/src/commands");
-      const request = { name: "lazy", mode: "local" as const, port: lazyPort, fresh: false, ttlSeconds: 3600, idleMinutes: 10, headless: true };
+      const request = { name: "lazy", mode: "local" as const, port: lazyPort, profile: "agent", fresh: false, ttlSeconds: 3600, idleMinutes: 10, headless: true };
       const state = await up(request, { warm: false });
       expect(state.status).toBe("idle");
       const health = async () => (await (await fetch(`http://127.0.0.1:${lazyPort}/healthz`)).json()) as { detail: string };
       expect((await health()).detail).toContain("not running");
       // The first client starts Chrome.
       expect(ok("eval", "--name", "lazy", "1 + 1")).toBe("2");
-      expect((await health()).detail).toMatch(/local Chrome pid \d+/);
+      expect((await health()).detail).toMatch(/fabric's Chrome pid \d+/);
       expect(ok("down", "lazy")).toBe("stopped lazy");
       // A warm `up` on a lazy daemon returns only once Chrome runs.
       await up(request, { warm: false });
       const woken = JSON.parse(ok("up", "--headless", "--name", "lazy", "--port", String(lazyPort), "--json"));
       expect(woken.status).toBe("ready");
-      expect((await health()).detail).toMatch(/local Chrome pid \d+/);
+      expect((await health()).detail).toMatch(/fabric's Chrome pid \d+/);
       expect(ok("down", "lazy")).toBe("stopped lazy");
     } finally {
       if (previousHome === undefined) delete process.env.FABRIC_HOME; else process.env.FABRIC_HOME = previousHome;

@@ -3,7 +3,7 @@
 Browser Fabric is the shared browser control plane described in [`/PLAN.md`](../PLAN.md). It owns process lifecycle, profile/volume affinity, leases, scheduling, browser-level CDP capabilities, egress policy, challenge orchestration, artifacts, Companion transport, and worker health. Domain applications remain responsible for business workflows and call the control plane through the typed clients.
 
 **Agents and people who just need a browser:** use the `fabric` CLI ([`agents.md`](agents.md)).
-`fabric up` (Chrome on this machine) or `fabric up --remote` (a Fabric browser) prints a plain
+`fabric up` (your own everyday Chrome) or `fabric up --remote` (a Fabric browser) prints a plain
 `http://127.0.0.1:<port>` CDP endpoint for Playwright, Puppeteer or an MCP, plus a live view.
 
 ## Global Cloudflare Turnstile guardian
