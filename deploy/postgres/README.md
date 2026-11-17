@@ -1,6 +1,14 @@
 # Fabric PostgreSQL
 
-Apply migrations in lexical order with a migration runner (`001_initial.sql`, then `002_indexes_and_retention.sql`).
-The schema is intentionally explicit: no table stores secret values. Ephemeral input values exist only in a worker-memory vault and are wiped on consumption, cancellation, timeout, or crash.
+Every Fabric process applies the numbered `*.sql` files in this directory in lexical order on boot,
+so each statement is idempotent. `001_schema.sql` is the complete schema; a later change adds a new
+numbered file rather than editing a released one. `scripts/validate-sql.sh` checks the schema against
+a real server.
 
-The scheduler must acquire row locks (`SELECT ... FOR UPDATE`) on the global capacity row (represented by the active lease count), the selected worker, and the selected profile before inserting a lease. The partial unique index `one_active_writer_per_profile` is the final race-proof guard.
+The schema intentionally contains no column for a secret value. Ephemeral input values exist only in a
+worker-memory vault or the encrypted input broker and are wiped on consumption, cancellation, timeout
+or crash.
+
+The scheduler serializes every state change. The global capacity row (`fabric_capacity`) bounds active
+browser leases, and the partial unique index `one_active_writer_per_profile` is the final race-proof
+guard against two writers on one profile.

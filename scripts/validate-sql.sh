@@ -1,138 +1,86 @@
 #!/bin/sh
+# Validate the PostgreSQL schema against a real server (uses the libpq PG* environment variables).
+#   ./scripts/validate-sql.sh [database-name]
+# Applies every migration twice (processes re-apply them on boot, so they must be idempotent),
+# checks that no column can hold a secret value, and exercises the schema's safety constraints.
 set -eu
+export PGOPTIONS="${PGOPTIONS:-} -c client_min_messages=warning"
 DB_NAME="${1:-browser_fabric_validation_$$}"
-UPGRADE_DB_NAME="${DB_NAME}_upgrade"
 createdb "$DB_NAME"
-createdb "$UPGRADE_DB_NAME"
-cleanup() {
-  dropdb --if-exists "$DB_NAME" >/dev/null 2>&1 || true
-  dropdb --if-exists "$UPGRADE_DB_NAME" >/dev/null 2>&1 || true
-}
+cleanup() { dropdb --if-exists "$DB_NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
-for migration in deploy/postgres/*.sql; do
-  psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$DB_NAME" --file "$migration" >/dev/null
+run_sql() { psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$DB_NAME" "$@" >/dev/null; }
+for pass in 1 2; do
+  for migration in deploy/postgres/*.sql; do run_sql --file "$migration"; done
 done
 count="$(psql --no-psqlrc --tuples-only --no-align --dbname "$DB_NAME" -c "SELECT count(*) FROM pg_tables WHERE schemaname='public'")"
-[ "$count" -ge 22 ] || { echo "expected at least 22 Fabric tables, got $count" >&2; exit 1; }
+[ "$count" -eq 23 ] || { echo "expected 23 Fabric tables, got $count" >&2; exit 1; }
 if psql --no-psqlrc --tuples-only --no-align --dbname "$DB_NAME" -c "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND column_name ~ '(password|cookie|secret|token)' AND column_name !~ '(_ref$|_hash$|public_key|certificate|encryption)'" | grep -q .; then
   echo "secret-value-like columns found in Fabric schema" >&2
   exit 1
 fi
-
-# Exercise upgrade-only constraints explicitly. Current fresh schema names both checks, whereas
-# deployments created from the original 001 migration carried anonymous checks. Recreate that
-# historical shape, then apply the forward-only migrations that replace it. This catches both the
-# old anonymous media-artifact checks and the pre-playback input-request shape where a lease was
-# mandatory and the allowed field-type check did not permit encrypted media sources.
-psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$UPGRADE_DB_NAME" --file deploy/postgres/001_initial.sql >/dev/null
-psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$UPGRADE_DB_NAME" <<'SQL' >/dev/null
-ALTER TABLE fabric_artifacts DROP CONSTRAINT fabric_artifacts_kind_check;
-ALTER TABLE fabric_artifacts ADD CHECK (kind IN ('screenshot','mhtml','trace','har','download','video','log'));
-ALTER TABLE fabric_artifacts DROP CONSTRAINT fabric_artifacts_owner_check;
-ALTER TABLE fabric_artifacts ADD CHECK ((session_id IS NOT NULL) <> (job_id IS NOT NULL));
-ALTER TABLE fabric_workers DROP COLUMN media_playback_endpoint;
-ALTER TABLE fabric_jobs DROP COLUMN media_playback_ready_at;
-ALTER TABLE fabric_jobs DROP COLUMN media_playback_source_request_id;
-ALTER TABLE fabric_ephemeral_input_requests DROP COLUMN media_attempt_id;
-ALTER TABLE fabric_ephemeral_input_requests ALTER COLUMN lease_id SET NOT NULL;
-DO $$
-DECLARE legacy_constraint text;
-BEGIN
-  FOR legacy_constraint IN
-    SELECT constraints.constraint_name
-    FROM information_schema.table_constraints AS constraints
-    JOIN pg_constraint AS pg_constraints ON pg_constraints.conname = constraints.constraint_name
-    JOIN pg_class AS relation ON relation.oid = pg_constraints.conrelid
-    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
-    WHERE constraints.table_schema = 'public'
-      AND constraints.table_name = 'fabric_ephemeral_input_requests'
-      AND constraints.constraint_type = 'CHECK'
-      AND namespace.nspname = 'public'
-      AND (
-        pg_get_constraintdef(pg_constraints.oid) LIKE '%field_type%'
-        OR pg_get_constraintdef(pg_constraints.oid) LIKE '%media_attempt_id%'
-      )
-  LOOP
-    EXECUTE format('ALTER TABLE fabric_ephemeral_input_requests DROP CONSTRAINT %I', legacy_constraint);
-  END LOOP;
-END $$;
-ALTER TABLE fabric_ephemeral_input_requests
-  ADD CHECK (field_type IN ('password','otp','captcha_provider_credential','proxy_credential','form_value'));
-SQL
-for migration in deploy/postgres/006_media_manifest_artifacts.sql deploy/postgres/007_media_artifact_expiry.sql deploy/postgres/008_media_attempt_binding.sql deploy/postgres/009_project_scoped_media_manifests.sql deploy/postgres/010_media_playback_sessions.sql; do
-  psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$UPGRADE_DB_NAME" --file "$migration" >/dev/null
-done
-psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$UPGRADE_DB_NAME" <<'SQL' >/dev/null
+run_sql <<'SQL'
 DO $$
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'fabric_artifacts'::regclass
-      AND contype = 'c'
-      AND pg_get_constraintdef(oid) LIKE '%media_manifest%'
-  ) THEN
-    RAISE EXCEPTION 'media_manifest artifact constraint was not installed';
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = 'fabric_workers' AND column_name = 'media_playback_endpoint'
-  ) OR NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = 'fabric_jobs' AND column_name = 'media_playback_ready_at'
-  ) OR NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = 'fabric_jobs' AND column_name = 'media_playback_source_request_id'
-  ) OR NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = 'fabric_ephemeral_input_requests' AND column_name = 'media_attempt_id'
-  ) THEN
-    RAISE EXCEPTION 'media playback upgrade columns were not installed';
-  END IF;
-  IF EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = 'fabric_ephemeral_input_requests'
-      AND column_name = 'lease_id'
-      AND is_nullable <> 'YES'
-  ) THEN
-    RAISE EXCEPTION 'media playback input requests still require a browser lease';
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'fabric_ephemeral_input_requests'::regclass
-      AND contype = 'c'
-      AND pg_get_constraintdef(oid) LIKE '%media_playback_source%'
-  ) THEN
-    RAISE EXCEPTION 'media playback encrypted input constraint was not installed';
-  END IF;
-END $$;
-SQL
-# The deployment-wide lease counter originally carried an anonymous `BETWEEN 0 AND 4` check that
-# CREATE TABLE IF NOT EXISTS never revisits. Recreate it, apply 012, and prove the raised bound
-# holds (6 accepted, 9 rejected) on both a fresh and an upgraded schema.
-psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$UPGRADE_DB_NAME" <<'SQL' >/dev/null
-ALTER TABLE fabric_capacity DROP CONSTRAINT fabric_capacity_active_browser_leases_check;
-ALTER TABLE fabric_capacity ADD CHECK (active_browser_leases BETWEEN 0 AND 4);
-SQL
-psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$UPGRADE_DB_NAME" --file deploy/postgres/012_browser_lease_capacity.sql >/dev/null
-for database in "$DB_NAME" "$UPGRADE_DB_NAME"; do
-  psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname "$database" <<'SQL' >/dev/null
-DO $$
-BEGIN
-  UPDATE fabric_capacity SET active_browser_leases = 6 WHERE id = 1;
+  -- The deployment-wide lease counter accepts MAX_ACTIVE_BROWSER_LEASES (8) and nothing above.
+  UPDATE fabric_capacity SET active_browser_leases = 8 WHERE id = 1;
   BEGIN
     UPDATE fabric_capacity SET active_browser_leases = 9 WHERE id = 1;
     RAISE EXCEPTION 'fabric_capacity accepted more than eight active browser leases';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
-  IF (SELECT count(*) FROM pg_constraint WHERE conrelid = 'fabric_capacity'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%active_browser_leases%') <> 1 THEN
-    RAISE EXCEPTION 'fabric_capacity must carry exactly one lease-count check';
-  END IF;
   UPDATE fabric_capacity SET active_browser_leases = 0 WHERE id = 1;
+
+  INSERT INTO fabric_projects(id, name) VALUES ('project_validation', 'Validation');
+  INSERT INTO fabric_workers(id, certificate_fingerprint, endpoint, cdp_relay_endpoint, runtime_families, recipe_refs, capacity, cpu_milli, memory_mib, pids, shm_mib, temporary_storage_mib, health, last_heartbeat_at)
+    VALUES ('worker_validation', 'fingerprint', 'https://worker.internal.example', 'http://fabric-browser-{leaseId}:9223', '{chromium-cdp}', '{recipe_chromium-cdp@1}', 4, 1000, 1024, 128, 512, 1024, 'healthy', now());
+  BEGIN
+    UPDATE fabric_workers SET capacity = 5 WHERE id = 'worker_validation';
+    RAISE EXCEPTION 'fabric_workers accepted a capacity above four';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO fabric_workers(id, certificate_fingerprint, endpoint, cdp_relay_endpoint, runtime_families, recipe_refs, capacity, is_local, cpu_milli, memory_mib, pids, shm_mib, temporary_storage_mib, health, last_heartbeat_at)
+      VALUES ('worker_local', 'fingerprint-local', 'https://local.internal.example', 'http://127.0.0.1:9223', '{chromium-cdp}', '{}', 2, true, 1000, 1024, 128, 512, 1024, 'healthy', now());
+    RAISE EXCEPTION 'a federated local worker accepted more than one lease';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+
+  -- A media manifest is the only project-scoped (ownerless) artifact.
+  INSERT INTO fabric_artifacts(id, project_id, kind, object_key, sha256, mime_type, size_bytes, expires_at)
+    VALUES ('artifact_manifest', 'project_validation', 'media_manifest', 'manifests/a', 'sha256:' || repeat('a', 64), 'application/json', 10, now() + interval '30 days');
+  BEGIN
+    INSERT INTO fabric_artifacts(id, project_id, kind, object_key, sha256, mime_type, size_bytes, expires_at)
+      VALUES ('artifact_orphan', 'project_validation', 'screenshot', 'screenshots/a', 'sha256:' || repeat('a', 64), 'image/png', 10, now() + interval '30 days');
+    RAISE EXCEPTION 'an ownerless non-manifest artifact was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+
+  -- Media attempt ids are shape-checked wherever they are stored.
+  INSERT INTO fabric_recipes(ref, family, version, immutable_hash, runtime, definition) VALUES ('recipe_media-playback@1', 'media-playback', 1, 'sha256:x', 'media-playback', '{}');
+  INSERT INTO fabric_egress_policies(ref, family, version, immutable_hash, definition) VALUES ('egress_direct@1', 'direct', 1, 'x', '{}');
+  INSERT INTO fabric_artifact_policies(ref, retention_days, allowed_kinds) VALUES ('artifact-policy_standard-30-days@1', 30, '{media_manifest}');
+  INSERT INTO fabric_jobs(id, project_id, idempotency_key, recipe_ref, runtime, operation, lease_mode, egress_policy_ref, artifact_policy_ref, status, expires_at)
+    VALUES ('job_validation', 'project_validation', 'k', 'recipe_media-playback@1', 'media-playback', '{}', 'clone', 'egress_direct@1', 'artifact-policy_standard-30-days@1', 'running', now() + interval '1 hour');
+  INSERT INTO fabric_ephemeral_input_requests(id, project_id, job_id, media_attempt_id, field, field_type, status, expires_at)
+    VALUES ('input_ok', 'project_validation', 'job_validation', 'attempt_1', 'source', 'media_playback_source', 'pending', now());
+  BEGIN
+    INSERT INTO fabric_ephemeral_input_requests(id, project_id, job_id, media_attempt_id, field, field_type, status, expires_at)
+      VALUES ('input_bad', 'project_validation', 'job_validation', 'not-an-attempt', 'source', 'media_playback_source', 'pending', now());
+    RAISE EXCEPTION 'an invalid media attempt input request was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    UPDATE fabric_jobs SET media_attempt_id = 'not-an-attempt' WHERE id = 'job_validation';
+    RAISE EXCEPTION 'an invalid job media attempt id was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO fabric_ephemeral_input_requests(id, project_id, job_id, media_attempt_id, field, field_type, status, expires_at)
+      VALUES ('input_unknown', 'project_validation', 'job_validation', 'attempt_1', 'f', 'cookie_jar', 'pending', now());
+    RAISE EXCEPTION 'an unknown input field type was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
 END $$;
 SQL
-done
-echo "SQL validation passed ($count tables; legacy media-artifact, media-playback and lease-capacity upgrades verified)"
+echo "SQL validation passed ($count tables; idempotent re-apply, secret-free columns and safety constraints verified)"
