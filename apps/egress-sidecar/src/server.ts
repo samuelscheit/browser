@@ -41,7 +41,7 @@ function proxyFor(policy: EgressPacPolicy, listenerId: string, listenerPorts: Re
 
 export function pac(policy: EgressPacPolicy, listenerPorts: ReadonlyMap<string, number>, pacHost = PAC_HOST): string {
   const rules = (policy.rules ?? []).map((rule) => {
-    // A rule is an explicit direct exception (for example Signup static assets). It must not
+    // A rule is an explicit direct exception (for example static assets). It must not
     // inherit the policy's proxy fallback list: a failed direct asset is deliberately not retried
     // through a paid/account proxy.
     return `  if (${matcher(rule)}) return ${escapePac(proxyFor(policy, rule.listenerId, listenerPorts, pacHost))};`;

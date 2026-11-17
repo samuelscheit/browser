@@ -17,10 +17,10 @@ describe("private API and CDP gateway boundary", () => {
       project: TEST_PROJECT,
       idempotencyKey: "api-1",
       runtime: "rebrowser-puppeteer",
-      browserRecipeRef: "recipe_rebrowser-reporting@1",
+      browserRecipeRef: "recipe_rebrowser-puppeteer@1",
       profileRef: "profile_missing",
       leaseMode: "writer",
-      egressPolicyRef: "egress_direct-egress@1",
+      egressPolicyRef: "egress_direct@1",
       artifactPolicyRef: "artifact-policy_standard-30-days@1",
       ttlSeconds: 600
     };
@@ -48,10 +48,10 @@ describe("private API and CDP gateway boundary", () => {
       project: TEST_PROJECT,
       idempotencyKey: "api-2",
       runtime: "rebrowser-puppeteer",
-      browserRecipeRef: "recipe_rebrowser-reporting@1",
+      browserRecipeRef: "recipe_rebrowser-puppeteer@1",
       profileRef: context.profile.ref,
       leaseMode: "writer",
-      egressPolicyRef: "egress_direct-egress@1",
+      egressPolicyRef: "egress_direct@1",
       artifactPolicyRef: "artifact-policy_standard-30-days@1",
       ttlSeconds: 600
     };
@@ -72,7 +72,7 @@ describe("private API and CDP gateway boundary", () => {
     const bad = await gateway.fetch(new Request("https://fabric.test/v1/cdp/browser-session_missing?cap=bad", { headers: { upgrade: "websocket" } }));
     expect(bad.status).toBe(404);
 
-    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const [assignment] = await context.scheduler.dispatch();
     const worker = (await context.store.snapshot()).workers.get("worker_test" as never)!;
     const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
@@ -95,7 +95,7 @@ describe("private API and CDP gateway boundary", () => {
       upstream: { connect: async () => { throw new Error("not reached"); } },
       authenticate: (_request, scope) => { seen.push(scope); return false; },
     });
-    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway-project-auth", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "gateway-project-auth", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const [assignment] = await context.scheduler.dispatch();
     const worker = (await context.store.snapshot()).workers.get("worker_test" as never)!;
     const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
@@ -123,7 +123,7 @@ describe("private API and CDP gateway boundary", () => {
       browserRecipeRef: "recipe_interactive-chromium@1" as never,
       profileRef: profile.ref,
       leaseMode: "interactive",
-      egressPolicyRef: "egress_direct-egress@1" as never,
+      egressPolicyRef: "egress_direct@1" as never,
       artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
       ttlSeconds: 600,
     }, TEST_PRINCIPAL);
@@ -143,4 +143,15 @@ describe("private API and CDP gateway boundary", () => {
     await expect(gateway.authorizeReverseRelay(new Request(`https://fabric.test${route}`, { headers: { upgrade: "websocket" } }))).rejects.toMatchObject({ code: "authorization_denied" });
     await context.scheduler.cancelBrowserSession(session.id, TEST_PRINCIPAL);
   });
+});
+
+test("capability and playback URLs leave the host only over TLS; plain ws/http is accepted for a loopback edge only", async () => {
+  const { CapabilitySigner } = await import("@browser-fabric/control-plane");
+  const secret = "01234567890123456789012345678901";
+  for (const gatewayBaseUrl of ["wss://fabric.example.com", "ws://127.0.0.1:18086", "ws://localhost:18086", "ws://[::1]:18086"]) {
+    expect(() => new CapabilitySigner({ secret, gatewayBaseUrl })).not.toThrow();
+  }
+  for (const gatewayBaseUrl of ["ws://fabric.example.com", "ws://127.0.0.1.example.com", "http://127.0.0.1:18086", "not a url"]) {
+    expect(() => new CapabilitySigner({ secret, gatewayBaseUrl })).toThrow(/wss:\/\//);
+  }
 });

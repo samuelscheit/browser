@@ -83,9 +83,6 @@ export class SchedulerKernel {
       if (profile.status !== "active") throw new FabricError("conflict", `profile is ${profile.status}`, 409);
       if (profile.profileFamily !== recipe.profileFamily) throw new FabricError("validation_failed", "profile family is incompatible with browser recipe", 400);
     }
-    if (recipe.runtime === "playwright-social" && !profileRef) {
-      throw new FabricError("validation_failed", "Social jobs require a persistent Chromium profile", 400);
-    }
     // `profileRef` is optional by contract. Without one, writer/interactive work receives a
     // disposable worker-local volume (represented on the lease) rather than silently sharing a
     // global profile. A clone request without a profile simply gets a fresh disposable volume.
@@ -180,23 +177,22 @@ export class SchedulerKernel {
       }
     }
     if (!isMediaRuntime(recipe.runtime) && state.activeBrowserLeases >= this.#maxActiveBrowserLeases) return undefined;
-    const activeLeases = [...state.leases.values()].filter((lease) => lease.status === "active");
-    const activeManagedLeases = activeLeases.filter((lease) => !state.workers.get(lease.workerId)?.isLocal).length;
-    const activeLocalLeases = activeLeases.length - activeManagedLeases;
+    const activeLocalLeases = [...state.leases.values()].filter((lease) => lease.status === "active" && state.workers.get(lease.workerId)?.isLocal).length;
     const candidates = [...state.workers.values()]
       .filter((worker) => worker.health === "healthy")
       .filter((worker) => worker.activeLeases < worker.capacity)
       .filter((worker) => worker.capabilities.runtimeFamilies.includes(recipe.runtime))
       .filter((worker) => worker.capabilities.recipeRefs.includes(recipe.ref))
       .filter((worker) => worker.capabilities.supportedProfileFamilies.includes(recipe.profileFamily))
-      // Interactive Fabric workloads may run either on a federated local
+      // Interactive recipes may run either on a federated local
       // worker or on a managed worker that explicitly advertises its private
       // Xvfb/interactive capability. A generic managed CDP worker remains
       // ineligible until provisioning enables this capability.
       .filter((worker) => recipe.mode !== "interactive" || worker.capabilities.supportsInteractive)
       .filter((worker) => profile === undefined || worker.id === profile.workerId)
       .filter((worker) => onlyWorkerId === undefined || worker.id === onlyWorkerId)
-      .filter((worker) => worker.isLocal ? activeLocalLeases < 1 : activeManagedLeases < 3)
+      // Managed workers are bounded by their own capacity and the global lease cap above.
+      .filter((worker) => !worker.isLocal || activeLocalLeases < 1)
       .sort((left, right) => left.activeLeases - right.activeLeases || left.id.localeCompare(right.id));
     const worker = candidates[0];
     return worker ? { worker, ...(profile === undefined ? {} : { profile }) } : undefined;

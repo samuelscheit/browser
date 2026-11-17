@@ -27,21 +27,21 @@ export interface EgressListenerConfig {
   /** Exact reviewed hostname suffixes this listener may reach; checked by the sidecar per CONNECT. */
   allowedHostnameSuffixes?: readonly string[];
   /**
-   * Dial this IP family whenever the target publishes it. Media's Cloudflare zone blocks the
-   * host's IPv4 address, so its listener prefers AAAA records; provider/CDN hosts that publish only
-   * A records remain reachable over IPv4.
+   * Dial this IP family whenever the target publishes it, for example when a provider blocks the
+   * host's IPv4 address but not its IPv6 range. Hosts that publish only the other family remain
+   * reachable through it.
    */
   preferredAddressFamily?: 4 | 6;
   /** Permit this reviewed listener to try direct egress only after every upstream proxy fails. */
   fallbackToDirect?: boolean;
   /**
-   * Allow the listener to start before its workload credential is provisioned.
+   * Allow the listener to start before its upstream credential is provisioned.
    * Requests fail closed (or use the explicit direct fallback) until an
    * upstream is configured; the whole Fabric sidecar must not be taken down
-   * by an application that has not been cut over yet.
+   * by one listener that is not configured yet.
    */
   optional?: boolean;
-  /** Select one 0-based endpoint from a multi-entry secret such as the Social pool. */
+  /** Select one 0-based endpoint from a multi-entry secret such as a proxy pool. */
   upstreamIndex?: number;
 }
 

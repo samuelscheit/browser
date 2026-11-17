@@ -3,12 +3,13 @@ info:
   title: Browser Fabric Control Plane
   version: 0.1.0
   description: |
-    Private Browser Fabric API. Calls require a per-principal Basic credential at the ingress and a project-scoped principal.
-    The Basic username is the principal ID itself (for example `principal_agent`), not a bare name.
+    Browser Fabric control-plane API. Calls require a per-principal Basic credential at the edge and a project-scoped principal.
+    The Basic username is the principal ID itself (for example `principal_admin`), not a bare name.
     Start with `GET /me` to discover the projects, profiles, recipes and policy refs the caller may use.
     Raw CDP endpoints are short-lived signed capabilities scoped to exactly one browser session.
 servers:
-  - url: https://fabric.internal.example/v1
+  - url: https://fabric.example.com/v1
+    description: Your deployment's edge (deploy/compose serves it on http://127.0.0.1:18086/v1 by default).
 security:
   - fabricBasicAuth: []
 paths:
@@ -348,7 +349,7 @@ components:
       properties:
         project: { type: string, pattern: '^project_' }
         idempotencyKey: { type: string }
-        runtime: { type: string, enum: [chromium-cdp, patchright, rebrowser-puppeteer, playwright-social, companion, media-relay, media-playback] }
+        runtime: { type: string, enum: [chromium-cdp, patchright, rebrowser-puppeteer, media-relay, media-playback] }
         browserRecipeRef: { type: string, pattern: '^recipe_' }
         profileRef: { type: string, pattern: '^profile_' }
         leaseMode: { type: string, enum: [writer, interactive, clone] }

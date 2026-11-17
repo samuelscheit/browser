@@ -26,3 +26,4 @@ export * from "./identity";
 export * from "./application-auth";
 export * from "./media-manifest";
 export * from "./media-playback";
+export * from "./catalog";

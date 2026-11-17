@@ -6,7 +6,7 @@ import type { BrowserBackend } from "./backend";
 import { basicAuthorization, type BrowserRequest, type Credentials } from "./config";
 
 export const DEFAULT_RECIPE = "recipe_interactive-chromium@1";
-export const DEFAULT_EGRESS = "egress_direct-egress@1";
+export const DEFAULT_EGRESS = "egress_direct@1";
 const TERMINAL = new Set(["released", "cancelled", "failed", "timed_out"]);
 
 export function fabricClient(credentials: Credentials): BrowserFabricClient {
@@ -15,7 +15,7 @@ export function fabricClient(credentials: Credentials): BrowserFabricClient {
 
 export async function fetchIdentity(credentials: Credentials): Promise<PrincipalCapabilities> {
   const response = await fetch(`${credentials.url}/me`, { headers: { accept: "application/json", authorization: basicAuthorization(credentials) } });
-  if (response.status === 401) throw new Error(`Fabric rejected ${credentials.username}: wrong password, or the username is not a principal ID (they look like principal_agent).`);
+  if (response.status === 401) throw new Error(`Fabric rejected ${credentials.username}: wrong password, or the username is not a principal ID (they look like principal_admin).`);
   if (!response.ok) throw new Error(`Fabric GET /v1/me returned HTTP ${response.status}: ${await response.text()}`);
   return await response.json() as PrincipalCapabilities;
 }

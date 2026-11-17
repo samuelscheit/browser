@@ -38,11 +38,14 @@ import {
   type Worker,
   type WorkerAssignment,
   terminalBrowserSessionStatuses,
-  terminalJobStatuses
+  terminalJobStatuses,
+  runtimeFamilies,
+  MAX_WORKER_BROWSER_LEASES
 } from "@browser-fabric/contracts";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { assertRuntimePolicyCompatibility, builtInChallengeSets, builtInEgressPolicies } from "@browser-fabric/policy";
-import { RecipeRegistry, type RecipeDefinition, validateTypedOperation } from "@browser-fabric/recipes";
+import { builtInRecipes, RecipeRegistry, type RecipeDefinition, validateTypedOperation } from "@browser-fabric/recipes";
+import { emptyFabricCatalog, type FabricCatalog } from "./catalog";
 import { CapabilitySigner } from "./capability";
 import { type Clock, SystemClock } from "./clock";
 import { EncryptedInputRouter, type EphemeralInputEnvelope, type EphemeralInputVault } from "./ephemeral";
@@ -57,7 +60,8 @@ export interface BrowserSchedulerOptions {
   store?: FabricStore;
   clock?: Clock;
   capabilitySigner?: CapabilitySigner;
-  recipes?: RecipeRegistry;
+  /** The deployment's catalog (FABRIC_CATALOG_FILE): recipes, egress policies, challenge sets and projects added to the built-ins. */
+  catalog?: FabricCatalog;
   maxActiveBrowserLeases?: number;
   reconnectGraceSeconds?: number;
   assignmentClaimTimeoutSeconds?: number;
@@ -65,6 +69,18 @@ export interface BrowserSchedulerOptions {
   ephemeralInputVault?: EphemeralInputVault;
   /** Plaintext convenience endpoint is disabled for production stores by default. */
   allowPlaintextEphemeralInputs?: boolean;
+}
+
+/**
+ * The reviewed managed-worker change: browser capacity and limits, and which recipes and profile
+ * families it serves (so a catalog recipe can be enabled on an existing worker). Identity,
+ * endpoints, runtimes, interactivity and volumes stay immutable.
+ */
+export interface ManagedWorkerReconfiguration {
+  capacity: number;
+  resourceLimits: Worker["resourceLimits"];
+  recipeRefs: Worker["capabilities"]["recipeRefs"];
+  supportedProfileFamilies: Worker["capabilities"]["supportedProfileFamilies"];
 }
 
 export interface ArtifactInput {
@@ -80,11 +96,11 @@ export interface ArtifactInput {
   sha256: string;
   mimeType: string;
   sizeBytes: number;
-  /** Restricts a companion artifact finalization to one currently active media assignment. */
+  /** Restricts a media result finalization to one currently active media assignment. */
   expectedWorkerId?: Worker["id"];
-  /** Restricts a companion artifact finalization to its exact active media attempt. */
+  /** Restricts a media result finalization to its exact active media attempt. */
   expectedMediaAttemptId?: AttemptId;
-  /** Stable, bounded expiry reserved by a trusted companion before an immutable result upload. */
+  /** Stable, bounded expiry reserved by the worker manager before an immutable result upload. */
   expiresAt?: string;
 }
 
@@ -148,58 +164,6 @@ function inputRequestWorker(kernel: SchedulerKernel, state: FabricState, request
 
 function requestFingerprint(scope: string, payload: unknown): string {
   return `${scope}:sha256:${createHash("sha256").update(canonicalJson(payload)).digest("hex")}`;
-}
-
-/**
- * Avatar mutation is the one typed operation that changes a durable external account. Its approval
- * must be an authenticated project-admin identity, not a free-form field that a project operator
- * can spoof in a JSON operation.
- */
-function assertProfileUpdateApproval(
-  kernel: SchedulerKernel,
-  state: FabricState,
-  recipe: RecipeDefinition,
-  input: JobCreateInput,
-  actor: Principal | undefined,
-): string | undefined {
-  if (recipe.family !== "profile-update-companion" || input.operation.operation !== "update_avatar") return undefined;
-  const approvedBy = input.operation.approvedBy;
-  if (typeof approvedBy !== "string" || !/^principal_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(approvedBy)) {
-    throw new FabricError("validation_failed", "profile update approvedBy must be an opaque principal identifier", 400);
-  }
-  if (!actor) throw new FabricError("authentication_required", "profile update requires an authenticated approving principal", 401);
-  const registered = kernel.authorizeIdentity(state, actor, "approve_profile_update", approvedBy);
-  if (!registered) throw new FabricError("authentication_required", "profile update requires an authenticated approving principal", 401);
-  if (registered.id !== approvedBy) {
-    kernel.audit(state, actor, input.project, "profile_update.approval", { kind: "job", id: input.recipeRef }, "denied", { reason: "approved_by_mismatch" });
-    throw new FabricError("authorization_denied", "profile update approvedBy must match the authenticated principal", 403);
-  }
-  const canApprove = registered.roles.includes("fabric_admin") || (registered.projectGrants.includes(input.project) && registered.roles.includes("project_admin"));
-  if (!canApprove) {
-    kernel.audit(state, actor, input.project, "profile_update.approval", { kind: "job", id: input.recipeRef }, "denied", { reason: "project_admin_required" });
-    throw new FabricError("authorization_denied", "profile update requires a project_admin or fabric_admin approval", 403);
-  }
-  return approvedBy;
-}
-
-/** Validate the immutable avatar input before reserving a managed browser/companion lease. */
-function assertProfileUpdateAvatar(state: FabricState, input: JobCreateInput, clock: Clock): void {
-  if (input.operation.operation !== "update_avatar") return;
-  const manifestRef = input.operation.manifestRef;
-  const avatarArtifactRef = input.operation.avatarArtifactRef;
-  if (typeof manifestRef !== "string" || !/^manifest_[A-Za-z0-9][A-Za-z0-9_.-]{0,239}$/.test(manifestRef)) {
-    throw new FabricError("validation_failed", "profile update manifestRef is invalid", 400);
-  }
-  if (typeof avatarArtifactRef !== "string" || !/^artifact_[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/.test(avatarArtifactRef)) {
-    throw new FabricError("validation_failed", "profile update avatarArtifactRef is invalid", 400);
-  }
-  const artifact = state.artifacts.get(avatarArtifactRef as Artifact["id"]);
-  if (!artifact || artifact.project !== input.project || asDate(artifact.expiresAt) <= clock.now().getTime()) {
-    throw new FabricError("not_found", "profile update avatar artifact was not found for this project", 404);
-  }
-  if (!artifact.mimeType.toLowerCase().startsWith("image/") || artifact.sizeBytes < 1 || artifact.sizeBytes > 10 * 1024 * 1024) {
-    throw new FabricError("validation_failed", "profile update avatar artifact must be a non-empty image no larger than 10 MiB", 400);
-  }
 }
 
 const safeArtifactObjectKey = /^[a-z0-9][a-z0-9/_\-.]{0,511}$/;
@@ -304,6 +268,7 @@ export class BrowserScheduler {
   readonly #clock: Clock;
   readonly #capabilitySigner: CapabilitySigner;
   readonly #recipes: RecipeRegistry;
+  readonly #catalog: FabricCatalog;
   readonly #maxActiveBrowserLeases: number;
   readonly #reconnectGraceSeconds: number;
   readonly #assignmentClaimTimeoutSeconds: number;
@@ -316,7 +281,8 @@ export class BrowserScheduler {
     this.#store = options.store ?? new InMemoryFabricStore();
     this.#clock = options.clock ?? new SystemClock();
     this.#capabilitySigner = options.capabilitySigner ?? new CapabilitySigner({ secret: "development-only-capability-secret-change-me", clock: this.#clock });
-    this.#recipes = options.recipes ?? new RecipeRegistry();
+    this.#catalog = options.catalog ?? emptyFabricCatalog;
+    this.#recipes = new RecipeRegistry([...builtInRecipes, ...this.#catalog.recipes]);
     this.#maxActiveBrowserLeases = options.maxActiveBrowserLeases ?? DEFAULT_ACTIVE_BROWSER_LEASES;
     this.#reconnectGraceSeconds = options.reconnectGraceSeconds ?? 60;
     this.#assignmentClaimTimeoutSeconds = options.assignmentClaimTimeoutSeconds ?? 30;
@@ -341,7 +307,7 @@ export class BrowserScheduler {
     return this.#store;
   }
 
-  /** Shared authoritative clock for artifact retention and companion capability boundaries. */
+  /** Shared authoritative clock for artifact retention and media capability boundaries. */
   public now(): Date {
     return new Date(this.#clock.now().getTime());
   }
@@ -353,15 +319,19 @@ export class BrowserScheduler {
 
   public async bootstrap(input: { projects?: readonly { id: ProjectId; name: string }[]; principals?: readonly Principal[] } = {}): Promise<void> {
     await this.#store.transact((state) => {
-      for (const policy of builtInEgressPolicies) state.egressPolicies.set(policy.ref, structuredClone(policy));
+      for (const policy of [...builtInEgressPolicies, ...this.#catalog.egressPolicies]) state.egressPolicies.set(policy.ref, structuredClone(policy));
       for (const recipe of this.#recipes.list()) state.recipes.set(recipe.ref, structuredClone(recipe));
-      for (const challengeSet of builtInChallengeSets) state.challengeSets.set(challengeSet.ref, structuredClone(challengeSet));
+      for (const challengeSet of [...builtInChallengeSets, ...this.#catalog.challengeSets]) state.challengeSets.set(challengeSet.ref, structuredClone(challengeSet));
       for (const recipe of state.recipes.values()) {
         if (recipe.challengeHandlerSetRef && !state.challengeSets.has(recipe.challengeHandlerSetRef)) {
           throw new Error(`recipe ${recipe.ref} references a missing challenge handler set ${recipe.challengeHandlerSetRef}`);
         }
       }
       state.artifactPolicies.set(defaultArtifactRef, this.#recipes.getArtifactPolicy(defaultArtifactRef));
+      // Catalog projects are created once; a restart never rewrites an existing project.
+      for (const project of this.#catalog.projects) {
+        if (!state.projects.has(project.id)) state.projects.set(project.id, { id: project.id, name: project.name, active: true, createdAt: now(this.#clock) });
+      }
       for (const project of input.projects ?? []) {
         if (!/^project_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(project.id) || typeof project.name !== "string" || project.name.length < 1 || project.name.length > 255) throw new FabricError("validation_failed", "project identity is invalid", 400);
         state.projects.set(project.id, { id: project.id, name: project.name, active: true, createdAt: now(this.#clock) });
@@ -447,7 +417,7 @@ export class BrowserScheduler {
   /**
    * Resolve one immutable artifact through the project authorization boundary.
    *
-   * Companions (notably Companion) must never accept an artifact id and then read an
+   * Fabric-owned services must never accept an artifact id and then read an
    * arbitrary object-store key.  They first obtain this project-scoped record and
    * then use ArtifactCollector.read(), which verifies the object bytes against the
    * durable digest/size/MIME metadata.
@@ -532,7 +502,7 @@ export class BrowserScheduler {
     });
   }
 
-  /** Return an immutable artifact policy for trusted companions. */
+  /** Return an immutable artifact policy for trusted Fabric services. */
   public async getArtifactPolicy(policyRef: ArtifactPolicy["ref"], actor?: Principal): Promise<ArtifactPolicy> {
     return this.#store.read((state) => {
       this.#kernel.authorizeFabricAdmin(state, actor, "read_artifact_policy", policyRef);
@@ -544,14 +514,13 @@ export class BrowserScheduler {
     return this.#store.transact((state) => {
       this.#kernel.authorizeFabricAdmin(state, actor, "register_worker", worker.id);
       if (!/^worker_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(worker.id) || !worker.certificateFingerprint || worker.certificateFingerprint.length > 512) throw new FabricError("validation_failed", "worker identity is invalid", 400);
-      for (const family of worker.capabilities.runtimeFamilies) if (!["chromium-cdp", "patchright", "rebrowser-puppeteer", "playwright-social", "companion", "media-relay", "media-playback"].includes(family)) throw new FabricError("validation_failed", "worker runtime capability is invalid", 400);
+      for (const family of worker.capabilities.runtimeFamilies) if (!(runtimeFamilies as readonly string[]).includes(family)) throw new FabricError("validation_failed", "worker runtime capability is invalid", 400);
       if (worker.capabilities.runtimeFamilies.includes("media-playback") && !worker.mediaPlaybackEndpoint) {
         throw new FabricError("validation_failed", "media-playback worker requires a private mediaPlaybackEndpoint", 400);
       }
       if (!worker.volumeNames.every(isSafeDockerVolumeName) || new Set(worker.volumeNames).size !== worker.volumeNames.length) throw new FabricError("validation_failed", "worker volumes must be unique safe Docker volume names", 400);
-      if (worker.capacity < 0 || worker.capacity > 4) throw new FabricError("validation_failed", "worker capacity must be from 0 to 4", 400);
+      if (!Number.isInteger(worker.capacity) || worker.capacity < 0 || worker.capacity > MAX_WORKER_BROWSER_LEASES) throw new FabricError("validation_failed", `worker capacity must be from 0 to ${MAX_WORKER_BROWSER_LEASES}`, 400);
       if (worker.isLocal && worker.capacity !== 1) throw new FabricError("validation_failed", "the federated local worker must have exactly one interactive lease capacity", 400);
-      if (!worker.isLocal && worker.capacity > 3) throw new FabricError("validation_failed", "managed fabric-host workers may host at most three leases in aggregate", 400);
       if (worker.capacity > worker.resourceLimits.maxBrowserLeases) throw new FabricError("validation_failed", "worker capacity exceeds its declared browser resource limit", 400);
       if (worker.mediaCapacity !== undefined && (!Number.isInteger(worker.mediaCapacity) || worker.mediaCapacity < 0 || worker.mediaCapacity > 64)) throw new FabricError("validation_failed", "worker media capacity is outside safe bounds", 400);
       const timestamp = now(this.#clock);
@@ -580,81 +549,46 @@ export class BrowserScheduler {
   }
 
   /**
-   * Enable the one additional capability required for a managed browser worker
-   * to host a reviewed interactive recipe. This is deliberately narrower than
-   * generic worker mutation: identity, endpoint, capacity, recipes, profile
-   * families, volumes, and every other capability remain immutable.
-   */
-  public async enableManagedWorkerInteractiveCapability(workerId: Worker["id"], actor?: Principal): Promise<Worker> {
-    return this.#store.transact((state) => {
-      this.#kernel.authorizeFabricAdmin(state, actor, "enable_managed_worker_interactive", workerId);
-      const worker = this.#kernel.worker(state, workerId);
-      if (worker.isLocal) throw new FabricError("validation_failed", "the federated local worker already owns its interactive capability", 400);
-      if (worker.capabilities.supportsInteractive) return structuredClone(worker);
-      if ([...state.leases.values()].some((lease) => lease.workerId === worker.id && lease.status === "active")) {
-        throw new FabricError("conflict", "cannot enable interactive capability while the worker has an active lease", 409);
-      }
-      worker.capabilities = { ...worker.capabilities, supportsInteractive: true };
-      worker.updatedAt = now(this.#clock);
-      state.workers.set(worker.id, worker);
-      this.#kernel.event(state, undefined, { kind: "worker", id: worker.id }, "worker.interactive_enabled", {});
-      this.#kernel.audit(state, actor, undefined, "worker.interactive_enabled", { kind: "worker", id: worker.id }, "succeeded", {});
-      return structuredClone(worker);
-    });
-  }
-
-  /**
-   * Migrate an idle managed worker from Chromium's legacy direct DevTools port
-   * to Fabric's fixed private bridge. This deliberately permits one exact
-   * endpoint transition only; generic worker endpoint changes remain immutable.
-   */
-  public async migrateManagedWorkerCdpBridgeEndpoint(workerId: Worker["id"], actor?: Principal): Promise<Worker> {
-    return this.#store.transact((state) => {
-      this.#kernel.authorizeFabricAdmin(state, actor, "migrate_managed_worker_cdp_bridge", workerId);
-      const worker = this.#kernel.worker(state, workerId);
-      if (worker.isLocal) throw new FabricError("validation_failed", "the federated local worker does not use the managed CDP bridge", 400);
-      if (worker.cdpRelayEndpoint === "http://fabric-browser-{leaseId}:9223") return structuredClone(worker);
-      if (worker.cdpRelayEndpoint !== "http://fabric-browser-{leaseId}:9222") {
-        throw new FabricError("conflict", "managed worker does not have the reviewed legacy CDP endpoint", 409);
-      }
-      if ([...state.leases.values()].some((lease) => lease.workerId === worker.id && lease.status === "active")) {
-        throw new FabricError("conflict", "cannot migrate the managed CDP bridge while the worker has an active lease", 409);
-      }
-      worker.cdpRelayEndpoint = "http://fabric-browser-{leaseId}:9223";
-      worker.updatedAt = now(this.#clock);
-      state.workers.set(worker.id, worker);
-      this.#kernel.event(state, undefined, { kind: "worker", id: worker.id }, "worker.cdp_bridge_migrated", {});
-      this.#kernel.audit(state, actor, undefined, "worker.cdp_bridge_migrated", { kind: "worker", id: worker.id }, "succeeded", {});
-      return structuredClone(worker);
-    });
-  }
-
-  /**
    * Resize an idle managed worker: how many browsers it hosts and the limits each one gets. A
    * running browser keeps the limits it started with, so the worker must be idle; identity,
    * endpoints, recipes, profile families and volumes stay immutable.
    */
-  public async resizeManagedWorker(workerId: Worker["id"], size: Pick<Worker, "capacity" | "resourceLimits">, actor?: Principal): Promise<Worker> {
+  public async reconfigureManagedWorker(workerId: Worker["id"], change: ManagedWorkerReconfiguration, actor?: Principal): Promise<Worker> {
     return this.#store.transact((state) => {
-      this.#kernel.authorizeFabricAdmin(state, actor, "resize_managed_worker", workerId);
+      this.#kernel.authorizeFabricAdmin(state, actor, "reconfigure_managed_worker", workerId);
       const worker = this.#kernel.worker(state, workerId);
       if (worker.isLocal) throw new FabricError("validation_failed", "the federated local worker hosts exactly one browser", 400);
-      const { capacity, resourceLimits } = size;
-      if (!Number.isInteger(capacity) || capacity < 1 || capacity > 3 || capacity > resourceLimits.maxBrowserLeases) {
-        throw new FabricError("validation_failed", "worker capacity must be 1 to 3 and within its browser resource limit", 400);
+      const { capacity, resourceLimits, recipeRefs, supportedProfileFamilies } = change;
+      if (!Number.isInteger(capacity) || capacity < 0 || capacity > MAX_WORKER_BROWSER_LEASES || capacity > resourceLimits.maxBrowserLeases) {
+        throw new FabricError("validation_failed", `worker capacity must be 0 to ${MAX_WORKER_BROWSER_LEASES} and within its browser resource limit`, 400);
       }
-      if (worker.capacity === capacity && canonicalJson(worker.resourceLimits) === canonicalJson(resourceLimits)) return structuredClone(worker);
+      if (recipeRefs.some((ref) => !/^recipe_[A-Za-z0-9][A-Za-z0-9_.-]*@\d+$/.test(ref)) || new Set(recipeRefs).size !== recipeRefs.length) {
+        throw new FabricError("validation_failed", "worker recipe refs must be unique recipe references", 400);
+      }
+      if (supportedProfileFamilies.some((family) => !/^[a-z0-9][a-z0-9-]{0,62}$/.test(family)) || new Set(supportedProfileFamilies).size !== supportedProfileFamilies.length) {
+        throw new FabricError("validation_failed", "worker profile families must be unique names", 400);
+      }
+      const current = { capacity: worker.capacity, resourceLimits: worker.resourceLimits, recipeRefs: [...worker.capabilities.recipeRefs].sort(), supportedProfileFamilies: [...worker.capabilities.supportedProfileFamilies].sort() };
+      const desired = { capacity, resourceLimits, recipeRefs: [...recipeRefs].sort(), supportedProfileFamilies: [...supportedProfileFamilies].sort() };
+      if (canonicalJson(current) === canonicalJson(desired)) return structuredClone(worker);
       if ([...state.leases.values()].some((lease) => lease.workerId === worker.id && lease.status === "active")) {
-        throw new FabricError("conflict", "cannot resize a worker while it has an active lease", 409);
+        throw new FabricError("conflict", "cannot reconfigure a worker while it has an active lease", 409);
       }
-      const previous = { capacity: worker.capacity, maxBrowserLeases: worker.resourceLimits.maxBrowserLeases };
       worker.capacity = capacity;
       worker.resourceLimits = structuredClone(resourceLimits);
+      worker.capabilities = { ...worker.capabilities, recipeRefs: [...recipeRefs], supportedProfileFamilies: [...supportedProfileFamilies] };
       worker.updatedAt = now(this.#clock);
       state.workers.set(worker.id, worker);
-      const details = { previousCapacity: previous.capacity, capacity, previousMaxBrowserLeases: previous.maxBrowserLeases, maxBrowserLeases: resourceLimits.maxBrowserLeases };
-      this.#kernel.event(state, undefined, { kind: "worker", id: worker.id }, "worker.resized", details);
-      this.#kernel.audit(state, actor, undefined, "worker.resized", { kind: "worker", id: worker.id }, "succeeded", details);
+      const details = {
+        previousCapacity: current.capacity,
+        capacity,
+        previousMaxBrowserLeases: current.resourceLimits.maxBrowserLeases,
+        maxBrowserLeases: resourceLimits.maxBrowserLeases,
+        recipes: recipeRefs.length,
+        profileFamilies: supportedProfileFamilies.length,
+      };
+      this.#kernel.event(state, undefined, { kind: "worker", id: worker.id }, "worker.reconfigured", details);
+      this.#kernel.audit(state, actor, undefined, "worker.reconfigured", { kind: "worker", id: worker.id }, "succeeded", details);
       return structuredClone(worker);
     });
   }
@@ -703,7 +637,7 @@ export class BrowserScheduler {
       const worker = this.#kernel.worker(state, workerId);
       this.#kernel.authorizeWorker(state, actor, worker, "heartbeat_worker");
       if (resource?.capacity !== undefined) {
-        if (resource.capacity < worker.activeLeases || resource.capacity > (worker.isLocal ? 1 : 3)) {
+        if (resource.capacity < worker.activeLeases || resource.capacity > (worker.isLocal ? 1 : MAX_WORKER_BROWSER_LEASES)) {
           throw new FabricError("validation_failed", "worker capacity is outside permitted bounds", 400);
         }
         worker.capacity = resource.capacity;
@@ -870,8 +804,6 @@ export class BrowserScheduler {
       const recipe = this.#kernel.recipe(state, input.recipeRef) as RecipeDefinition;
       if (recipe.access !== "typed_job") throw new FabricError("validation_failed", `${recipe.ref} is raw-CDP only`, 400);
       validateTypedOperation(recipe, input.operation);
-      const approvedBy = assertProfileUpdateApproval(this.#kernel, state, recipe, input, actor);
-      if (recipe.family === "profile-update-companion") assertProfileUpdateAvatar(state, input, this.#clock);
       if (isMediaRuntime(recipe.runtime)) {
         if (input.profileRef !== undefined) throw new FabricError("validation_failed", "media-only work must not attach a browser profile", 400);
         const media = recipe.runtime === "media-relay"
@@ -924,7 +856,7 @@ export class BrowserScheduler {
         createdAt: timestamp
       });
       this.#kernel.event(state, job.project, { kind: "job", id: job.id }, "job.queued", { recipe: job.recipeRef, runtime: job.runtime });
-      this.#kernel.audit(state, actor, job.project, "job.created", { kind: "job", id: job.id }, "succeeded", { recipe: job.recipeRef, ...(approvedBy === undefined ? {} : { approvedBy }) });
+      this.#kernel.audit(state, actor, job.project, "job.created", { kind: "job", id: job.id }, "succeeded", { recipe: job.recipeRef });
       return jobResponse(job);
     });
   }
@@ -1509,7 +1441,6 @@ export class BrowserScheduler {
       job.status = "cancelled";
       job.updatedAt = now(this.#clock);
       job.failureReason = "cancelled by client";
-      job.companionRunId = undefined;
       state.jobs.set(job.id, job);
       if (job.leaseId) this.#kernel.releaseLease(state, this.#kernel.lease(state, job.leaseId));
       this.#kernel.releaseMediaTask(state, job);
@@ -1549,10 +1480,6 @@ export class BrowserScheduler {
         job.status = "queued";
         job.workerId = undefined;
         job.leaseId = undefined;
-        // A Companion run is bound to the old browser address. If that lease was
-        // lost, a new allocation must create a fresh companion run rather than
-        // reconnecting the old run to a different profile/browser.
-        job.companionRunId = undefined;
       }
       job.updatedAt = now(this.#clock);
       state.jobs.set(job.id, job);
@@ -1572,7 +1499,6 @@ export class BrowserScheduler {
       assertDurablePayload(result);
       job.status = "succeeded";
       job.result = structuredClone(result);
-      job.companionRunId = undefined;
       job.updatedAt = now(this.#clock);
       state.jobs.set(job.id, job);
       if (job.leaseId) this.#kernel.releaseLease(state, this.#kernel.lease(state, job.leaseId));
@@ -1671,9 +1597,6 @@ export class BrowserScheduler {
       }
       job.status = status;
       job.failureReason = safeFailureReason(reason);
-      // An awaiting-manual job keeps its companion run so resume can poll the same
-      // execution. All terminal outcomes discard the external identity.
-      if (status !== "awaiting_manual") job.companionRunId = undefined;
       job.updatedAt = now(this.#clock);
       state.jobs.set(job.id, job);
       if (status !== "awaiting_manual" && job.leaseId) this.#kernel.releaseLease(state, this.#kernel.lease(state, job.leaseId));
@@ -1681,23 +1604,6 @@ export class BrowserScheduler {
       if (status !== "awaiting_manual") this.#kernel.finishAttempt(state, job, "failed");
       if (status !== "awaiting_manual") this.#kernel.cancelInputRequests(state, { jobId: job.id });
       this.#kernel.event(state, job.project, { kind: "job", id: job.id }, `job.${status}`, { reason: job.failureReason });
-      return jobResponse(job);
-    });
-  }
-
-  /** Persist a non-secret companion run identity for restart-safe polling/resume. */
-  public async setJobCompanionRunId(jobId: JobId, companionRunId: string | undefined, actor?: Principal): Promise<JobResponse> {
-    return this.#store.transact((state) => {
-      const job = this.#kernel.job(state, jobId);
-      this.#kernel.authorizeAssignedWorker(state, actor, job.workerId, "set_companion_run_id", jobId);
-      if (companionRunId !== undefined && !/^[A-Za-z0-9_-]{1,255}$/.test(companionRunId)) {
-        throw new FabricError("validation_failed", "companion run ID is invalid", 400);
-      }
-      if (isTerminalJob(job.status)) throw new FabricError("invalid_state", `job is already ${job.status}`, 409);
-      job.companionRunId = companionRunId;
-      job.updatedAt = now(this.#clock);
-      state.jobs.set(job.id, job);
-      this.#kernel.event(state, job.project, { kind: "job", id: job.id }, companionRunId ? "job.companion_attached" : "job.companion_detached", {});
       return jobResponse(job);
     });
   }

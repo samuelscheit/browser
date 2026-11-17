@@ -118,25 +118,25 @@ describe("remote session defaults", () => {
 
   test("--fresh drops the profile; explicit choices are validated against /v1/me", () => {
     expect(sessionInput(agentIdentity(), remoteRequest({ fresh: true })).profileRef).toBeUndefined();
-    expect(sessionInput(agentIdentity(), remoteRequest({ egress: "egress_tor-egress@1" })).egressPolicyRef).toBe("egress_tor-egress@1" as never);
-    expect(() => sessionInput(agentIdentity(), remoteRequest({ profile: "profile_nope" }))).toThrow(/Unknown profile profile_nope. Available: profile_agent, profile_chat/);
+    expect(sessionInput(agentIdentity(), remoteRequest({ egress: "egress_tor@1" })).egressPolicyRef).toBe("egress_tor@1" as never);
+    expect(() => sessionInput(agentIdentity(), remoteRequest({ profile: "profile_nope" }))).toThrow(/Unknown profile profile_nope. Available: profile_agent, profile_example_kiosk/);
     expect(() => sessionInput(agentIdentity(), remoteRequest({ recipe: "recipe_nope@1" }))).toThrow(/Unknown recipe/);
-    expect(() => sessionInput(agentIdentity(), remoteRequest({ recipe: "recipe_reporting-reporting@1" }))).toThrow(/typed-job recipe/);
-    expect(() => sessionInput(agentIdentity(), remoteRequest({ egress: "egress_nope@1" }))).toThrow(/Unknown egress policy egress_nope@1. Available: egress_direct-egress@1, egress_tor-egress@1/);
-    expect(() => sessionInput(agentIdentity(), remoteRequest({ project: "project_chat" }))).toThrow(/no access to project_chat/);
+    expect(() => sessionInput(agentIdentity(), remoteRequest({ recipe: "recipe_example-fetch@1" }))).toThrow(/typed-job recipe/);
+    expect(() => sessionInput(agentIdentity(), remoteRequest({ egress: "egress_nope@1" }))).toThrow(/Unknown egress policy egress_nope@1. Available: egress_direct@1, egress_tor@1/);
+    expect(() => sessionInput(agentIdentity(), remoteRequest({ project: "project_example" }))).toThrow(/no access to project_example/);
   });
 
   test("a recipe for another profile family selects that family's profile, or none", () => {
     const identity = agentIdentity();
-    identity.projects.push({ id: "project_chat", name: "CHAT" } as never);
-    expect(sessionInput(identity, remoteRequest({ project: "project_chat", recipe: "recipe_chat-browser-controller@1" })).profileRef).toBe("profile_chat" as never);
-    expect(sessionInput(identity, remoteRequest({ project: "project_chat" })).profileRef).toBeUndefined();
+    identity.projects.push({ id: "project_example", name: "Example" } as never);
+    expect(sessionInput(identity, remoteRequest({ project: "project_example", recipe: "recipe_example-kiosk@1" })).profileRef).toBe("profile_example_kiosk" as never);
+    expect(sessionInput(identity, remoteRequest({ project: "project_example" })).profileRef).toBeUndefined();
   });
 
   test("several projects require --project", () => {
     const identity = agentIdentity();
-    identity.projects.push({ id: "project_chat", name: "CHAT" } as never);
-    expect(() => sessionInput(identity, remoteRequest())).toThrow(/several projects \(project_agent, project_chat\); pass --project/);
+    identity.projects.push({ id: "project_example", name: "Example" } as never);
+    expect(() => sessionInput(identity, remoteRequest())).toThrow(/several projects \(project_agent, project_example\); pass --project/);
   });
 });
 

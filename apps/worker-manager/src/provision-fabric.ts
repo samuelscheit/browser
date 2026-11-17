@@ -45,12 +45,8 @@ export interface ProvisionPlan {
   projectsToCreate: readonly ProjectId[];
   principalsToCreate: readonly Principal["id"][];
   workersToCreate: readonly Worker["id"][];
-  /** Narrow, quiescent upgrade from a managed CDP worker to interactive CDP support. */
-  workersToEnableInteractive: readonly Worker["id"][];
-  /** Narrow, quiescent migration from Chromium's legacy raw DevTools port to the Fabric bridge. */
-  workersToMigrateCdpBridge: readonly Worker["id"][];
-  /** Quiescent change of a managed worker's browser capacity and per-browser resource limits. */
-  workersToResize: readonly Worker["id"][];
+  /** Quiescent change of a managed worker's capacity, resource limits, recipes or profile families. */
+  workersToReconfigure: readonly Worker["id"][];
   profilesToCreate: readonly Profile["ref"][];
 }
 
@@ -204,36 +200,22 @@ function staticWorkerEqual(left: Worker, right: ProvisionWorker): boolean {
   return canonicalJson(staticWorkerIdentity(left)) === canonicalJson(staticWorkerIdentity(right));
 }
 
-type ManagedWorkerUpgrade = { enableInteractive: boolean; migrateCdpBridge: boolean; resize: boolean };
-
 /**
- * The provisioner normally treats every worker field as immutable. There are
- * three reviewed managed-worker upgrades: enabling interactive mode, moving the
- * direct Chromium DevTools endpoint from 9222 to Fabric's loopback-backed
- * private bridge on 9223, and resizing browser capacity with its resource
- * limits. Normalize only those requested transitions back to their current
- * values, then require every remaining static identity field to match exactly.
- * This allows the upgrades in one idle rollout without admitting any generic
- * worker mutation (identity, endpoints, recipes, profile families and volumes
- * stay immutable).
+ * The provisioner treats every worker field as immutable except one reviewed managed-worker
+ * change (BrowserScheduler.reconfigureManagedWorker): capacity, resource limits, served recipes and
+ * profile families. Normalize only those fields back to the current values, then require every
+ * remaining static identity field to match exactly, so identity, endpoints, runtimes,
+ * interactivity and volumes stay immutable.
  */
-function managedWorkerUpgrade(existing: Worker, desired: ProvisionWorker): ManagedWorkerUpgrade | undefined {
-  if (existing.isLocal || desired.isLocal) return undefined;
-  const enableInteractive = !existing.capabilities.supportsInteractive && desired.capabilities.supportsInteractive;
-  if (existing.capabilities.supportsInteractive !== desired.capabilities.supportsInteractive && !enableInteractive) return undefined;
-  const migrateCdpBridge = existing.cdpRelayEndpoint === "http://fabric-browser-{leaseId}:9222" && desired.cdpRelayEndpoint === "http://fabric-browser-{leaseId}:9223";
-  if (existing.cdpRelayEndpoint !== desired.cdpRelayEndpoint && !migrateCdpBridge) return undefined;
-  const resize = existing.capacity !== desired.capacity || canonicalJson(existing.resourceLimits) !== canonicalJson(desired.resourceLimits);
-  if (!enableInteractive && !migrateCdpBridge && !resize) return undefined;
+function isManagedWorkerReconfiguration(existing: Worker, desired: ProvisionWorker): boolean {
+  if (existing.isLocal || desired.isLocal) return false;
   const normalized = {
     ...desired,
-    ...(resize ? { capacity: existing.capacity, resourceLimits: existing.resourceLimits } : {}),
-    ...(migrateCdpBridge ? { cdpRelayEndpoint: existing.cdpRelayEndpoint } : {}),
-    ...(enableInteractive ? { capabilities: { ...desired.capabilities, supportsInteractive: existing.capabilities.supportsInteractive } } : {}),
+    capacity: existing.capacity,
+    resourceLimits: existing.resourceLimits,
+    capabilities: { ...desired.capabilities, recipeRefs: existing.capabilities.recipeRefs, supportedProfileFamilies: existing.capabilities.supportedProfileFamilies },
   } satisfies ProvisionWorker;
-  return canonicalJson(staticWorkerIdentity(existing)) === canonicalJson(staticWorkerIdentity(normalized))
-    ? { enableInteractive, migrateCdpBridge, resize }
-    : undefined;
+  return canonicalJson(staticWorkerIdentity(existing)) === canonicalJson(staticWorkerIdentity(normalized));
 }
 
 function workerHasActiveLease(state: Awaited<ReturnType<BrowserScheduler["store"]["snapshot"]>>, workerId: Worker["id"]): boolean {
@@ -268,9 +250,7 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
   const projectsToCreate: ProjectId[] = [];
   const principalsToCreate: Principal["id"][] = [];
   const workersToCreate: Worker["id"][] = [];
-  const workersToEnableInteractive: Worker["id"][] = [];
-  const workersToMigrateCdpBridge: Worker["id"][] = [];
-  const workersToResize: Worker["id"][] = [];
+  const workersToReconfigure: Worker["id"][] = [];
   const profilesToCreate: Profile["ref"][] = [];
   for (const project of manifest.projects) {
     const existing = state.projects.get(project.id);
@@ -287,11 +267,8 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
     const existing = state.workers.get(worker.id);
     if (!existing) workersToCreate.push(worker.id);
     else if (!staticWorkerEqual(existing, worker)) {
-      const upgrade = managedWorkerUpgrade(existing, worker);
-      if (!upgrade || workerHasActiveLease(state, worker.id)) throw new FabricError("conflict", `existing worker ${worker.id} differs from provisioning manifest`, 409);
-      if (upgrade.enableInteractive) workersToEnableInteractive.push(worker.id);
-      if (upgrade.migrateCdpBridge) workersToMigrateCdpBridge.push(worker.id);
-      if (upgrade.resize) workersToResize.push(worker.id);
+      if (!isManagedWorkerReconfiguration(existing, worker) || workerHasActiveLease(state, worker.id)) throw new FabricError("conflict", `existing worker ${worker.id} differs from provisioning manifest`, 409);
+      workersToReconfigure.push(worker.id);
     }
   }
   for (const profile of manifest.profiles) {
@@ -299,7 +276,7 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
     if (!existing) profilesToCreate.push(profile.ref);
     else if (!staticProfileEqual(existing, profile)) throw new FabricError("conflict", `existing profile ${profile.ref} differs from provisioning manifest`, 409);
   }
-  const plan: ProvisionPlan = { projectsToCreate, principalsToCreate, workersToCreate, workersToEnableInteractive, workersToMigrateCdpBridge, workersToResize, profilesToCreate };
+  const plan: ProvisionPlan = { projectsToCreate, principalsToCreate, workersToCreate, workersToReconfigure, profilesToCreate };
   if (dryRun) return plan;
   // Creation order is important: projects -> principals -> workers -> profiles. Refresh a snapshot
   // between stages because every method intentionally uses a serialized transaction.
@@ -308,14 +285,15 @@ export async function provisionManifest(runtime: ProvisionRuntime, manifest: Pro
   for (const worker of manifest.workers) {
     if (workersToCreate.includes(worker.id)) await runtime.scheduler.registerWorker(worker, bootstrapAdmin);
   }
-  for (const workerId of workersToEnableInteractive) {
-    await runtime.scheduler.enableManagedWorkerInteractiveCapability(workerId, bootstrapAdmin);
-  }
-  for (const workerId of workersToMigrateCdpBridge) {
-    await runtime.scheduler.migrateManagedWorkerCdpBridgeEndpoint(workerId, bootstrapAdmin);
-  }
   for (const worker of manifest.workers) {
-    if (workersToResize.includes(worker.id)) await runtime.scheduler.resizeManagedWorker(worker.id, { capacity: worker.capacity, resourceLimits: worker.resourceLimits }, bootstrapAdmin);
+    if (workersToReconfigure.includes(worker.id)) {
+      await runtime.scheduler.reconfigureManagedWorker(worker.id, {
+        capacity: worker.capacity,
+        resourceLimits: worker.resourceLimits,
+        recipeRefs: worker.capabilities.recipeRefs,
+        supportedProfileFamilies: worker.capabilities.supportedProfileFamilies,
+      }, bootstrapAdmin);
+    }
   }
   for (const profile of manifest.profiles) {
     if (profilesToCreate.includes(profile.ref)) await runtime.scheduler.createProfile(profile, bootstrapAdmin);

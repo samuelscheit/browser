@@ -84,7 +84,7 @@ describe("PostgreSQL state projection", () => {
   test("binds text failure reasons as text and JSON results as JSON", async () => {
     const client = new RecordingSqlClient();
     const store = new PostgresFabricStore(client, "-- schema");
-    const job = (id: string, fields: Record<string, unknown>) => record<Job>({ id, status: "failed", metadata: { label: "browser" }, operation: { operation: "fetch_news" }, ...fields });
+    const job = (id: string, fields: Record<string, unknown>) => record<Job>({ id, status: "failed", metadata: { label: "browser" }, operation: { operation: "fetch_page" }, ...fields });
     await store.transact((draft) => {
       draft.jobs.set("job_failed", job("job_failed", { failureReason: "browser lease heartbeat expired" }));
       draft.jobs.set("job_done", job("job_done", { status: "succeeded", result: { title: "browser", nested: { ok: true, missing: null } } }));
@@ -113,16 +113,16 @@ describe("PostgreSQL state projection", () => {
     expect([...(await store.snapshot()).events.keys()].map(String)).toEqual(["event_session"]);
   });
 
-  test("compacts worker events already present in a legacy snapshot without re-appending them", async () => {
+  test("drops worker events found in a stored snapshot without re-appending them", async () => {
     const client = new RecordingSqlClient();
-    const legacy = new PostgresFabricStore(client, "-- schema");
-    // Seed a snapshot as an earlier release wrote it: worker events inside the hot state.
+    const store = new PostgresFabricStore(client, "-- schema");
+    // Seed a snapshot that still carries worker events inside the hot state.
     await client.query("INSERT INTO fabric_state_snapshots(sequence, state) VALUES ($1, $2::jsonb)", [1, JSON.stringify({
       events: [event("event_worker", "worker", 1), event("event_session", "browser_session", 2)],
       eventSequence: 2,
     })]);
     client.statements = [];
-    await legacy.transact((draft) => {
+    await store.transact((draft) => {
       draft.sessions.set("browser-session_a", session("browser-session_a", "queued"));
     });
 

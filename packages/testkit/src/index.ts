@@ -1,6 +1,56 @@
-import { createId, type Principal, type Profile, type ProjectId, type Worker } from "@browser-fabric/contracts";
-import { BrowserScheduler, FakeClock, InMemoryFabricStore, CapabilitySigner, MemoryEphemeralInputVault } from "@browser-fabric/control-plane";
+import { createId, runtimeFamilies, type Principal, type Profile, type ProjectId, type Worker } from "@browser-fabric/contracts";
+import { BrowserScheduler, FakeClock, InMemoryFabricStore, CapabilitySigner, MemoryEphemeralInputVault, parseFabricCatalog } from "@browser-fabric/control-plane";
 import { builtInRecipes } from "@browser-fabric/recipes";
+
+/**
+ * The catalog test schedulers load: a typed browser recipe (recipe_example-fetch@1), a raw recipe
+ * without token solving (recipe_example-guardian-only@1) and two
+ * policies that exercise listener selection (egress_example-affinity@1 with a direct-exception
+ * host, egress_example-static-direct@1 with direct static assets).
+ */
+export const exampleCatalogDocument = {
+  version: 1,
+  recipes: [
+    {
+      name: "example-fetch",
+      runtime: "chromium-cdp",
+      profileFamily: "default",
+      mode: "headless",
+      access: "typed_job",
+      challengeHandlerSetRef: "challenge_captcha-solver@1",
+      typedOperations: [{ name: "fetch_page", requiredFields: ["url"], allowedFields: ["url", "serialized", "cookieJarRef"], secretInputFields: ["cookie"] }],
+      maxAttempts: 2,
+    },
+    { name: "example-guardian-only", runtime: "chromium-cdp", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_guardian@1" },
+  ],
+  egressPolicies: [
+    {
+      name: "example-affinity",
+      routes: {
+        ...Object.fromEntries(["document", "api", "websocket", "static_asset", "provider_handshake", "media_manifest", "media_key", "media_segment", "media_range"].map((trafficClass) => [trafficClass, { kind: "proxy", proxyRef: "affinity", protocol: "socks5h" }])),
+        direct_exception: { kind: "direct" },
+      },
+      constraints: { preserveProxyAffinity: true, allowDirectMediaRelay: true },
+      sidecar: { listener: { id: "affinity", port: 11010 }, directListener: { id: "direct", port: 11000 } },
+      directExceptionHostnames: ["direct.example"],
+    },
+    {
+      name: "example-static-direct",
+      routes: {
+        document: { kind: "proxy", proxyRef: "upstream", protocol: "https" },
+        api: { kind: "proxy", proxyRef: "upstream", protocol: "https" },
+        websocket: { kind: "proxy", proxyRef: "upstream", protocol: "https" },
+        browser_download: { kind: "proxy", proxyRef: "upstream", protocol: "https" },
+        static_asset: { kind: "direct" },
+        direct_exception: { kind: "direct" },
+      },
+      constraints: { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: true },
+      sidecar: { listener: { id: "proxy", port: 11001 }, directListener: { id: "direct", port: 11000 } },
+    },
+  ],
+} as const;
+
+export const exampleCatalog = parseFabricCatalog(exampleCatalogDocument);
 
 export const TEST_PROJECT = "project_test" as ProjectId;
 export const TEST_PRINCIPAL: Principal = {
@@ -23,12 +73,11 @@ export function makeWorker(overrides: Partial<Worker> = {}): Worker {
     cdpRelayEndpoint: overrides.cdpRelayEndpoint ?? "wss://worker.internal/cdp",
     ...(overrides.mediaPlaybackEndpoint === undefined ? { mediaPlaybackEndpoint: "http://media-worker.internal:8084" } : { mediaPlaybackEndpoint: overrides.mediaPlaybackEndpoint }),
     capabilities: overrides.capabilities ?? {
-      runtimeFamilies: ["chromium-cdp", "patchright", "rebrowser-puppeteer", "playwright-social", "companion", "media-relay", "media-playback"],
-      recipeRefs: builtInRecipes.map((recipe) => recipe.ref),
+      runtimeFamilies: [...runtimeFamilies],
+      recipeRefs: [...builtInRecipes, ...exampleCatalog.recipes].map((recipe) => recipe.ref),
       browserVersions: { chromium: "stable" },
       supportsInteractive: overrides.isLocal ?? false,
-      supportsCompanionCompanion: true,
-      supportedProfileFamilies: ["reporting-reporting", "news-browser", "media", "social", "avatar-account", "chat", "interactive", "account-signup"]
+      supportedProfileFamilies: ["default", "interactive", "media"]
     },
     capacity: overrides.capacity ?? (overrides.isLocal ? 1 : 3),
     activeLeases: overrides.activeLeases ?? 0,
@@ -51,7 +100,7 @@ export function makeProfile(worker: Worker, overrides: Partial<Profile> = {}): P
     grants: overrides.grants ?? [TEST_PROJECT],
     workerId: worker.id,
     volumeName: overrides.volumeName ?? worker.volumeNames[0] ?? "profile-volume",
-    profileFamily: overrides.profileFamily ?? "reporting-reporting",
+    profileFamily: overrides.profileFamily ?? "default",
     volumeGeneration: overrides.volumeGeneration ?? 1,
     status: overrides.status ?? "active",
     createdAt: overrides.createdAt ?? "2026-01-01T00:00:00.000Z",
@@ -63,7 +112,7 @@ export function createTestScheduler(options: { clock?: FakeClock; maxActiveBrows
   const clock = options.clock ?? new FakeClock("2026-01-01T00:00:00.000Z");
   const store = new InMemoryFabricStore();
   const signer = new CapabilitySigner({ secret: "01234567890123456789012345678901", clock, gatewayBaseUrl: "wss://fabric.test" });
-  const scheduler = new BrowserScheduler({ store, clock, capabilitySigner: signer, ephemeralInputVault: new MemoryEphemeralInputVault(() => clock.now()), allowPlaintextEphemeralInputs: true, ...(options.maxActiveBrowserLeases === undefined ? {} : { maxActiveBrowserLeases: options.maxActiveBrowserLeases }) });
+  const scheduler = new BrowserScheduler({ store, clock, capabilitySigner: signer, catalog: exampleCatalog, ephemeralInputVault: new MemoryEphemeralInputVault(() => clock.now()), allowPlaintextEphemeralInputs: true, ...(options.maxActiveBrowserLeases === undefined ? {} : { maxActiveBrowserLeases: options.maxActiveBrowserLeases }) });
   const worker = makeWorker({ id: "worker_test" as Worker["id"] });
   return { scheduler, clock, store, worker };
 }

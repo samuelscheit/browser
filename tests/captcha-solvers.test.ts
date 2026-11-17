@@ -17,7 +17,7 @@ import { recaptchaCallbackScript, recaptchaFillScript, RECAPTCHA_V2_PROBE_SCRIPT
 import type { ChallengeHandler } from "@browser-fabric/contracts";
 
 const SITEKEY = "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI";
-const PAGE = "https://avatar.example.test/report";
+const PAGE = "https://site.example.test/form";
 const TOKEN = "03AFcWeA".padEnd(64, "x");
 const task: CaptchaTask = { kind: "recaptcha-v2", sitekey: SITEKEY, pageUrl: PAGE };
 
@@ -52,7 +52,7 @@ describe("recipe-gated solver selection", () => {
   test("enables only automatic DBC and AntiCaptcha handlers, in recipe order", () => {
     expect(automaticCaptchaSolverProviders([
       handler("anticaptcha", "automatic"),
-      handler("cloudflare", "automatic"),
+      handler("guardian", "automatic"),
       handler("dbc", "automatic"),
     ])).toEqual(["anticaptcha", "death-by-captcha"]);
   });
@@ -62,7 +62,7 @@ describe("recipe-gated solver selection", () => {
       handler("dbc", "manual"),
       handler("anticaptcha", "fallback"),
       handler("manual-handoff", "manual"),
-      handler("interactive-turnstile", "manual"),
+      handler("guardian", "automatic"),
     ])).toEqual([]);
   });
 

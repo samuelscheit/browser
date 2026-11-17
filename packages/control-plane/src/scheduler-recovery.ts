@@ -153,9 +153,6 @@ export function recoverSchedulerState(state: FabricState, options: RecoveryOptio
     if (job.leaseId) options.kernel.releaseLease(state, options.kernel.lease(state, job.leaseId));
     options.kernel.releaseMediaTask(state, job);
     options.kernel.finishAttempt(state, job, "failed");
-    // The old browser/companion pair is gone. Never poll a Companion run against
-    // a newly allocated lease after worker loss.
-    job.companionRunId = undefined;
     const recipe = options.kernel.recipe(state, job.recipeRef) as RecipeDefinition;
     const attempts = [...state.attempts.values()].filter((attempt) => attempt.jobId === job.id).length;
     if (asDate(job.expiresAt) > timestamp && attempts < recipe.maxAttempts) {
@@ -177,7 +174,6 @@ export function recoverSchedulerState(state: FabricState, options: RecoveryOptio
     if (!terminalJob(job.status) && asDate(job.expiresAt) <= timestamp) {
       job.status = "timed_out";
       job.failureReason = "job TTL expired";
-      job.companionRunId = undefined;
       job.updatedAt = now(options.clock);
       state.jobs.set(job.id, job);
       if (job.leaseId) options.kernel.releaseLease(state, options.kernel.lease(state, job.leaseId));

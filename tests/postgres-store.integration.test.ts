@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Pool } from "pg";
 import type { BrowserSessionId, JobId, Principal, Worker } from "@browser-fabric/contracts";
 import { BrowserScheduler, CapabilitySigner, FakeClock, MemoryEphemeralInputVault, PgSqlClient, PostgresFabricStore, loadPostgresMigrations } from "@browser-fabric/control-plane";
-import { TEST_PRINCIPAL, TEST_PROJECT, makeProfile, makeWorker } from "@browser-fabric/testkit";
+import { exampleCatalog, TEST_PRINCIPAL, TEST_PROJECT, makeProfile, makeWorker } from "@browser-fabric/testkit";
 
 /**
  * Exercises the normalized projection against a real PostgreSQL server. A recording fake cannot
@@ -15,7 +15,7 @@ import { TEST_PRINCIPAL, TEST_PROJECT, makeProfile, makeWorker } from "@browser-
 const adminUrl = process.env.FABRIC_TEST_DATABASE_URL;
 const suite = adminUrl ? describe : describe.skip;
 
-const DIRECT = "egress_direct-egress@1" as never;
+const DIRECT = "egress_direct@1" as never;
 const ARTIFACTS = "artifact-policy_standard-30-days@1" as never;
 
 suite("PostgreSQL store against a real server", () => {
@@ -47,7 +47,7 @@ suite("PostgreSQL store against a real server", () => {
   async function startProcess(clock: FakeClock): Promise<{ scheduler: BrowserScheduler; store: PostgresFabricStore }> {
     const store = new PostgresFabricStore(PgSqlClient.fromPool(pool), schema, { now: () => clock.now().getTime() });
     await store.initialize();
-    const scheduler = new BrowserScheduler({
+    const scheduler = new BrowserScheduler({ catalog: exampleCatalog,
       store,
       clock,
       capabilitySigner: new CapabilitySigner({ secret: "01234567890123456789012345678901", clock, gatewayBaseUrl: "wss://fabric.test" }),
@@ -62,7 +62,7 @@ suite("PostgreSQL store against a real server", () => {
   let worker: Worker;
   let workerActor: Principal;
   let newsProfile: string;
-  let reportingProfile: string;
+  let exampleProfile: string;
 
   async function jobRow(id: string): Promise<{ status: string; failure_reason: string | null; result: unknown; metadata: unknown; operation: unknown; lease_id: string | null }> {
     const { rows } = await pool.query("SELECT status, failure_reason, result, metadata, operation, lease_id FROM fabric_jobs WHERE id = $1", [id]);
@@ -96,14 +96,14 @@ suite("PostgreSQL store against a real server", () => {
     await scheduler.bootstrap({ projects: [{ id: TEST_PROJECT, name: "Test" }], principals: [TEST_PRINCIPAL] });
     worker = await scheduler.registerWorker(makeWorker({ id: "worker_pg" as Worker["id"] }));
     workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
-    newsProfile = (await scheduler.createProfile(makeProfile(worker, { ref: "profile_pg-news" as never, profileFamily: "news-browser" }))).ref;
-    reportingProfile = (await scheduler.createProfile(makeProfile(worker, { ref: "profile_pg-reporting" as never, volumeName: "profile-volume-g1" }))).ref;
+    newsProfile = (await scheduler.createProfile(makeProfile(worker, { ref: "profile_pg-news" as never, profileFamily: "default" }))).ref;
+    exampleProfile = (await scheduler.createProfile(makeProfile(worker, { ref: "profile_pg-example" as never, volumeName: "profile-volume-g1" }))).ref;
   });
 
   test("a stale claimed job lease is retried, then failed with a plain-text reason", async () => {
-    const job = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "stale-job", recipeRef: "recipe_news-browser-fetch@1" as never, operation: { operation: "fetch_news", url: "https://news.example" }, profileRef: newsProfile as never, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600, metadata: { label: "browser", attempt: 1, urgent: true, note: null } }, TEST_PRINCIPAL);
+    const job = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "stale-job", recipeRef: "recipe_example-fetch@1" as never, operation: { operation: "fetch_page", url: "https://news.example" }, profileRef: newsProfile as never, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600, metadata: { label: "browser", attempt: 1, urgent: true, note: null } }, TEST_PRINCIPAL);
 
-    // recipe_news-browser-fetch@1 allows two attempts: the first stale lease requeues the job.
+    // recipe_example-fetch@1 allows two attempts: the first stale lease requeues the job.
     await dispatchAndClaim();
     clock.advance(31_000);
     expect((await scheduler.recover()).expiredJobs).toBe(1);
@@ -121,17 +121,17 @@ suite("PostgreSQL store against a real server", () => {
     expect(row.lease_id).toBeNull();
     expect(row.result).toBeNull();
     expect(row.metadata).toEqual({ label: "browser", attempt: 1, urgent: true, note: null });
-    expect(row.operation).toEqual({ operation: "fetch_news", url: "https://news.example" });
+    expect(row.operation).toEqual({ operation: "fetch_page", url: "https://news.example" });
     expect(await failureEvent(job.id, "job.failed")).toEqual({ reason: "browser lease heartbeat expired" });
     expect((await scheduler.getJob(job.id as JobId, TEST_PRINCIPAL)).status).toBe("failed");
   });
 
   test("cancelling a queued job and a running job persists the cancellation reason", async () => {
-    const queued = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "cancel-queued", recipeRef: "recipe_news-browser-fetch@1" as never, operation: { operation: "fetch_news", url: "https://news.example/queued" }, profileRef: newsProfile as never, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS }, TEST_PRINCIPAL);
+    const queued = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "cancel-queued", recipeRef: "recipe_example-fetch@1" as never, operation: { operation: "fetch_page", url: "https://news.example/queued" }, profileRef: newsProfile as never, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS }, TEST_PRINCIPAL);
     expect((await scheduler.cancelJob(queued.id as JobId, TEST_PRINCIPAL)).status).toBe("cancelled");
     expect(await jobRow(queued.id)).toMatchObject({ status: "cancelled", failure_reason: "cancelled by client", result: null });
 
-    const running = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "cancel-running", recipeRef: "recipe_news-browser-fetch@1" as never, operation: { operation: "fetch_news", url: "https://news.example/running" }, profileRef: newsProfile as never, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600 }, TEST_PRINCIPAL);
+    const running = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "cancel-running", recipeRef: "recipe_example-fetch@1" as never, operation: { operation: "fetch_page", url: "https://news.example/running" }, profileRef: newsProfile as never, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600 }, TEST_PRINCIPAL);
     const leaseId = await dispatchAndClaim();
     expect((await jobRow(running.id)).status).toBe("running");
     expect((await scheduler.cancelJob(running.id as JobId, TEST_PRINCIPAL)).status).toBe("cancelled");
@@ -141,7 +141,7 @@ suite("PostgreSQL store against a real server", () => {
   });
 
   test("a completed job round-trips its JSON result", async () => {
-    const job = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "complete", recipeRef: "recipe_news-browser-fetch@1" as never, operation: { operation: "fetch_news", url: "https://news.example/done" }, profileRef: newsProfile as never, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600 }, TEST_PRINCIPAL);
+    const job = await scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "complete", recipeRef: "recipe_example-fetch@1" as never, operation: { operation: "fetch_page", url: "https://news.example/done" }, profileRef: newsProfile as never, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600 }, TEST_PRINCIPAL);
     await dispatchAndClaim();
     const result = { title: "browser", count: 3, ratio: 0.5, ok: true, missing: null, tags: ["a", "b"], nested: { quote: "\"quoted\" \\ text", unicode: "Grüße" } };
     await scheduler.completeJob(job.id as JobId, result, workerActor);
@@ -152,7 +152,7 @@ suite("PostgreSQL store against a real server", () => {
   });
 
   test("a stale claimed session lease times out with a plain-text reason, and cancel persists", async () => {
-    const common = { project: TEST_PROJECT, runtime: "rebrowser-puppeteer" as const, browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: reportingProfile as never, leaseMode: "writer" as const, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600 };
+    const common = { project: TEST_PROJECT, runtime: "rebrowser-puppeteer" as const, browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: exampleProfile as never, leaseMode: "writer" as const, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 3_600 };
     const stale = await scheduler.createBrowserSession({ ...common, idempotencyKey: "stale-session", metadata: { purpose: "browser", retries: 0 } }, TEST_PRINCIPAL);
     const leaseId = await dispatchAndClaim();
     await scheduler.markLeaseStarted(leaseId as never, worker.id, workerActor);

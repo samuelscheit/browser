@@ -2,10 +2,9 @@ import { FabricError, type AttemptId, type Worker } from "@browser-fabric/contra
 import { ArtifactCollector, ArtifactMediaManifestResolver, AssignmentSigner, bunMtlsServerTls, createBunMtlsFetch, createPostgresScheduler, createProductionObjectStore, HttpEncryptedInputBroker, mtlsFilesFromEnv, type BrowserScheduler, type EncryptedInputBroker, type PostgresSchedulerRuntime } from "@browser-fabric/control-plane";
 import { parseWorkerRegistration, workerPrincipal } from "./protocol";
 import { ManagedWorkerController } from "./controller";
-import { DockerContainerExecutor, DockerMediaContainerExecutor } from "./docker-container-executor";
+import { CHROMIUM_SECCOMP_PROFILE_PATH, DockerContainerExecutor, DockerMediaContainerExecutor } from "./docker-container-executor";
 import { captchaTokenSolverFor, readOptionalSecret } from "./captcha-solver-factory";
 import { egressSidecarListeners } from "@browser-fabric/policy";
-import { LeasedBrowserProvisioner } from "./leased-browser-provisioner";
 import { MediaResultCapabilitySigner, MediaResultGateway } from "./media-result";
 import { MediaPlaybackControl } from "./media-playback";
 
@@ -13,7 +12,6 @@ export interface WorkerManagerFetchOptions {
   scheduler: BrowserScheduler;
   assignmentSigner: AssignmentSigner;
   encryptedInputBroker?: EncryptedInputBroker;
-  leasedBrowsers?: LeasedBrowserProvisioner;
   mediaPlaybackControl?: MediaPlaybackControl;
 }
 
@@ -62,16 +60,6 @@ export function createWorkerManagerFetch(options: WorkerManagerFetchOptions): (r
         const input = await body(request) as { leaseId?: string; jobId?: string };
         const claimed = await options.scheduler.claimAssignment(workerId, input.leaseId as never, input.jobId as never, actor);
         return response(options.assignmentSigner.issue(workerId, claimed));
-      }
-      if (parts[3] === "leases" && parts[4] && parts[5] === "browser" && request.method === "POST") {
-        if (!options.leasedBrowsers) throw new FabricError("not_found", "managed browser provisioning is unavailable", 404);
-        const started = await options.leasedBrowsers.start(workerId, decodeURIComponent(parts[4]) as never, actor);
-        return response(started, 201);
-      }
-      if (parts[3] === "leases" && parts[4] && parts[5] === "browser" && request.method === "DELETE") {
-        if (!options.leasedBrowsers) throw new FabricError("not_found", "managed browser provisioning is unavailable", 404);
-        await options.leasedBrowsers.stop(workerId, decodeURIComponent(parts[4]) as never);
-        return new Response(null, { status: 204 });
       }
       if (parts[3] === "input-requests" && parts[4] && request.method === "GET") {
         const requestId = decodeURIComponent(parts[4]);
@@ -197,10 +185,6 @@ if (import.meta.main) {
       ["chromium-cdp", "FABRIC_CHROMIUM_WORKER_IMAGE"],
       ["patchright", "FABRIC_PATCHRIGHT_WORKER_IMAGE"],
       ["rebrowser-puppeteer", "FABRIC_REBROWSER_WORKER_IMAGE"],
-      ["companion", "FABRIC_COMPANION_WORKER_IMAGE"],
-      // Social's Python worker connects to a separately provisioned browser. Reuse the hardened
-      // Chromium browser image; the Python/SocialApi image never needs to contain a browser.
-      ["playwright-social", "FABRIC_CHROMIUM_WORKER_IMAGE"],
       ["media-relay", "FABRIC_MEDIA_WORKER_IMAGE"],
     ] as const)
       .map(([runtime, variable]) => [runtime, process.env[variable]?.trim()])
@@ -208,16 +192,16 @@ if (import.meta.main) {
   );
   const production = process.env.NODE_ENV === "production";
   const browserSeccompProfile = process.env.FABRIC_CHROMIUM_SECCOMP_PROFILE?.trim();
-  if (production && browserSeccompProfile !== "/etc/compose/browser-fabric-seccomp/chromium-userns.json") {
+  if (production && browserSeccompProfile !== CHROMIUM_SECCOMP_PROFILE_PATH) {
     throw new Error("FABRIC_CHROMIUM_SECCOMP_PROFILE must reference the approved Chromium user-namespace profile in production");
   }
   const browserExecutor = new DockerContainerExecutor({
     browserNetworks,
     egressNetwork,
     runtimeImageOverrides,
-    // Compose builds the reviewed Fabric source images locally on fabric-host. The manager accepts
-    // only those controller-owned tags (or immutable registry digests), never the image reference
-    // carried by an assignment recipe.
+    // The deployment builds the Fabric images from this source tree (browser-fabric-*:local). The
+    // manager accepts only those controller-owned tags (or immutable registry digests), never the
+    // image reference carried by an assignment recipe.
     requireImmutableImages: production,
     allowLocalBuildImages: production,
     requireRuntimeImageOverrides: production,
@@ -260,16 +244,13 @@ if (import.meta.main) {
     scheduler: runtime.scheduler,
     manifests: new ArtifactMediaManifestResolver({ scheduler: runtime.scheduler, artifacts: mediaArtifacts }),
   });
-  const leasedBrowsers = new LeasedBrowserProvisioner({ scheduler: runtime.scheduler, executor: browserExecutor });
   const controller = new ManagedWorkerController({ scheduler: runtime.scheduler, browserExecutor, mediaExecutor, mediaResultGateway });
   const stoppedOrphans = await browserExecutor.stopUntrackedBrowserContainers();
   const stoppedMediaContainers = await mediaExecutor.stopUntrackedMediaContainers();
   const releasedControllerLeases = await controller.failUntrackedBrowserLeases();
   const releasedMediaTasks = await controller.failUntrackedMediaTasks();
-  const releasedSocialLeases = await leasedBrowsers.failUntrackedLeases();
-  await leasedBrowsers.reconcile();
-  if (stoppedOrphans.length > 0 || stoppedMediaContainers.length > 0 || releasedControllerLeases > 0 || releasedMediaTasks > 0 || releasedSocialLeases > 0) {
-    console.warn(`Removed ${stoppedOrphans.length} untracked browser container(s), stopped ${stoppedMediaContainers.length} untracked media container(s), and reclaimed ${releasedControllerLeases + releasedMediaTasks + releasedSocialLeases} assignment(s) after worker-manager restart`);
+  if (stoppedOrphans.length > 0 || stoppedMediaContainers.length > 0 || releasedControllerLeases > 0 || releasedMediaTasks > 0) {
+    console.warn(`Removed ${stoppedOrphans.length} untracked browser container(s), stopped ${stoppedMediaContainers.length} untracked media container(s), and reclaimed ${releasedControllerLeases + releasedMediaTasks} assignment(s) after worker-manager restart`);
   }
   const brokerUrl = process.env.FABRIC_INPUT_BROKER_URL;
   const encryptedInputBroker = brokerUrl ? new HttpEncryptedInputBroker({ baseUrl: brokerUrl, serviceName: "fabric-worker-manager", fetch: optionalBrokerFetch(), headers: { "x-fabric-mtls-verified": "true" } }) : undefined;
@@ -277,23 +258,19 @@ if (import.meta.main) {
   if (!Number.isInteger(port) || port < 1_024 || port > 65_535 || port === mediaResultPort) throw new Error("PORT must be a distinct private TCP port");
   const tlsFiles = mtlsFilesFromEnv("FABRIC_WORKER_MANAGER");
   if (process.env.NODE_ENV === "production" && !tlsFiles) throw new Error("worker-manager requires service mTLS in production");
-  const controlServer = Bun.serve({ port, ...(tlsFiles ? { tls: bunMtlsServerTls(tlsFiles) } : {}), fetch: createWorkerManagerFetch({ scheduler: runtime.scheduler, assignmentSigner, leasedBrowsers, mediaPlaybackControl, ...(encryptedInputBroker ? { encryptedInputBroker } : {}) }) });
-  // This listener is intentionally not routed by Traefik and has no mTLS identity headers. Its
+  const controlServer = Bun.serve({ port, ...(tlsFiles ? { tls: bunMtlsServerTls(tlsFiles) } : {}), fetch: createWorkerManagerFetch({ scheduler: runtime.scheduler, assignmentSigner, mediaPlaybackControl, ...(encryptedInputBroker ? { encryptedInputBroker } : {}) }) });
+  // This listener is intentionally not routed by the edge and has no mTLS identity headers. Its
   // only accepted operation is a capability-bound media artifact upload from a private service.
   const mediaResultServer = Bun.serve({ port: mediaResultPort, hostname: "0.0.0.0", fetch: (request) => mediaResultGateway.handle(request) });
   // Do not begin any managed assignment until both manager listeners are bound. In particular,
   // a one-shot media service receives a result URL immediately and can finish faster than an
   // asynchronous controller tick; starting it before port 8083 exists loses a valid result.
   if (process.env.FABRIC_MANAGED_CONTROLLER !== "0") controller.start();
-  const reconcileLeasedBrowsers = () => void leasedBrowsers.reconcile();
-  const leasedBrowserTimer = setInterval(reconcileLeasedBrowsers, 1_000);
-  reconcileLeasedBrowsers();
   console.info(`Browser Fabric worker-manager listening on :${port}; private media result gateway on :${mediaResultPort}`);
   const shutdown = () => {
-    clearInterval(leasedBrowserTimer);
     mediaResultServer.stop();
     controlServer.stop();
-    void leasedBrowsers.stopAll().finally(() => controller.stop().finally(() => runtime.close().finally(() => process.exit(0))));
+    void controller.stop().finally(() => runtime.close().finally(() => process.exit(0)));
   };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);

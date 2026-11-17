@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BrowserProcessSpec, Executor } from "../apps/worker-manager/src";
 import { DockerContainerExecutor, type DockerCommand } from "../apps/worker-manager/src/docker-container-executor";
-import { LeasedBrowserProvisioner } from "../apps/worker-manager/src/leased-browser-provisioner";
 import { buildBrowserProcessSpec } from "../apps/worker-manager/src";
 import { createWorkerManagerFetch } from "../apps/worker-manager/src/server";
 import { ManagedWorkerController } from "../apps/worker-manager/src/controller";
@@ -35,32 +34,28 @@ class FakeGuardian implements TurnstileGuardianHandle {
   public async stop(): Promise<void> { this.stops += 1; this.running = false; }
 }
 
-async function claimedSocialAssignment() {
+async function claimedBrowserAssignment() {
   const context = await bootstrapTestScheduler();
-  const profile = await context.scheduler.createProfile({
-    ...context.profile,
-    ref: "profile_social_managed" as never,
-    profileFamily: "social",
-    volumeName: "profile-volume",
-  }, TEST_PRINCIPAL);
-  const job = await context.scheduler.createJob({
+  const session = await context.scheduler.createBrowserSession({
     project: TEST_PROJECT,
-    idempotencyKey: `managed-social-${crypto.randomUUID()}`,
-    recipeRef: "recipe_social-insights@1" as never,
-    operation: { operation: "collect_insights", username: "creator" },
-    profileRef: profile.ref,
-    egressPolicyRef: "egress_social-proxy-fallback@1" as never,
+    idempotencyKey: `managed-browser-${crypto.randomUUID()}`,
+    runtime: "chromium-cdp",
+    browserRecipeRef: "recipe_chromium-cdp@1" as never,
+    profileRef: context.profile.ref,
+    leaseMode: "writer",
+    egressPolicyRef: "egress_direct@1" as never,
     artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
+    ttlSeconds: 600,
   }, TEST_PRINCIPAL);
   const [allocated] = await context.scheduler.dispatch();
   const actor = { ...TEST_PRINCIPAL, certificateFingerprint: context.worker.certificateFingerprint };
   const assignment = await context.scheduler.claimAssignment(context.worker.id, allocated!.lease!.id, undefined, actor);
-  return { ...context, actor, assignment, job };
+  return { ...context, actor, assignment, session };
 }
 
 describe("managed browser guardians", () => {
   test("does not report a Docker browser ready until its guardian is running, and guardian loss fails liveness", async () => {
-    const { worker, assignment } = await claimedSocialAssignment();
+    const { worker, assignment } = await claimedBrowserAssignment();
     const command = new RecordingDockerCommand();
     const guardian = new FakeGuardian();
     const factoryInputs: Array<{ endpoint: string; enabled: boolean }> = [];
@@ -77,7 +72,7 @@ describe("managed browser guardians", () => {
       turnstileGuardianFactory: guardianFactory,
       closeBrowser: async (endpoint) => { command.calls.push(["cdp", "Browser.close", endpoint]); return true; },
       requireImmutableImages: false,
-      browserSeccompProfile: "/etc/compose/browser-fabric-seccomp/chromium-userns.json",
+      browserSeccompProfile: "/etc/browser-fabric/chromium-userns-seccomp.json",
       requireBrowserSeccompProfile: true,
     });
     const spec = buildBrowserProcessSpec(worker, assignment);
@@ -94,7 +89,7 @@ describe("managed browser guardians", () => {
     expect(command.calls[0]).not.toContain("--publish");
     expect(command.calls[0]).toContain("--cap-drop");
     expect(command.calls[0]).toContain("--security-opt");
-    expect(command.calls[0]).toContain("seccomp=/etc/compose/browser-fabric-seccomp/chromium-userns.json");
+    expect(command.calls[0]).toContain("seccomp=/etc/browser-fabric/chromium-userns-seccomp.json");
     expect(command.calls[0]).toContain("/tmp:rw,noexec,nosuid,nodev,size=1073741824,mode=1777");
     expect(command.calls[0]).toContain("/tmp/.X11-unix:rw,nosuid,nodev,size=1048576,mode=1777");
     expect(command.calls[0]).toContain("--remote-debugging-address=127.0.0.1");
@@ -122,7 +117,7 @@ describe("managed browser guardians", () => {
   });
 
   test("re-owns a cloned profile for the unprivileged browser after copying from a root-owned source", async () => {
-    const { worker, assignment } = await claimedSocialAssignment();
+    const { worker, assignment } = await claimedBrowserAssignment();
     const command = new RecordingDockerCommand();
     const originalRun = command.run.bind(command);
     command.run = async (args) => {
@@ -160,7 +155,7 @@ describe("managed browser guardians", () => {
   });
 
   test("removes a newly created container when its mandatory guardian cannot start", async () => {
-    const { worker, assignment } = await claimedSocialAssignment();
+    const { worker, assignment } = await claimedBrowserAssignment();
     const command = new RecordingDockerCommand();
     const guardianFactory: TurnstileGuardianFactory = () => ({
       snapshot: { running: false, attachedPages: 0, checks: 0, clickAttempts: 0 },
@@ -184,7 +179,7 @@ describe("managed browser guardians", () => {
   });
 
   test("fails closed rather than resolving browser CDP through an invalid worker-network address", async () => {
-    const { worker, assignment } = await claimedSocialAssignment();
+    const { worker, assignment } = await claimedBrowserAssignment();
     const command = new RecordingDockerCommand();
     const originalRun = command.run.bind(command);
     command.run = async (args) => {
@@ -247,157 +242,16 @@ describe("managed browser guardians", () => {
   });
 });
 
-test("the Social worker receives one manager-owned Chromium endpoint and reconciliation stops it when the guardian/browser dies", async () => {
-  const { scheduler, worker, actor, assignment, job } = await claimedSocialAssignment();
-  let starts = 0;
-  let running = true;
-  const stopped: string[] = [];
-  const executor: Executor = {
-    start: async (spec: BrowserProcessSpec) => {
-      starts += 1;
-      expect(spec.assignment.recipe.runtime).toBe("playwright-social");
-      expect(spec.container.command.slice(0, 2)).toEqual(["/usr/local/bin/fabric-chromium-launch", "/usr/bin/chromium"]);
-      expect(spec.container.turnstileGuardian?.enabled).toBe(true);
-      return { processId: "fabric-browser-social", cdpBrowserEndpoint: "http://fabric-browser-social:9223" };
-    },
-    stop: async (processId) => { stopped.push(processId); },
-    isRunning: () => running,
-  };
-  const endpointResolutions: string[] = [];
-  const provisioner = new LeasedBrowserProvisioner({
-    scheduler,
-    executor,
-    resolveBrowserEndpoint: async (endpoint) => {
-      endpointResolutions.push(endpoint);
-      return "ws://fabric-browser-social:9223/devtools/browser/opaque";
-    },
-  });
-
-  const first = await provisioner.start(worker.id, assignment.lease!.id, actor);
-  const second = await provisioner.start(worker.id, assignment.lease!.id, actor);
-
-  expect(first).toEqual(second);
-  expect(first.cdpBrowserEndpoint).toBe("ws://fabric-browser-social:9223/devtools/browser/opaque");
-  expect(endpointResolutions).toEqual(["http://fabric-browser-social:9223"]);
-  expect(starts).toBe(1);
-  expect((await scheduler.store.snapshot()).leases.get(assignment.lease!.id)?.startedAt).toBeDefined();
-
-  running = false;
-  await provisioner.reconcile();
-
-  expect(stopped).toEqual(["fabric-browser-social"]);
-  expect(provisioner.active()).toEqual([]);
-  expect((await scheduler.getJob(job.id, TEST_PRINCIPAL)).status).toBe("queued");
-});
-
-test("only the claimed Social worker with its enrollment proof can provision or release its managed browser", async () => {
-  const { scheduler } = createTestScheduler();
-  await scheduler.bootstrap({ projects: [{ id: TEST_PROJECT, name: "Test" }], principals: [TEST_PRINCIPAL] });
-  const enrollment = "social-provisioner-enrollment-token-at-least-24-bytes";
-  const worker = makeWorker({
-    id: "worker_social_provisioner" as never,
-    enrollmentTokenHash: workerEnrollmentTokenHash(enrollment),
-    capabilities: {
-      ...makeWorker().capabilities,
-      runtimeFamilies: ["playwright-social"],
-      recipeRefs: ["recipe_social-insights@1" as never],
-      supportedProfileFamilies: ["social"],
-    },
-  });
-  await scheduler.registerWorker(worker, TEST_PRINCIPAL);
-  const profile = await scheduler.createProfile(makeProfile(worker, {
-    ref: "profile_social_route" as never,
-    profileFamily: "social",
-    volumeName: "profile-volume",
-  }), TEST_PRINCIPAL);
-  const job = await scheduler.createJob({
-    project: TEST_PROJECT,
-    idempotencyKey: "social-provisioner-route",
-    recipeRef: "recipe_social-insights@1" as never,
-    operation: { operation: "collect_insights", username: "creator" },
-    profileRef: profile.ref,
-    egressPolicyRef: "egress_social-proxy-fallback@1" as never,
-    artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
-  }, TEST_PRINCIPAL);
-  const [allocated] = await scheduler.dispatch();
-  const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint };
-  const claimed = await scheduler.claimAssignment(worker.id, allocated!.lease!.id, undefined, workerActor);
-  let starts = 0;
-  const executor: Executor = {
-    start: async () => {
-      starts += 1;
-      return { processId: "fabric-browser-route", cdpBrowserEndpoint: "ws://fabric-browser-route:9223/devtools/browser/opaque" };
-    },
-    stop: async () => undefined,
-  };
-  const provisioner = new LeasedBrowserProvisioner({ scheduler, executor });
-  const fetchManager = createWorkerManagerFetch({ scheduler, assignmentSigner: AssignmentSigner.generate(), leasedBrowsers: provisioner });
-  const baseHeaders = {
-    "x-fabric-mtls-verified": "true",
-    "x-fabric-worker-cert-fingerprint": worker.certificateFingerprint,
-  };
-  const browserPath = `https://manager/v1/workers/${worker.id}/leases/${claimed.lease!.id}/browser`;
-
-  const denied = await fetchManager(new Request(browserPath, { method: "POST", headers: baseHeaders }));
-  expect(denied.status).toBe(401);
-  expect(starts).toBe(0);
-
-  const created = await fetchManager(new Request(browserPath, {
-    method: "POST",
-    headers: { ...baseHeaders, "x-fabric-worker-enrollment": enrollment },
-  }));
-  expect(created.status).toBe(201);
-  expect(await created.json()).toEqual({ processId: "fabric-browser-route", cdpBrowserEndpoint: "ws://fabric-browser-route:9223/devtools/browser/opaque" });
-  expect(starts).toBe(1);
-
-  const released = await fetchManager(new Request(browserPath, {
-    method: "DELETE",
-    headers: { ...baseHeaders, "x-fabric-worker-enrollment": enrollment },
-  }));
-  expect(released.status).toBe(204);
-  expect((await scheduler.getJob(job.id, TEST_PRINCIPAL)).status).toBe("running");
-});
-
-test("Social jobs cannot fall back to an anonymous disposable browser profile", async () => {
-  const { scheduler } = await claimedSocialAssignment();
-  await expect(scheduler.createJob({
-    project: TEST_PROJECT,
-    idempotencyKey: "social-profile-required",
-    recipeRef: "recipe_social-insights@1" as never,
-    operation: { operation: "collect_insights", username: "creator" },
-    egressPolicyRef: "egress_social-proxy-fallback@1" as never,
-    artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
-  }, TEST_PRINCIPAL)).rejects.toThrow("persistent Chromium profile");
-});
-
-test("a restarted manager fails an untracked Social browser lease instead of running without a guardian", async () => {
-  const { scheduler, worker, actor, assignment, job } = await claimedSocialAssignment();
-  await scheduler.markLeaseStarted(assignment.lease!.id, worker.id, actor);
-  const executor: Executor = {
-    start: async () => ({ processId: "unused", cdpBrowserEndpoint: "ws://unused:9222/devtools/browser/unused" }),
-    stop: async () => undefined,
-  };
-  // A newly constructed provisioner has no process-local guardian handle for this already-started
-  // lease, exactly as after a worker-manager restart.
-  const restarted = new LeasedBrowserProvisioner({ scheduler, executor });
-
-  await restarted.failUntrackedLeases();
-
-  expect(restarted.active()).toEqual([]);
-  expect((await scheduler.getJob(job.id, TEST_PRINCIPAL)).status).toBe("queued");
-  expect((await scheduler.store.snapshot()).leases.get(assignment.lease!.id)?.status).toBe("released");
-});
-
 test("a restarted manager also fails an untracked generic CDP lease", async () => {
   const context = await bootstrapTestScheduler();
   const session = await context.scheduler.createBrowserSession({
     project: TEST_PROJECT,
     idempotencyKey: "untracked-generic-browser",
     runtime: "rebrowser-puppeteer",
-    browserRecipeRef: "recipe_rebrowser-reporting@1" as never,
+    browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never,
     profileRef: context.profile.ref,
     leaseMode: "writer",
-    egressPolicyRef: "egress_direct-egress@1" as never,
+    egressPolicyRef: "egress_direct@1" as never,
     artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
     ttlSeconds: 600,
   }, TEST_PRINCIPAL);
@@ -422,10 +276,10 @@ test("a restarted manager releases a claimed generic lease that never reached br
     project: TEST_PROJECT,
     idempotencyKey: "untracked-generic-startup",
     runtime: "rebrowser-puppeteer",
-    browserRecipeRef: "recipe_rebrowser-reporting@1" as never,
+    browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never,
     profileRef: context.profile.ref,
     leaseMode: "writer",
-    egressPolicyRef: "egress_direct-egress@1" as never,
+    egressPolicyRef: "egress_direct@1" as never,
     artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
     ttlSeconds: 600,
   }, TEST_PRINCIPAL);
@@ -441,35 +295,4 @@ test("a restarted manager releases a claimed generic lease that never reached br
 
   expect((await context.scheduler.getSession(session.id, TEST_PRINCIPAL)).status).toBe("failed");
   expect((await context.scheduler.store.snapshot()).leases.get(assignment!.lease!.id)?.status).toBe("released");
-});
-
-test("an in-flight Social browser provision is not mistaken for an unguarded orphan, and shutdown waits to stop it", async () => {
-  const { scheduler, worker, actor, assignment } = await claimedSocialAssignment();
-  let releaseStart!: () => void;
-  let enteredStart!: () => void;
-  const startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
-  const entered = new Promise<void>((resolve) => { enteredStart = resolve; });
-  const stopped: string[] = [];
-  const executor: Executor = {
-    start: async () => {
-      enteredStart();
-      await startGate;
-      return { processId: "fabric-browser-in-flight", cdpBrowserEndpoint: "ws://fabric-browser-in-flight:9223/devtools/browser/opaque" };
-    },
-    stop: async (processId) => { stopped.push(processId); },
-  };
-  const provisioner = new LeasedBrowserProvisioner({ scheduler, executor });
-  const provisioning = provisioner.start(worker.id, assignment.lease!.id, actor);
-  await entered;
-
-  await provisioner.reconcile();
-  expect((await scheduler.store.snapshot()).leases.get(assignment.lease!.id)?.status).toBe("active");
-
-  const shutdown = provisioner.stopAll();
-  releaseStart();
-  await provisioning;
-  await shutdown;
-
-  expect(stopped).toEqual(["fabric-browser-in-flight"]);
-  expect(provisioner.active()).toEqual([]);
 });

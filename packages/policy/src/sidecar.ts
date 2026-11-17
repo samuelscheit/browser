@@ -1,24 +1,20 @@
-import type { EgressPolicy, TrafficClass } from "@browser-fabric/contracts";
-import { FabricError } from "@browser-fabric/contracts";
+import type { EgressPolicy, EgressSidecarListener, TrafficClass } from "@browser-fabric/contracts";
+import { FabricError, isLoopbackHostname } from "@browser-fabric/contracts";
 
 /**
- * The deployment's egress sidecar exposes only these non-secret internal listeners. Browser
- * traffic selects a listener through the generated PAC; native workers (Social/media) use this
- * mapping to reach the same sidecar without receiving an upstream proxy credential.
+ * The built-in listeners of the egress sidecar (deploy/compose/egress-sidecar.json). Browser traffic
+ * selects a listener through the generated PAC; native workers (media relay/playback) use a policy's
+ * `sidecar` routing to reach the same sidecar without receiving an upstream proxy credential.
+ * Catalog policies may name further listeners the deployment adds to its sidecar config.
  */
 export const egressSidecarListeners = {
   direct: { id: "direct", port: 11_000 },
-  signup: { id: "signup-proxy", port: 11_001 },
-  media: { id: "media-ipv6", port: 11_003 },
-  social: { id: "social-fallback", port: 11_004 },
-  tor: { id: "tor", port: 11_005 },
-  macExit: { id: "home-exit", port: 11_006 },
-  mediaDirect: { id: "media-direct", port: 11_007 },
-  /** Token-solver API traffic only; the listener admits the two provider hostnames and nothing else. */
-  captchaSolver: { id: "captcha-solver", port: 11_008 },
-} as const;
-
-export type EgressSidecarListenerName = keyof typeof egressSidecarListeners;
+  /** The deployment's upstream proxy (or proxy pool); its URL lives only in the sidecar's secret. */
+  proxy: { id: "proxy", port: 11_001 },
+  tor: { id: "tor", port: 11_002 },
+  /** Token-solver API traffic only; the listener admits the solver provider hostnames and nothing else. */
+  captchaSolver: { id: "captcha-solver", port: 11_003 },
+} as const satisfies Record<string, EgressSidecarListener>;
 
 function directException(policy: EgressPolicy, targetUrl: string | undefined): boolean {
   if (!targetUrl || !policy.directExceptionHostnames?.length) return false;
@@ -35,18 +31,24 @@ function directException(policy: EgressPolicy, targetUrl: string | undefined): b
   });
 }
 
-/** Resolve the reviewed native-worker listener, including exact hostname direct exceptions. */
-export function egressSidecarListenerForPolicy(policy: EgressPolicy, trafficClass?: TrafficClass, targetUrl?: string): EgressSidecarListenerName {
-  const effectiveClass = directException(policy, targetUrl) ? "direct_exception" : trafficClass;
-  if (policy.family === "signup-direct-assets") {
-    return effectiveClass === "static_asset" || effectiveClass === "direct_exception" ? "direct" : "signup";
+/** Validate a policy's sidecar routing: listener ids and ports the PAC/proxy URL builders can use. */
+export function assertEgressSidecarRouting(policy: Pick<EgressPolicy, "ref" | "sidecar">): void {
+  const listeners = [policy.sidecar?.listener, ...(policy.sidecar?.directListener ? [policy.sidecar.directListener] : [])];
+  for (const listener of listeners) {
+    if (!listener || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(listener.id) || !Number.isInteger(listener.port) || listener.port < 1_024 || listener.port > 65_535) {
+      throw new FabricError("validation_failed", `egress policy ${policy.ref} has no valid Fabric sidecar listener`, 400);
+    }
   }
-  if (policy.family === "media-proxy-affinity") return effectiveClass === "direct_exception" ? "mediaDirect" : "media";
-  if (policy.family === "social-proxy-fallback") return "social";
-  if (policy.family === "tor-egress") return "tor";
-  if (policy.family === "home-exit") return "macExit";
-  if (policy.family === "direct-egress") return "direct";
-  throw new FabricError("validation_failed", `egress policy ${policy.ref} has no Fabric sidecar listener`, 400);
+}
+
+/**
+ * Resolve the sidecar listener for one request of a native worker. A `direct` route of the traffic
+ * class, or a direct-exception hostname, uses the policy's direct listener when it declares one.
+ */
+export function egressSidecarListenerForPolicy(policy: EgressPolicy, trafficClass?: TrafficClass, targetUrl?: string): EgressSidecarListener {
+  assertEgressSidecarRouting(policy);
+  const routeIsDirect = directException(policy, targetUrl) || (trafficClass !== undefined && policy.routes[trafficClass]?.kind === "direct");
+  return routeIsDirect && policy.sidecar.directListener ? policy.sidecar.directListener : policy.sidecar.listener;
 }
 
 /** Return a credential-free proxy URL that is only routable on Fabric's egress overlay. */
@@ -58,13 +60,8 @@ export function internalEgressProxyUrl(
   if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}$/.test(host) || host.includes("..")) {
     throw new FabricError("validation_failed", "Fabric egress sidecar host is invalid", 400);
   }
-  const listener = egressSidecarListeners[egressSidecarListenerForPolicy(policy, options.trafficClass, options.targetUrl)];
+  const listener = egressSidecarListenerForPolicy(policy, options.trafficClass, options.targetUrl);
   return `http://${host}:${listener.port}`;
-}
-
-function isLoopbackHost(host: string): boolean {
-  const normalized = host.toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
 }
 
 /**
@@ -83,7 +80,7 @@ export function internalEgressPacUrl(
   if ((base.protocol !== "http:" && base.protocol !== "https:") || base.username || base.password || (base.pathname !== "" && base.pathname !== "/") || base.search || base.hash) {
     throw new FabricError("validation_failed", "Fabric egress PAC base URL must be a credential-free origin", 400);
   }
-  if (options.localWorker && !isLoopbackHost(base.hostname)) {
+  if (options.localWorker && !isLoopbackHostname(base.hostname)) {
     throw new FabricError("validation_failed", "the federated local worker must use a loopback Fabric egress PAC", 400);
   }
   base.pathname = `/pac/${encodeURIComponent(policy.ref)}`;

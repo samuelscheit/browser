@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { FabricError, MAX_EXTERNAL_CDP_CONNECTIONS, parseBrowserSessionCreate, parseJobCreate, parseMediaManifest } from "@browser-fabric/contracts";
 import { assertDurablePayload, scalarMetadata } from "@browser-fabric/control-plane";
-import { builtInEgressPolicies, classifyTraffic, compileEgressManifest, decideEgress, parseProxyUrl, planChallenge } from "@browser-fabric/policy";
+import { builtInEgressPolicies, classifyTraffic, compileEgressManifest, decideEgress, makeEgressPolicy, parseProxyUrl, planChallenge } from "@browser-fabric/policy";
+import { exampleCatalog } from "@browser-fabric/testkit";
 import { builtInChallengeSets } from "@browser-fabric/policy";
 import { RecipeRegistry, assertOperationContainsNoSecrets, builtInRecipes, validateTypedOperation } from "@browser-fabric/recipes";
 
@@ -11,10 +12,10 @@ describe("contracts and immutable policies", () => {
       project: "project_test",
       idempotencyKey: "request-1",
       runtime: "rebrowser-puppeteer",
-      browserRecipeRef: "recipe_rebrowser-reporting@1",
+      browserRecipeRef: "recipe_rebrowser-puppeteer@1",
       profileRef: "profile_reporting",
       leaseMode: "writer",
-      egressPolicyRef: "egress_direct-egress@1",
+      egressPolicyRef: "egress_direct@1",
       artifactPolicyRef: "artifact-policy_standard-30-days@1"
     });
     expect(request.ttlSeconds).toBe(1800);
@@ -25,18 +26,18 @@ describe("contracts and immutable policies", () => {
       expect(() => parseBrowserSessionCreate({ ...request, maxExternalConnections: invalid })).toThrow(/maxExternalConnections/);
     }
     expect(() => parseBrowserSessionCreate({ ...request, project: "test" })).toThrow(FabricError);
-    expect(() => parseJobCreate({ project: "project_test", idempotencyKey: "j", recipeRef: "recipe_social-insights@1", operation: {}, egressPolicyRef: "egress_social-proxy-fallback@1", artifactPolicyRef: "artifact-policy_standard-30-days@1", callback: { url: "http://insecure" } })).toThrow(/HTTPS/);
+    expect(() => parseJobCreate({ project: "project_test", idempotencyKey: "j", recipeRef: "recipe_example-fetch@1", operation: {}, egressPolicyRef: "egress_proxy@1", artifactPolicyRef: "artifact-policy_standard-30-days@1", callback: { url: "http://insecure" } })).toThrow(/HTTPS/);
   });
 
   test("accepts every required egress family and preserves direct-asset no-retry", () => {
-    expect(builtInEgressPolicies.map((policy) => policy.family)).toEqual([
-      "signup-direct-assets", "media-proxy-affinity", "social-proxy-fallback", "tor-egress", "home-exit", "direct-egress"
-    ]);
-    const signup = builtInEgressPolicies.find((policy) => policy.family === "signup-direct-assets")!;
-    expect(decideEgress(signup, { trafficClass: "static_asset", hostname: "cdn.example", isRetry: false }).route.kind).toBe("direct");
-    expect(decideEgress(signup, { trafficClass: "static_asset", hostname: "cdn.example", isRetry: true }).route.kind).toBe("block");
-    expect(decideEgress(signup, { trafficClass: "api", hostname: "api.example" }).route.kind).toBe("proxy");
-    expect(compileEgressManifest(signup, ["socks5h://user:pass@proxy.example:1080"]).proxyDescriptors[0]?.remoteDns).toBe(true);
+    expect(builtInEgressPolicies.map((policy) => policy.ref)).toEqual(["egress_direct@1", "egress_proxy@1", "egress_tor@1"] as never);
+    expect(decideEgress(builtInEgressPolicies[2]!, { trafficClass: "document", hostname: "example.test" }).route.kind).toBe("tor");
+    expect(decideEgress(builtInEgressPolicies[2]!, { trafficClass: "media_segment", hostname: "example.test" }).route.kind).toBe("block");
+    const staticDirect = exampleCatalog.egressPolicies.find((policy) => policy.family === "example-static-direct")!;
+    expect(decideEgress(staticDirect, { trafficClass: "static_asset", hostname: "cdn.example", isRetry: false }).route.kind).toBe("direct");
+    expect(decideEgress(staticDirect, { trafficClass: "static_asset", hostname: "cdn.example", isRetry: true }).route.kind).toBe("block");
+    expect(decideEgress(staticDirect, { trafficClass: "api", hostname: "api.example" }).route.kind).toBe("proxy");
+    expect(compileEgressManifest(staticDirect, ["socks5h://user:pass@proxy.example:1080"]).proxyDescriptors[0]?.remoteDns).toBe(true);
   });
 
   test("supports proxy protocols, classification, and challenge opt-in", () => {
@@ -49,31 +50,36 @@ describe("contracts and immutable policies", () => {
     expect(classifyTraffic("https://cdn.example/video.m3u8").trafficClass).toBe("media_manifest");
     expect(classifyTraffic("https://cdn.example/file.ts").trafficClass).toBe("media_segment");
     expect(classifyTraffic("https://example.test/api/graphql").trafficClass).toBe("api");
-    const set = builtInChallengeSets.find((candidate) => candidate.family === "avatar-manual")!;
+    const set = builtInChallengeSets.find((candidate) => candidate.family === "manual-handoff")!;
     expect(planChallenge(set, "manual-handoff").action).toBe("pause_for_manual");
   });
 
   test("rejects secret values and unknown typed fields", () => {
     expect(() => assertOperationContainsNoSecrets({ password: "raw-secret" })).toThrow(/ephemeral/);
-    const recipe = new RecipeRegistry().get("recipe_profile-update-companion@1" as never);
-    validateTypedOperation(recipe, { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: "artifact_1", approvedBy: "principal_test" });
-    expect(() => validateTypedOperation(recipe, { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: "artifact_1", approvedBy: "principal_test", selector: "//bad" })).toThrow(/not permitted/);
-    expect(() => validateTypedOperation(recipe, { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: "artifact_1", approvedBy: "principal_test", expectedAccount: "caller@example.test" })).toThrow(/not permitted/);
-    expect(() => validateTypedOperation(recipe, { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: "artifact_1", approvedBy: "principal_test", dryRun: true })).toThrow(/not permitted/);
-    expect(builtInRecipes.length).toBeGreaterThanOrEqual(12);
+    const recipe = new RecipeRegistry([...builtInRecipes, ...exampleCatalog.recipes]).get("recipe_example-fetch@1" as never);
+    validateTypedOperation(recipe, { operation: "fetch_page", url: "https://site.example", cookieJarRef: "artifact_1" });
+    expect(() => validateTypedOperation(recipe, { operation: "fetch_page", url: "https://site.example", selector: "//bad" })).toThrow(/not permitted/);
+    expect(() => validateTypedOperation(recipe, { operation: "fetch_page" })).toThrow(/operation.url is required/);
+    expect(() => validateTypedOperation(recipe, { operation: "screenshot", url: "https://site.example" })).toThrow(/not exposed/);
+    expect(() => validateTypedOperation(recipe, { operation: "fetch_page", url: "https://site.example", cookie: "raw" })).toThrow(/ephemeral/);
+    const raw = new RecipeRegistry().get("recipe_chromium-cdp@1" as never);
+    expect(() => validateTypedOperation(raw, { operation: "fetch_page", url: "https://site.example" })).toThrow(/does not accept typed jobs/);
+    expect(builtInRecipes.map((entry) => entry.ref)).toEqual([
+      "recipe_chromium-cdp@1", "recipe_interactive-chromium@1", "recipe_patchright@1", "recipe_rebrowser-puppeteer@1", "recipe_media-relay@1", "recipe_media-playback@1",
+    ] as never);
   });
 
   test("media manifests permit only bounded non-secret playback context", () => {
     const manifest = parseMediaManifest({
       version: 1,
       mode: "relay",
-      provider: "Media",
+      provider: "Example provider",
       url: "https://media.example/video.mp4",
       artifactKind: "video",
       requestHeaders: {
         accept: "*/*",
-        origin: "https://media.example",
-        referer: "https://media.example/watch",
+        origin: "https://provider.example",
+        referer: "https://provider.example/watch",
         "user-agent": "Fabric fixture",
       },
     });
@@ -81,13 +87,13 @@ describe("contracts and immutable policies", () => {
     if (manifest.mode !== "relay") throw new Error("fixture must parse as a relay manifest");
     expect(manifest.requestHeaders).toEqual({
       accept: "*/*",
-      origin: "https://media.example",
-      referer: "https://media.example/watch",
+      origin: "https://provider.example",
+      referer: "https://provider.example/watch",
       "user-agent": "Fabric fixture",
     });
     expect(() => parseMediaManifest({ ...manifest, requestHeaders: { cookie: "must-not-persist" } })).toThrow(/not permitted/);
     expect(() => parseMediaManifest({ ...manifest, requestHeaders: { authorization: "Bearer opaque" } })).toThrow(/not permitted/);
-    expect(() => parseMediaManifest({ ...manifest, requestHeaders: { origin: "https://user:pass@media.example" } })).toThrow(/credential-free/);
+    expect(() => parseMediaManifest({ ...manifest, requestHeaders: { origin: "https://user:pass@provider.example" } })).toThrow(/credential-free/);
   });
 
   test("rejects credential-bearing URLs and authorization values from durable fields", () => {
@@ -98,9 +104,9 @@ describe("contracts and immutable policies", () => {
     expect(() => parseJobCreate({
       project: "project_test",
       idempotencyKey: "callback-secret-url",
-      recipeRef: "recipe_social-insights@1",
-      operation: { operation: "collect_insights", username: "creator" },
-      egressPolicyRef: "egress_social-proxy-fallback@1",
+      recipeRef: "recipe_example-fetch@1",
+      operation: { operation: "fetch_page", url: "https://site.example" },
+      egressPolicyRef: "egress_proxy@1",
       artifactPolicyRef: "artifact-policy_standard-30-days@1",
       callback: { url: "https://app.example/hook?signature=opaque" },
     })).toThrow(/credential material/);
@@ -109,7 +115,7 @@ describe("contracts and immutable policies", () => {
 
 test("policy-enforced fetch never lets callers override route selection", async () => {
   const { PolicyEnforcedFetcher } = await import("@browser-fabric/policy");
-  const policy = builtInEgressPolicies.find((candidate) => candidate.family === "signup-direct-assets")!;
+  const policy = exampleCatalog.egressPolicies.find((candidate) => candidate.family === "example-static-direct")!;
   const calls: string[] = [];
   const fetcher = new PolicyEnforcedFetcher({
     policy,
@@ -125,28 +131,35 @@ test("policy-enforced fetch never lets callers override route selection", async 
   await expect(blocked.fetch("https://cdn.example/static.js", {}, { isRetry: true })).rejects.toThrow(/blocked/);
 });
 
-test("Media provider exceptions and Social proxy fallback order are explicit", async () => {
+test("direct-exception hosts bypass the proxy and the proxy fallback order is explicit", async () => {
   const { PolicyEnforcedFetcher } = await import("@browser-fabric/policy");
-  const media = builtInEgressPolicies.find((candidate) => candidate.family === "media-proxy-affinity")!;
-  const mediaCalls: string[] = [];
-  const mediaFetcher = new PolicyEnforcedFetcher({
-    policy: media,
-    directFetch: async (url) => { mediaCalls.push(`direct:${url}`); return new Response("ok"); },
-    proxyTransport: { fetch: async (url) => { mediaCalls.push(`proxy:${url}`); throw new Error("proxy down"); } },
+  const affinity = exampleCatalog.egressPolicies.find((candidate) => candidate.family === "example-affinity")!;
+  const affinityCalls: string[] = [];
+  const affinityFetcher = new PolicyEnforcedFetcher({
+    policy: affinity,
+    directFetch: async (url) => { affinityCalls.push(`direct:${url}`); return new Response("ok"); },
+    proxyTransport: { fetch: async (url) => { affinityCalls.push(`proxy:${url}`); throw new Error("proxy down"); } },
     proxyUrls: ["socks5h://proxy.example:1080"]
   });
-  await mediaFetcher.fetch("https://cdn-a.example/path");
-  expect(mediaCalls[0]).toMatch(/^direct:/);
-  await expect(mediaFetcher.fetch("https://media.cdn-a/path")).rejects.toThrow(/proxy down/);
+  await affinityFetcher.fetch("https://cdn.direct.example/path");
+  expect(affinityCalls[0]).toMatch(/^direct:/);
+  // A lookalike suffix is not an exception: it stays on the proxy route.
+  await expect(affinityFetcher.fetch("https://notdirect.example/path")).rejects.toThrow(/proxy down/);
 
-  const social = builtInEgressPolicies.find((candidate) => candidate.family === "social-proxy-fallback")!;
+  const pool = makeEgressPolicy({
+    name: "example-pool",
+    routes: { api: { kind: "proxy", proxyRef: "primary", protocol: "https", remoteDns: true } },
+    constraints: { preserveProxyAffinity: false, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: false },
+    sidecar: { listener: { id: "proxy", port: 11001 } },
+    proxyFallbackRefs: ["primary", "secondary"],
+  });
   const attempts: string[] = [];
-  const socialFetcher = new PolicyEnforcedFetcher({
-    policy: social,
+  const poolFetcher = new PolicyEnforcedFetcher({
+    policy: pool,
     proxyTransport: { fetch: async (url, _init, _proxy, credential) => { attempts.push(credential?.username ?? "none"); if (attempts.length === 1) throw new Error("primary down"); return new Response("ok"); } },
     proxyUrls: ["https://proxy-a.example:8443", "https://proxy-b.example:8443"],
-    proxyCredentials: new Map([["social-primary", { username: "primary", password: "a" }], ["social-secondary", { username: "secondary", password: "b" }]])
+    proxyCredentials: new Map([["primary", { username: "primary", password: "a" }], ["secondary", { username: "secondary", password: "b" }]])
   });
-  expect((await socialFetcher.fetch("https://www.social.com/api/data")).status).toBe(200);
+  expect((await poolFetcher.fetch("https://site.example/api/data")).status).toBe(200);
   expect(attempts).toEqual(["primary", "secondary"]);
 });

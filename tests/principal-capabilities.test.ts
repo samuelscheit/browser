@@ -25,11 +25,10 @@ async function setup() {
     id: "worker_chromium" as Worker["id"],
     capabilities: {
       runtimeFamilies: ["chromium-cdp", "rebrowser-puppeteer"],
-      recipeRefs: ["recipe_interactive-chromium@1", "recipe_reporting-reporting@1"] as unknown as Worker["capabilities"]["recipeRefs"],
+      recipeRefs: ["recipe_interactive-chromium@1", "recipe_example-fetch@1"] as unknown as Worker["capabilities"]["recipeRefs"],
       browserVersions: { chromium: "stable" },
       supportsInteractive: true,
-      supportsCompanionCompanion: false,
-      supportedProfileFamilies: ["interactive", "reporting-reporting"],
+      supportedProfileFamilies: ["interactive", "default"],
     },
     volumeNames: ["v-agent", "v-old", "v-other", "v-shared"],
   });
@@ -57,10 +56,10 @@ describe("GET /v1/me", () => {
     expect(body.profiles.map((profile) => profile.ref)).toEqual(["profile_agent", "profile_shared"] as never);
     expect(body.profiles[0]).toEqual({ ref: "profile_agent", ownerProject: AGENT_PROJECT, grants: [AGENT_PROJECT], profileFamily: "interactive", status: "active" } as never);
     expect(body.recipes).toEqual([
+      { ref: "recipe_example-fetch@1", runtime: "chromium-cdp", mode: "headless", access: "typed_job", profileFamily: "default" },
       { ref: "recipe_interactive-chromium@1", runtime: "chromium-cdp", mode: "interactive", access: "raw_cdp", profileFamily: "interactive" },
-      { ref: "recipe_reporting-reporting@1", runtime: "rebrowser-puppeteer", mode: "headless", access: "typed_job", profileFamily: "reporting-reporting" },
     ] as never);
-    expect(body.egressPolicies).toContain("egress_direct-egress@1" as never);
+    expect(body.egressPolicies).toContain("egress_direct@1" as never);
     expect([...body.egressPolicies].sort()).toEqual(body.egressPolicies);
     expect(body.artifactPolicies).toEqual(["artifact-policy_standard-30-days@1"] as never);
   });

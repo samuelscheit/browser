@@ -60,7 +60,7 @@ describe("federated reverse CDP relay", () => {
   test("local worker leases use an opaque reverse endpoint and never expose loopback to the gateway", async () => {
     const context = await bootstrapTestScheduler({ localWorker: true });
     const profile = await context.scheduler.createProfile({ ...context.profile, ref: "profile_local_interactive" as never, profileFamily: "interactive" }, TEST_PRINCIPAL);
-    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "local-reverse", runtime: "chromium-cdp", browserRecipeRef: "recipe_interactive-chromium@1" as never, profileRef: profile.ref, leaseMode: "interactive", egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+    const session = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "local-reverse", runtime: "chromium-cdp", browserRecipeRef: "recipe_interactive-chromium@1" as never, profileRef: profile.ref, leaseMode: "interactive", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
     const [assignment] = await context.scheduler.dispatch();
     expect(assignment?.lease?.internalCdpEndpoint).toMatch(/^reverse:\/\/worker_local\/browser-lease_/);
     const actor = { ...TEST_PRINCIPAL, certificateFingerprint: context.worker.certificateFingerprint };

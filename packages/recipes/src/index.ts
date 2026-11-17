@@ -19,148 +19,102 @@ export interface RecipeDefinition extends BrowserRecipe {
 }
 
 const createdAt = "2026-09-02T00:00:00.000Z";
-const recipeRef = (name: string): RecipeRef => `recipe_${name}@1` as RecipeRef;
 
-function makeRecipe(
-  name: string,
-  runtime: RuntimeFamily,
-  profileFamily: string,
-  mode: BrowserRecipe["mode"],
-  access: RecipeAccess,
-  options: Partial<Pick<RecipeDefinition, "challengeHandlerSetRef" | "typedOperations" | "maxAttempts" | "allowedCompanionConnections">> = {}
-): RecipeDefinition {
+export interface RecipeDefinitionInput {
+  name: string;
+  version?: number;
+  runtime: RuntimeFamily;
+  profileFamily: string;
+  mode: BrowserRecipe["mode"];
+  access: RecipeAccess;
+  challengeHandlerSetRef?: string;
+  typedOperations?: readonly TypedOperationSpec[];
+  maxAttempts?: number;
+  /** Overrides of the default launch settings (viewport, locale, flags, ...). */
+  launch?: Partial<BrowserRecipe["launch"]>;
+  /** Container image for this recipe; the worker manager may still pin its own per-runtime image. */
+  browserImage?: string;
+}
+
+/** Build an immutable recipe; its hash covers every launch- and access-relevant field. */
+export function makeRecipe(input: RecipeDefinitionInput): RecipeDefinition {
+  const version = input.version ?? 1;
+  const launch: BrowserRecipe["launch"] = {
+    viewport: { width: 1440, height: 1024 },
+    locale: "en-US",
+    timezone: "UTC",
+    launchFlags: ["--disable-background-networking", "--disable-dev-shm-usage"],
+    extensions: [],
+    initScripts: [],
+    sharedMemoryMiB: input.mode === "interactive" ? 1024 : 512,
+    downloadsEnabled: true,
+    ...input.launch
+  };
   const base = {
-    name,
-    runtime,
-    profileFamily,
-    mode,
-    access,
-    challengeHandlerSetRef: options.challengeHandlerSetRef,
-    typedOperations: options.typedOperations,
-    maxAttempts: options.maxAttempts ?? 1
+    name: input.name,
+    version,
+    runtime: input.runtime,
+    profileFamily: input.profileFamily,
+    mode: input.mode,
+    access: input.access,
+    challengeHandlerSetRef: input.challengeHandlerSetRef,
+    typedOperations: input.typedOperations,
+    maxAttempts: input.maxAttempts ?? 1,
+    launch,
+    browserImage: input.browserImage
   };
   return {
-    ref: recipeRef(name),
-    family: name,
-    version: 1,
-    runtime,
+    ref: `recipe_${input.name}@${version}` as RecipeRef,
+    family: input.name,
+    version,
+    runtime: input.runtime,
     immutableHash: `sha256:${createHash("sha256").update(canonicalJson(base)).digest("hex")}`,
-    // Every browser recipe describes the separately managed Chromium process. The Python Social
-    // worker is an application client and is deployed independently from this browser image.
-    browserImage: `ghcr.io/browser-fabric/${runtime === "playwright-social" ? "chromium-cdp" : runtime}:1`,
+    browserImage: input.browserImage ?? `ghcr.io/browser-fabric/${input.runtime}:1`,
     browserVersion: "chromium-pinned",
-    mode,
-    profileFamily,
-    requiredCapabilities: [runtime, profileFamily, ...(mode === "interactive" ? ["interactive-ui"] : [])],
-    allowedCompanionConnections: options.allowedCompanionConnections ?? ["none"],
-    launch: {
-      viewport: { width: 1440, height: 1024 },
-      locale: "en-US",
-      timezone: "UTC",
-      launchFlags: ["--disable-background-networking", "--disable-dev-shm-usage"],
-      extensions: [],
-      initScripts: [],
-      ...(name === "signup-direct-assets" ? { disableServiceWorkers: true } : {}),
-      sharedMemoryMiB: mode === "interactive" ? 1024 : 512,
-      downloadsEnabled: true
-    },
+    mode: input.mode,
+    profileFamily: input.profileFamily,
+    requiredCapabilities: [input.runtime, input.profileFamily, ...(input.mode === "interactive" ? ["interactive-ui"] : [])],
+    launch,
     artifactDefaults: ["screenshot", "mhtml", "trace"],
     createdAt,
-    access,
-    ...(options.challengeHandlerSetRef === undefined ? {} : { challengeHandlerSetRef: options.challengeHandlerSetRef }),
-    ...(options.typedOperations === undefined ? {} : { typedOperations: options.typedOperations }),
-    maxAttempts: options.maxAttempts ?? 1
+    access: input.access,
+    ...(input.challengeHandlerSetRef === undefined ? {} : { challengeHandlerSetRef: input.challengeHandlerSetRef }),
+    ...(input.typedOperations === undefined ? {} : { typedOperations: input.typedOperations }),
+    maxAttempts: input.maxAttempts ?? 1
   };
 }
 
-const pfpOperation: TypedOperationSpec = {
-  name: "update_avatar",
-  requiredFields: ["manifestRef", "avatarArtifactRef", "approvedBy"],
-  // The target identity, URL, and mutation instructions belong to the immutable Companion manifest.
-  // Do not expose caller-controlled expectedAccount/dryRun fields: the former could approve a
-  // different account and the latter previously looked safe while still starting a real task.
-  allowedFields: ["manifestRef", "avatarArtifactRef", "approvedBy"],
-  secretInputFields: ["password", "otp"]
-};
-
-const signupOperation: TypedOperationSpec = {
-  name: "signup",
-  requiredFields: ["signupConfigRef"],
-  allowedFields: ["signupConfigRef", "freshProfile", "postSignupActionRef"],
-  secretInputFields: ["password", "otp", "phoneVerification"]
-};
-
+/**
+ * Built-in recipes: one raw-CDP recipe per browser runtime, an interactive (headful, live-view)
+ * Chromium, and the two media recipes. Deployments add their own through the catalog file.
+ * Browser recipes enable the captcha-solver challenge set; it solves only through providers whose
+ * credential the deployment configured.
+ */
 export const builtInRecipes: readonly RecipeDefinition[] = [
-  makeRecipe("rebrowser-reporting", "rebrowser-puppeteer", "reporting-reporting", "headless", "raw_cdp", {
-    challengeHandlerSetRef: "challenge_reporting@1",
-    allowedCompanionConnections: ["companion", "none"]
-  }),
-  makeRecipe("patchright-news", "patchright", "news-browser", "headless", "raw_cdp", {
-    challengeHandlerSetRef: "challenge_news@1"
-  }),
-  makeRecipe("patchright-media", "patchright", "media", "headless", "raw_cdp"),
-  makeRecipe("playwright-social", "playwright-social", "social", "headless", "typed_job", {
-    challengeHandlerSetRef: "challenge-social-fallback@1",
-    typedOperations: [{ name: "collect_insights", requiredFields: ["username"], allowedFields: ["username", "includeVideos", "cookieStateRef", "authStateRef", "maxVideos"], secretInputFields: ["msToken", "cookie"] }],
-    maxAttempts: 3
-  }),
-  makeRecipe("companion-cdp", "companion", "avatar-account", "headful", "typed_job", {
-    challengeHandlerSetRef: "challenge-avatar-manual@1",
-    allowedCompanionConnections: ["companion", "file-input-bridge"],
-    typedOperations: [pfpOperation],
-    maxAttempts: 1
-  }),
-  makeRecipe("chat-browser-controller", "chromium-cdp", "chat", "interactive", "raw_cdp", {
-    challengeHandlerSetRef: "challenge_chat-interactive@1"
-  }),
-  makeRecipe("interactive-chromium", "chromium-cdp", "interactive", "interactive", "raw_cdp"),
-  makeRecipe("account-signup", "patchright", "account-signup", "interactive", "typed_job", {
-    challengeHandlerSetRef: "challenge-signup-manual@1",
-    typedOperations: [signupOperation],
-    maxAttempts: 2
-  }),
-  // The Signup/Account adapter uses this raw-CDP variant when it needs to keep its existing
-  // Patchright page-level workflow. The typed signup recipe remains the preferred path for
-  // centrally orchestrated retries and manual handoff.
-  makeRecipe("interactive-patchright", "patchright", "account-signup", "interactive", "raw_cdp", {
-    challengeHandlerSetRef: "challenge-signup-manual@1"
-  }),
-  makeRecipe("reporting-reporting", "rebrowser-puppeteer", "reporting-reporting", "headless", "typed_job", {
-    challengeHandlerSetRef: "challenge_reporting@1",
-    typedOperations: [{ name: "submit_report", requiredFields: ["provider", "evidenceArtifactRefs"], allowedFields: ["provider", "evidenceArtifactRefs", "reportRef"], secretInputFields: ["providerCredential", "captchaCredential"] }],
-    maxAttempts: 2,
-    allowedCompanionConnections: ["companion", "none"]
-  }),
-  makeRecipe("news-browser-fetch", "patchright", "news-browser", "headless", "typed_job", {
-    challengeHandlerSetRef: "challenge_news@1",
-    typedOperations: [{ name: "fetch_news", requiredFields: ["url"], allowedFields: ["url", "serialized", "cookieJarRef"], secretInputFields: ["cookie"] }],
-    maxAttempts: 2
-  }),
-  makeRecipe("social-insights", "playwright-social", "social", "headless", "typed_job", {
-    challengeHandlerSetRef: "challenge-social-fallback@1",
-    typedOperations: [{ name: "collect_insights", requiredFields: ["username"], allowedFields: ["username", "includeVideos", "authStateRef", "maxVideos"], secretInputFields: ["msToken", "cookie"] }],
-    maxAttempts: 3
-  }),
-  makeRecipe("profile-update-companion", "companion", "avatar-account", "headful", "typed_job", {
-    challengeHandlerSetRef: "challenge-avatar-manual@1",
-    typedOperations: [pfpOperation],
-    maxAttempts: 1,
-    allowedCompanionConnections: ["companion", "file-input-bridge"]
-  }),
-  makeRecipe("media-resolution", "patchright", "media", "headless", "typed_job", {
-    typedOperations: [{ name: "resolve", requiredFields: ["url"], allowedFields: ["url", "providerHint"], secretInputFields: [] }],
-    maxAttempts: 2
-  }),
-  makeRecipe("media-media", "media-relay", "media", "headless", "typed_job", {
+  makeRecipe({ name: "chromium-cdp", runtime: "chromium-cdp", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" }),
+  makeRecipe({ name: "interactive-chromium", runtime: "chromium-cdp", profileFamily: "interactive", mode: "interactive", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" }),
+  makeRecipe({ name: "patchright", runtime: "patchright", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" }),
+  makeRecipe({ name: "rebrowser-puppeteer", runtime: "rebrowser-puppeteer", profileFamily: "default", mode: "headless", access: "raw_cdp", challengeHandlerSetRef: "challenge_captcha-solver@1" }),
+  makeRecipe({
+    name: "media-relay",
+    runtime: "media-relay",
+    profileFamily: "media",
+    mode: "headless",
+    access: "typed_job",
     typedOperations: [{ name: "relay", requiredFields: ["manifestRef"], allowedFields: ["manifestRef", "range"], secretInputFields: [] }],
     // The artifact handoff is immutable/idempotent, so one infrastructure retry is safe after a
-    // manager/worker failure without creating a second playback object.
+    // manager/worker failure without creating a second object.
     maxAttempts: 2
   }),
   // Streaming playback is deliberately separate from the bounded immutable artifact relay. A
-  // Media provider's signed URL/cookie bundle arrives only through an encrypted one-shot input
-  // request after this media attempt has been assigned; it is never accepted in the durable job.
-  makeRecipe("media-playback", "media-playback", "media", "headless", "typed_job", {
+  // provider's signed URL/cookie bundle arrives only through an encrypted one-shot input request
+  // after this media attempt has been assigned; it is never accepted in the durable job.
+  makeRecipe({
+    name: "media-playback",
+    runtime: "media-playback",
+    profileFamily: "media",
+    mode: "headless",
+    access: "typed_job",
     typedOperations: [{ name: "playback", requiredFields: ["manifestRef"], allowedFields: ["manifestRef"], secretInputFields: ["media_source"] }],
     maxAttempts: 2
   })
@@ -261,4 +215,3 @@ export function validateTypedOperation(recipe: RecipeDefinition, operation: Reco
   }
 }
 export * from "./runner";
-export * from "./adapters";

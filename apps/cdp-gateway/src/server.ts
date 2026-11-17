@@ -6,10 +6,10 @@ async function loadSecret(name: string): Promise<string> { const file = process.
 if (import.meta.main) {
   const databaseUrl = await loadSecret("FABRIC_DB_URL");
   const capabilitySecret = await loadSecret("FABRIC_CAPABILITY_SECRET");
-  const runtime = await createPostgresScheduler({ databaseUrl, capabilitySecret, gatewayBaseUrl: process.env.FABRIC_GATEWAY_BASE_URL ?? "wss://fabric.internal.example" });
+  const runtime = await createPostgresScheduler({ databaseUrl, capabilitySecret, gatewayBaseUrl: process.env.FABRIC_GATEWAY_BASE_URL });
   const gateway = new CdpGateway({
     scheduler: runtime.scheduler,
-    capabilitySigner: new CapabilitySigner({ secret: capabilitySecret, gatewayBaseUrl: process.env.FABRIC_GATEWAY_BASE_URL ?? "wss://fabric.internal.example" }),
+    capabilitySigner: new CapabilitySigner({ secret: capabilitySecret, gatewayBaseUrl: process.env.FABRIC_GATEWAY_BASE_URL }),
     upstream: new NativeWebSocketUpstream(),
     authenticate: async (request, context) => {
       // A local worker's relay is subsequently bound to its exact provisioned worker record in

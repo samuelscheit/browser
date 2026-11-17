@@ -1,20 +1,22 @@
 {
   "id": "worker_local_interactive",
-  "certificateFingerprint": "configure-local-worker-certificate-fingerprint",
-  "endpoint": "https://fabric.internal.example",
+  "certificateFingerprint": "configure-worker-local-interactive-certificate-fingerprint",
+  "endpoint": "https://fabric.example.com",
   "cdpRelayEndpoint": "ws://127.0.0.1:9222",
   "capabilities": {
-    "runtimeFamilies": ["chromium-cdp", "patchright"],
-    "recipeRefs": [
-      "recipe_interactive-chromium@1",
-      "recipe_chat-browser-controller@1",
-      "recipe_account-signup@1",
-      "recipe_interactive-patchright@1"
+    "runtimeFamilies": [
+      "chromium-cdp"
     ],
-    "browserVersions": { "chromium": "operator-configured" },
+    "recipeRefs": [
+      "recipe_interactive-chromium@1"
+    ],
+    "browserVersions": {
+      "chromium": "operator-configured"
+    },
     "supportsInteractive": true,
-    "supportsCompanionCompanion": true,
-    "supportedProfileFamilies": ["interactive", "chat", "account-signup"]
+    "supportedProfileFamilies": [
+      "interactive"
+    ]
   },
   "capacity": 1,
   "activeLeases": 0,
@@ -23,9 +25,7 @@
   "health": "healthy",
   "isLocal": true,
   "volumeNames": [
-    "profile_interactive",
-    "profile_chat",
-    "profile_account_signup"
+    "profile_interactive_local"
   ],
   "resourceLimits": {
     "maxBrowserLeases": 1,

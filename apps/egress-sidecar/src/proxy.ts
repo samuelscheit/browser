@@ -365,8 +365,8 @@ async function connectViaEndpoint(endpoint: EgressProxyEndpoint, target: Target,
 }
 
 /**
- * Execute an immutable listener strategy. The order in its secret/config is intentional (Social
- * uses it for its existing primary -> secondary -> direct strategy); we only fall through before
+ * Execute an immutable listener strategy. The order in its secret/config is intentional (for
+ * example a primary -> secondary -> direct proxy strategy); we only fall through before
  * any browser bytes are sent to an upstream, so retrying cannot duplicate a provider request.
  */
 async function connectViaListener(

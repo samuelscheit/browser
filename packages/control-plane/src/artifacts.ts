@@ -22,7 +22,7 @@ export interface CaptureArtifactInput {
   bytes: Uint8Array | ArrayBuffer;
   policy: ArtifactPolicy;
   label?: string;
-  /** Stable, non-secret idempotency suffix for a one-shot companion result. */
+  /** Stable, non-secret idempotency suffix for a one-shot media result. */
   immutableKeySuffix?: string;
   /** Restrict a media result to its still-active assigned worker during durable attachment. */
   expectedWorkerId?: Worker["id"];
@@ -30,27 +30,14 @@ export interface CaptureArtifactInput {
   expectedMediaAttemptId?: AttemptId;
   /** API-originated attachment keeps the caller's project grant at the durable boundary. */
   actor?: Principal;
-  /** Capability-bound companions may provide a stable lifecycle deadline for idempotent replays. */
+  /** Capability-bound media results may provide a stable lifecycle deadline for idempotent replays. */
   expiresAt?: string;
-}
-
-/** Metadata emitted by a trusted companion that has already written into Fabric object storage. */
-export interface RegisterStoredArtifactInput {
-  project: ProjectId;
-  sessionId?: BrowserSessionId;
-  jobId?: JobId;
-  profileRef?: ProfileRef;
-  kind: Artifact["kind"];
-  objectKey: string;
-  sha256: string;
-  mimeType: string;
-  sizeBytes: number;
 }
 
 export interface ReadArtifactInput {
   artifact: Artifact;
   project: ProjectId;
-  /** Hard cap before bytes can enter a companion upload buffer. */
+  /** Hard cap before bytes enter memory. */
   maxBytes: number;
 }
 
@@ -153,42 +140,7 @@ export class ArtifactCollector {
   }
 
   /**
-   * Register bytes written by a Fabric-owned companion (for example Companion) only after checking
-   * the exact immutable object. This prevents a companion response from attaching another
-   * project's object key or claiming a digest/size that MinIO did not actually store.
-   */
-  public async registerStored(input: RegisterStoredArtifactInput): Promise<Artifact> {
-    if ((input.sessionId === undefined) === (input.jobId === undefined)) {
-      throw new FabricError("validation_failed", "artifact belongs to exactly one session or job", 400);
-    }
-    const owner = input.sessionId ?? input.jobId!;
-    const expectedPrefix = `projects/${input.project}/artifacts/${owner}/${input.kind}/`;
-    if (!input.objectKey.startsWith(expectedPrefix)) {
-      throw new FabricError("authorization_denied", "artifact object is outside its Fabric ownership namespace", 403);
-    }
-    const stored = await this.#objectStore.head(input.objectKey);
-    if (
-      stored.sha256 !== input.sha256 ||
-      stored.sizeBytes !== input.sizeBytes ||
-      stored.contentType !== input.mimeType
-    ) {
-      throw new FabricError("conflict", "artifact metadata does not match immutable object storage", 409);
-    }
-    return this.#scheduler.attachArtifact({
-      ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
-      ...(input.jobId === undefined ? {} : { jobId: input.jobId }),
-      ...(input.profileRef === undefined ? {} : { profileRef: input.profileRef }),
-      kind: input.kind,
-      objectKey: input.objectKey,
-      sha256: input.sha256,
-      mimeType: input.mimeType,
-      sizeBytes: input.sizeBytes,
-      expiresAt: stored.expiresAt,
-    });
-  }
-
-  /**
-   * Read a previously registered immutable object for a Fabric-owned companion upload. The caller
+   * Read a previously registered immutable object for a Fabric-owned service. The caller
    * never receives an arbitrary object key: project, digest, size, and MIME metadata must all
    * match the durable artifact record first.
    */
@@ -197,14 +149,14 @@ export class ArtifactCollector {
     if (!Number.isInteger(input.maxBytes) || input.maxBytes < 1 || input.maxBytes > 256 * 1024 * 1024) {
       throw new FabricError("validation_failed", "artifact read limit is outside safe bounds", 400);
     }
-    if (input.artifact.sizeBytes > input.maxBytes) throw new FabricError("validation_failed", "artifact exceeds companion upload limit", 413);
+    if (input.artifact.sizeBytes > input.maxBytes) throw new FabricError("validation_failed", "artifact exceeds the read limit", 413);
     const stored = await this.#objectStore.get(input.artifact.objectKey);
     if (
       stored.sha256 !== input.artifact.sha256 ||
       stored.sizeBytes !== input.artifact.sizeBytes ||
       stored.contentType !== input.artifact.mimeType
     ) throw new FabricError("conflict", "artifact object no longer matches durable metadata", 409);
-    if (stored.body.byteLength > input.maxBytes) throw new FabricError("validation_failed", "artifact exceeds companion upload limit", 413);
+    if (stored.body.byteLength > input.maxBytes) throw new FabricError("validation_failed", "artifact exceeds the read limit", 413);
     return { bytes: new Uint8Array(stored.body), contentType: stored.contentType };
   }
 }

@@ -130,7 +130,7 @@ describe("your own Chrome via the remote-debugging toggle", () => {
   });
 
   test("platform defaults point at the everyday profile", () => {
-    expect(systemChrome("darwin", "/Users/u").userDataDir).toBe("/Users/u/Library/Application Support/Google/Chrome");
+    expect(systemChrome("darwin", "/home-dir/u").userDataDir).toBe("/home-dir/u/Library/Application Support/Google/Chrome");
     expect(systemChrome("linux", "/home/u").userDataDir).toBe("/home/u/.config/google-chrome");
     expect(() => systemChrome("win32", "C:/u")).toThrow(/--profile/);
   });

@@ -40,7 +40,7 @@ async function guardianSolverFor(recipe: { ref: string; runtime: string; profile
     browserRecipeRef: recipe.ref as never,
     profileRef: profile.ref,
     leaseMode: "writer",
-    egressPolicyRef: "egress_direct-egress@1" as never,
+    egressPolicyRef: "egress_direct@1" as never,
     artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
     ttlSeconds: 600,
   }, TEST_PRINCIPAL);
@@ -62,14 +62,14 @@ async function guardianSolverFor(recipe: { ref: string; runtime: string; profile
     seen.push(tokenSolver);
     return new FakeGuardian();
   };
-  const selector = captchaTokenSolverFor({ providerProxyUrl: "http://fabric-egress-sidecar:11008", deathByCaptchaUsername: "u", deathByCaptchaPassword: "p" });
+  const selector = captchaTokenSolverFor({ providerProxyUrl: "http://fabric-egress-sidecar:11003", deathByCaptchaUsername: "u", deathByCaptchaPassword: "p" });
   const spec = buildBrowserProcessSpec(worker, assignment, [], new Map([[recipe.runtime, new GenericBrowserRuntime(recipe.runtime)]]));
   const executor = new DockerContainerExecutor({
     command: new RecordingDockerCommand(),
     fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" })),
     turnstileGuardianFactory: guardianFactory,
     requireImmutableImages: false,
-    browserSeccompProfile: "/etc/compose/browser-fabric-seccomp/chromium-userns.json",
+    browserSeccompProfile: "/etc/browser-fabric/chromium-userns-seccomp.json",
     requireBrowserSeccompProfile: true,
     tokenSolverFor: selector,
   });
@@ -78,20 +78,26 @@ async function guardianSolverFor(recipe: { ref: string; runtime: string; profile
 }
 
 describe("token solver wiring from the signed recipe to the guardian", () => {
-  test("a reporting recipe whose challenge set enables automatic DBC gets a solver in its guardian", async () => {
-    const { solver, handlers } = await guardianSolverFor({ ref: "recipe_rebrowser-reporting@1", runtime: "rebrowser-puppeteer", profileFamily: "reporting-reporting" });
+  test("a built-in recipe whose challenge set enables automatic DBC gets a solver in its guardian", async () => {
+    const { solver, handlers } = await guardianSolverFor({ ref: "recipe_rebrowser-puppeteer@1", runtime: "rebrowser-puppeteer", profileFamily: "default" });
     expect(handlers?.some((handler: ChallengeHandler) => handler.kind === "dbc" && handler.mode === "automatic")).toBe(true);
     expect(solver).toBeDefined();
   });
 
   test("the signed assignment carries the challenge set the scheduler resolved from the recipe", async () => {
-    const { handlers } = await guardianSolverFor({ ref: "recipe_rebrowser-reporting@1", runtime: "rebrowser-puppeteer", profileFamily: "reporting-reporting" });
+    const { handlers } = await guardianSolverFor({ ref: "recipe_rebrowser-puppeteer@1", runtime: "rebrowser-puppeteer", profileFamily: "default" });
     expect(handlers).toBeDefined();
     expect(handlers!.map((handler: ChallengeHandler) => handler.id)).toContain("death-by-captcha");
   });
 
+  test("a recipe whose challenge set enables only the guardian gets no solver", async () => {
+    const { solver, handlers } = await guardianSolverFor({ ref: "recipe_example-guardian-only@1", runtime: "chromium-cdp", profileFamily: "default" });
+    expect(handlers?.map((handler: ChallengeHandler) => handler.kind)).toEqual(["guardian"]);
+    expect(solver).toBeUndefined();
+  });
+
   test("a provider with no credentials yields no solver even when the recipe enables it", () => {
-    const select = captchaTokenSolverFor({ providerProxyUrl: "http://fabric-egress-sidecar:11008" });
+    const select = captchaTokenSolverFor({ providerProxyUrl: "http://fabric-egress-sidecar:11003" });
     expect(select([{ id: "death-by-captcha", kind: "dbc", mode: "automatic", configuration: {} }])).toBeUndefined();
   });
 });

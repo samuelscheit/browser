@@ -4,7 +4,7 @@
  * One guardian attaches to each Fabric-owned Chromium process independently of
  * application CDP clients. It observes every page/tab and performs bounded
  * trusted mouse gestures only on visible, URL-validated challenge iframes: a
- * Media-style click on Cloudflare Turnstile and a human-like slide on
+ * single click on the Cloudflare Turnstile checkbox and a human-like slide on
  * DataDome's slider (one handler each, see challenge-handlers.ts). Recipes whose
  * challenge handlers enable token solving also get
  * reCAPTCHA v2 token injection from this same companion (hCaptcha is unsupported).

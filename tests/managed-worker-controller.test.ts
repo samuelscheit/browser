@@ -14,8 +14,8 @@ test("managed controller revokes a ready CDP capability and releases the lease w
     capabilities: {
       ...makeWorker().capabilities,
       runtimeFamilies: ["rebrowser-puppeteer"],
-      recipeRefs: ["recipe_rebrowser-reporting@1" as never],
-      supportedProfileFamilies: ["reporting-reporting"],
+      recipeRefs: ["recipe_rebrowser-puppeteer@1" as never],
+      supportedProfileFamilies: ["default"],
     },
   });
   await scheduler.registerWorker(worker, TEST_PRINCIPAL);
@@ -29,10 +29,10 @@ test("managed controller revokes a ready CDP capability and releases the lease w
     project: TEST_PROJECT,
     idempotencyKey: "controller-process-exit",
     runtime: "rebrowser-puppeteer",
-    browserRecipeRef: "recipe_rebrowser-reporting@1" as never,
+    browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never,
     profileRef: controllerProfile.ref,
     leaseMode: "writer",
-    egressPolicyRef: "egress_direct-egress@1" as never,
+    egressPolicyRef: "egress_direct@1" as never,
     artifactPolicyRef: "artifact-policy_standard-30-days@1" as never,
     ttlSeconds: 600,
   }, TEST_PRINCIPAL);
@@ -83,16 +83,16 @@ test("managed controller releases a media attempt immediately when its manager r
     projectScoped: true,
     kind: "media_manifest",
     contentType: "application/vnd.browser-fabric.media-manifest+json",
-    bytes: new TextEncoder().encode(JSON.stringify({ version: 1, mode: "relay", provider: "Media", url: "https://media.example/video.mp4", artifactKind: "video" })),
+    bytes: new TextEncoder().encode(JSON.stringify({ version: 1, mode: "relay", provider: "Example provider", url: "https://media.example/video.mp4", artifactKind: "video" })),
     policy,
     actor: TEST_PRINCIPAL,
   });
   const job = await scheduler.createJob({
     project: TEST_PROJECT,
     idempotencyKey: "controller-invalid-media-receipt",
-    recipeRef: "recipe_media-media@1" as never,
+    recipeRef: "recipe_media-relay@1" as never,
     operation: { operation: "relay", manifestRef: manifest.id },
-    egressPolicyRef: "egress_media-proxy-affinity@1" as never,
+    egressPolicyRef: "egress_example-affinity@1" as never,
     artifactPolicyRef: policy.ref,
   }, TEST_PRINCIPAL);
   await scheduler.dispatch();
@@ -113,7 +113,7 @@ test("managed controller releases a media attempt immediately when its manager r
     mediaExecutor,
     mediaResultGateway: {
       prepare: async () => ({
-        source: { version: 1, mode: "relay", provider: "Media", url: "https://media.example/video.mp4", artifactKind: "video" },
+        source: { version: 1, mode: "relay", provider: "Example provider", url: "https://media.example/video.mp4", artifactKind: "video" },
         resultEndpoint: "http://fabric-worker-manager:8083/v1/media-results/job_fixture",
         resultCapability: "x".repeat(32),
       }),

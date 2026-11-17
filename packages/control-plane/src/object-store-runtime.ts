@@ -23,13 +23,13 @@ async function secret(name: string, explicit?: string): Promise<string> {
     return required(name, await readFile(file, "utf8"));
   }
   // Raw environment values are useful for local development, but a production deployment must
-  // use Docker/Compose secret files so credentials do not end up in stack metadata or process
+  // use Docker secret files so credentials do not end up in stack metadata or process
   // inspection output by accident.
   if (process.env.NODE_ENV === "production") throw new Error(`${name}_FILE is required in production`);
   return required(name, process.env[name]);
 }
 
-/** Construct the concrete MinIO/S3 object store used by Fabric-owned services. */
+/** Construct the concrete S3-compatible object store used by Fabric-owned services. */
 export async function createProductionObjectStore(options: ProductionObjectStoreOptions = {}): Promise<S3ObjectStore> {
   const endpoint = required("FABRIC_OBJECT_STORE_ENDPOINT", options.endpoint ?? process.env.FABRIC_OBJECT_STORE_ENDPOINT);
   const bucket = required("FABRIC_OBJECT_STORE_BUCKET", options.bucket ?? process.env.FABRIC_OBJECT_STORE_BUCKET ?? "fabric-artifacts");

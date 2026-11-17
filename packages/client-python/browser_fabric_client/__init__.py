@@ -6,13 +6,7 @@ from .client import (
     FabricError,
     encrypt_input_for_worker,
 )
-from .adapters import (
-    ARTIFACT_POLICY,
-    WORKLOAD_DEFAULTS,
-    build_reporting_report_job,
-    build_social_insights_job,
-    build_workload_job,
-)
+from .requests import DEFAULT_ARTIFACT_POLICY, assert_no_durable_secrets, build_job
 
 __all__ = [
     "AsyncBrowserFabricClient",
@@ -21,9 +15,7 @@ __all__ = [
     "BrowserSessionLease",
     "FabricError",
     "encrypt_input_for_worker",
-    "ARTIFACT_POLICY",
-    "WORKLOAD_DEFAULTS",
-    "build_reporting_report_job",
-    "build_social_insights_job",
-    "build_workload_job",
+    "DEFAULT_ARTIFACT_POLICY",
+    "assert_no_durable_secrets",
+    "build_job",
 ]

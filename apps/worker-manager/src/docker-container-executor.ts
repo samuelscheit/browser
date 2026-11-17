@@ -51,9 +51,9 @@ export interface DockerContainerExecutorOptions {
   runtimeImageOverrides?: Readonly<Record<string, string>>;
   /** Reject any launch whose runtime has no controller-owned override. */
   requireRuntimeImageOverrides?: boolean;
-  /** Permit immutable registry images only unless a Compose-built local tag is explicitly allowed. */
+  /** Permit immutable registry images only unless a locally built Fabric tag is explicitly allowed. */
   requireImmutableImages?: boolean;
-  /** Compose builds these reviewed source images locally on the Fabric host. */
+  /** Accept `browser-fabric-*:local` images that the deployment builds from this source tree. */
   allowLocalBuildImages?: boolean;
   browserNetworks?: readonly string[];
   egressNetwork?: string;
@@ -70,9 +70,9 @@ export interface DockerContainerExecutorOptions {
   /** Extra allowlisted environment keys supplied by a runtime image, never client values. */
   allowedEnvironmentKeys?: readonly string[];
   /**
-   * Absolute host path to the narrowly reviewed Chromium user-namespace
-   * seccomp profile. Docker resolves this path in the daemon host namespace,
-   * not inside the manager container.
+   * Path of the narrowly reviewed Chromium user-namespace seccomp profile
+   * (CHROMIUM_SECCOMP_PROFILE_PATH). The Docker CLI in the manager container
+   * reads it and sends the profile content to the daemon.
    */
   browserSeccompProfile?: string;
   /** Fail browser starts closed when a production seccomp profile is absent. */
@@ -99,7 +99,12 @@ const forbiddenEnv = /(PASSWORD|SECRET|TOKEN|COOKIE|CREDENTIAL|AUTHORIZATION|OTP
 const forbiddenArg = /(^|\s)(--no-sandbox|--disable-web-security)(\s|$)/;
 /** Unprivileged uid:gid every Fabric browser image runs as; profile volumes must be owned by it. */
 const browserVolumeOwner = "10001:10001";
-const chromiumSeccompProfile = "/etc/compose/browser-fabric-seccomp/chromium-userns.json";
+/**
+ * The one approved path of the Chromium user-namespace seccomp profile inside the manager container
+ * (deploy/compose bind-mounts deploy/compose/chromium-userns-seccomp.json there). The Docker client
+ * reads the file and sends its content with each container create request.
+ */
+export const CHROMIUM_SECCOMP_PROFILE_PATH = "/etc/browser-fabric/chromium-userns-seccomp.json";
 
 function containerName(prefix: string, id: string): string {
   const value = `${prefix}-${id}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 63).replace(/-+$/, "");
@@ -112,7 +117,7 @@ function assertImage(image: string, input: { requireImmutable?: boolean; allowLo
     throw new FabricError("validation_failed", "browser image must be a pinned, non-latest image reference", 400);
   }
   if (input.requireImmutable && !immutableImage.test(image) && !(input.allowLocalBuildImages && localFabricImage.test(image))) {
-    throw new FabricError("validation_failed", "production browser image must be an immutable digest or a reviewed Compose local build", 400);
+    throw new FabricError("validation_failed", "production browser image must be an immutable digest or a local browser-fabric-*:local build", 400);
   }
 }
 
@@ -129,7 +134,7 @@ function assertBrowserSeccompProfile(value: string | undefined, required: boolea
     if (required) throw new FabricError("worker_unavailable", "managed browser seccomp profile is required", 503);
     return;
   }
-  if (value !== chromiumSeccompProfile) {
+  if (value !== CHROMIUM_SECCOMP_PROFILE_PATH) {
     throw new FabricError("validation_failed", "managed browser seccomp profile path is not approved", 400);
   }
 }
@@ -314,7 +319,7 @@ export class DockerContainerExecutor implements Executor {
         // container-name DNS can resolve a dynamic browser to its egress IP.
         // Resolve the exact address assigned on the fixed worker network
         // instead. The browser bridge is deliberately bound to this address;
-        // Caddy/CDP gateway retain the worker-owned hostname route separately.
+        // the CDP gateway retains the worker-owned hostname route separately.
         browserEndpoint = await this.#browserEndpointOnNetwork(name, spec.container.cdpBind.port, primaryNetwork);
         await this.#waitForBrowserReady(browserEndpoint, this.#options.browserReadyTimeoutMs ?? this.#options.startupTimeoutMs ?? 30_000);
         if (this.#containers.get(identity) !== name) throw new FabricError("worker_unavailable", "browser container was stopped while becoming ready", 503);

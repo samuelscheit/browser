@@ -90,14 +90,6 @@
         "pg": "^8.23.0",
       },
     },
-    "apps/companion-adapter": {
-      "name": "@browser-fabric/companion-adapter",
-      "version": "0.1.0",
-      "dependencies": {
-        "@browser-fabric/contracts": "workspace:*",
-        "@browser-fabric/control-plane": "workspace:*",
-      },
-    },
     "apps/worker-manager": {
       "name": "@browser-fabric/worker-manager",
       "version": "0.1.0",
@@ -198,8 +190,6 @@
     "@browser-fabric/recipes": ["@browser-fabric/recipes@workspace:packages/recipes"],
 
     "@browser-fabric/scheduler": ["@browser-fabric/scheduler@workspace:apps/scheduler"],
-
-    "@browser-fabric/companion-adapter": ["@browser-fabric/companion-adapter@workspace:apps/companion-adapter"],
 
     "@browser-fabric/testkit": ["@browser-fabric/testkit@workspace:packages/testkit"],
 

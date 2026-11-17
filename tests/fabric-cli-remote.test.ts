@@ -139,7 +139,7 @@ describe("remote backend", () => {
 
   test("a wrong credential explains the principal ID format", async () => {
     const { fabric } = setup();
-    await expect(fetchIdentity({ url: fabric.url, username: "principal_agent", password: "wrong" })).rejects.toThrow(/look like principal_agent/);
+    await expect(fetchIdentity({ url: fabric.url, username: "principal_agent", password: "wrong" })).rejects.toThrow(/look like principal_admin/);
     expect((await fetchIdentity({ url: fabric.url, username: "principal_agent", password: PASSWORD })).principal).toBe("principal_agent" as never);
   });
 });

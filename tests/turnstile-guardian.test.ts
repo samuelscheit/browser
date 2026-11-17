@@ -491,7 +491,7 @@ test.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium receives the
     const launched = await supervisor.start(spec);
     processId = launched.processId;
     // The raw-CDP client is deliberately attached after the guardian. Its page
-    // is an arbitrary application page, not a Media-specific browser flow.
+    // is an arbitrary application page, not an application-specific browser flow.
     browser = await puppeteer.connect({ browserWSEndpoint: launched.cdpBrowserEndpoint });
     const page = await browser.newPage();
     await page.goto(`data:text/html,${encodeURIComponent(`
@@ -503,7 +503,7 @@ test.skipIf(!realBrowserEnabled || !chromeAvailable)("real Chromium receives the
     // The supervisor reports guardian liveness and counters as part of process
     // health. The synthetic iframe cannot solve (there is no real Cloudflare
     // backend), but its input counter proves that a raw-CDP page received the
-    // automatic process-level clicker without a Media application client.
+    // automatic process-level clicker without any application client.
     expect(supervisor.isRunning(launched.processId)).toBe(true);
     expect(supervisor.guardianSnapshot(launched.processId)).toMatchObject({ running: true, clickAttempts: 1 });
     await page.close();

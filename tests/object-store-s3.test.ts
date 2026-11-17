@@ -73,7 +73,7 @@ test("S3 object storage replays only the exact immutable object and verifies byt
 test("S3 HTTP client signs endpoint-scoped requests and presigned reads without exposing the secret", async () => {
   const calls: Array<{ url: string; headers: Headers }> = [];
   const client = new S3HttpClient({
-    endpoint: "https://minio.example.test",
+    endpoint: "https://objects.example.test",
     accessKey: "unit-test-access-key",
     secretKey: "unit-test-secret-material",
     bucket: "fabric-artifacts",
@@ -92,7 +92,7 @@ test("S3 HTTP client signs endpoint-scoped requests and presigned reads without 
     metadata: { project: "project_test", kind: "log" },
   });
   const request = calls[0]!;
-  expect(request.url).toBe("https://minio.example.test/fabric-artifacts/projects/project_test/artifacts/job_test/log/fixture");
+  expect(request.url).toBe("https://objects.example.test/fabric-artifacts/projects/project_test/artifacts/job_test/log/fixture");
   expect(request.headers.get("authorization")).toContain("Credential=unit-test-access-key/20260904/us-east-1/s3/aws4_request");
   expect(request.headers.get("authorization")).not.toContain("unit-test-secret-material");
   expect(request.headers.get("x-amz-meta-project")).toBe("project_test");

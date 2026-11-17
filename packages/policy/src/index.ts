@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import {
   canonicalJson,
-  createId,
   FabricError,
   type ChallengeHandler,
   type ChallengeHandlerSet,
@@ -9,8 +8,10 @@ import {
   type EgressPolicyRef,
   type EgressRoute,
   type RuntimeFamily,
-  type TrafficClass
+  type TrafficClass,
+  trafficClasses
 } from "@browser-fabric/contracts";
+import { egressSidecarListeners } from "./sidecar";
 
 /** A proxy descriptor deliberately excludes credential bytes. */
 export interface ProxyDescriptor {
@@ -45,10 +46,6 @@ function hash(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
-function ref(name: string): EgressPolicyRef {
-  return `egress_${name}@1` as EgressPolicyRef;
-}
-
 const direct = (retryThroughProxy = false): EgressRoute => ({ kind: "direct", retryThroughProxy });
 const proxy = (proxyRef: string, protocol: "http" | "https" | "socks4" | "socks5" | "socks5h", remoteDns: boolean): EgressRoute => ({
   kind: "proxy",
@@ -57,173 +54,101 @@ const proxy = (proxyRef: string, protocol: "http" | "https" | "socks4" | "socks5
   remoteDns
 });
 
-function makePolicy(
-  name: string,
-  routes: Partial<Record<TrafficClass, EgressRoute>>,
-  constraints: EgressPolicy["constraints"],
-  options: Pick<EgressPolicy, "proxyFallbackRefs" | "directExceptionHostnames" | "affinityKey"> = {}
-): EgressPolicy {
-  const body = { name, routes, constraints, version: 1, options };
+export interface PolicyDefinition {
+  name: string;
+  version?: number;
+  routes: Partial<Record<TrafficClass, EgressRoute>>;
+  constraints: EgressPolicy["constraints"];
+  sidecar: EgressPolicy["sidecar"];
+  proxyFallbackRefs?: readonly string[];
+  directExceptionHostnames?: readonly string[];
+}
+
+/** Build an immutable egress policy; its hash covers every routing-relevant field. */
+export function makeEgressPolicy(definition: PolicyDefinition): EgressPolicy {
+  const version = definition.version ?? 1;
+  const { name, routes, constraints, sidecar, proxyFallbackRefs, directExceptionHostnames } = definition;
+  const body = { name, version, routes, constraints, sidecar, proxyFallbackRefs, directExceptionHostnames };
   return {
-    ref: ref(name),
+    ref: `egress_${name}@${version}` as EgressPolicyRef,
     family: name,
-    version: 1,
+    version,
     immutableHash: hash(body),
     routes,
+    sidecar,
     constraints,
-    ...(options.proxyFallbackRefs === undefined ? {} : { proxyFallbackRefs: options.proxyFallbackRefs }),
-    ...(options.directExceptionHostnames === undefined ? {} : { directExceptionHostnames: options.directExceptionHostnames }),
-    ...(options.affinityKey === undefined ? {} : { affinityKey: options.affinityKey }),
+    ...(proxyFallbackRefs === undefined ? {} : { proxyFallbackRefs }),
+    ...(directExceptionHostnames === undefined ? {} : { directExceptionHostnames }),
     createdAt: now()
   };
 }
 
-/** Immutable built-in policies required by the migration plan. */
+const everyTrafficClass = [...trafficClasses];
+const allRoutes = (route: EgressRoute) => Object.fromEntries(everyTrafficClass.map((trafficClass) => [trafficClass, route])) as Partial<Record<TrafficClass, EgressRoute>>;
+
+/**
+ * Built-in policies. A deployment adds its own (for example a second upstream proxy pool or a
+ * direct-exception list) through the catalog file, never through code.
+ */
 export const builtInEgressPolicies: readonly EgressPolicy[] = [
-  makePolicy(
-    "signup-direct-assets",
-    {
-      document: proxy("signup-application", "https", true),
-      api: proxy("signup-application", "https", true),
-      websocket: proxy("signup-application", "https", true),
-      static_asset: direct(false),
-      browser_download: proxy("signup-application", "https", true),
-      captcha_solver: proxy("signup-application", "https", true),
-      direct_exception: direct(false)
-    },
-    { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: true, allowDirectMediaRelay: false }
-  ),
-  makePolicy(
-    "media-proxy-affinity",
-    {
-      document: proxy("media", "socks5h", true),
-      api: proxy("media", "socks5h", true),
-      websocket: proxy("media", "socks5h", true),
-      static_asset: proxy("media", "socks5h", true),
-      provider_handshake: proxy("media", "socks5h", true),
-      media_manifest: proxy("media", "socks5h", true),
-      media_key: proxy("media", "socks5h", true),
-      media_segment: proxy("media", "socks5h", true),
-      media_range: proxy("media", "socks5h", true),
-      direct_exception: direct(false)
-    },
-    { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: true },
-    // These are exact reviewed provider suffixes, not loose labels. `cdn-a` and `cdn-b`
-    // alone do not match the production hosts and would silently route the documented exception
-    // through the affinity proxy instead of direct egress.
-    { directExceptionHostnames: ["cdn-a.example", "cdn-b.example"], affinityKey: "media-provider-session" }
-  ),
-  makePolicy(
-    "social-proxy-fallback",
-    {
-      document: proxy("social-primary", "https", true),
-      api: proxy("social-primary", "https", true),
-      websocket: proxy("social-primary", "https", true),
-      static_asset: proxy("social-primary", "https", true),
-      provider_handshake: proxy("social-primary", "https", true),
-      captcha_solver: proxy("social-solver", "https", true)
-    },
-    { preserveProxyAffinity: false, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: false },
-    { proxyFallbackRefs: ["social-primary", "social-secondary", "social-direct"] }
-  ),
-  makePolicy(
-    "tor-egress",
-    {
-      document: { kind: "tor", poolRef: "default", remoteDns: true },
-      api: { kind: "tor", poolRef: "default", remoteDns: true },
-      websocket: { kind: "tor", poolRef: "default", remoteDns: true },
-      static_asset: { kind: "tor", poolRef: "default", remoteDns: true },
-      browser_download: { kind: "tor", poolRef: "default", remoteDns: true }
-    },
-    { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: false }
-  ),
-  // Reporting pages that cloak by visitor IP send Tor and datacenter exits to a decoy.
-  // This route leaves through the operator's own residential connection (a VPN
-  // exit node), so it is used only after a capture shows cloaking.
-  makePolicy(
-    "home-exit",
-    {
-      document: proxy("home-exit", "socks5h", true),
-      api: proxy("home-exit", "socks5h", true),
-      websocket: proxy("home-exit", "socks5h", true),
-      static_asset: proxy("home-exit", "socks5h", true),
-      browser_download: proxy("home-exit", "socks5h", true)
-    },
-    { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: false }
-  ),
-  makePolicy(
-    "direct-egress",
-    Object.fromEntries(([
-      "document",
-      "api",
-      "websocket",
-      "static_asset",
-      "browser_download",
-      "media_manifest",
-      "media_key",
-      "media_segment",
-      "media_range",
-      "provider_handshake",
-      "captcha_solver",
-      "direct_exception"
-    ] as TrafficClass[]).map((trafficClass) => [trafficClass, direct(true)])),
-    { preserveProxyAffinity: false, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: true }
-  )
+  makeEgressPolicy({
+    name: "direct",
+    routes: allRoutes(direct(true)),
+    constraints: { preserveProxyAffinity: false, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: true },
+    sidecar: { listener: egressSidecarListeners.direct }
+  }),
+  // The upstream proxy URL (or pool) lives only in the sidecar's secret file; the policy names the listener.
+  makeEgressPolicy({
+    name: "proxy",
+    routes: allRoutes(proxy("default", "http", true)),
+    constraints: { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: true },
+    sidecar: { listener: egressSidecarListeners.proxy }
+  }),
+  makeEgressPolicy({
+    name: "tor",
+    routes: Object.fromEntries((["document", "api", "websocket", "static_asset", "browser_download"] as TrafficClass[])
+      .map((trafficClass) => [trafficClass, { kind: "tor", poolRef: "default", remoteDns: true }])),
+    constraints: { preserveProxyAffinity: true, disableServiceWorkersInProxyMode: false, allowDirectMediaRelay: false },
+    sidecar: { listener: egressSidecarListeners.tor }
+  })
 ];
 
+export interface ChallengeSetDefinition {
+  name: string;
+  version?: number;
+  handlers: readonly ChallengeHandler[];
+}
+
+export function makeChallengeSet(definition: ChallengeSetDefinition): ChallengeHandlerSet {
+  const version = definition.version ?? 1;
+  return {
+    ref: `challenge_${definition.name}@${version}` as ChallengeHandlerSet["ref"],
+    family: definition.name,
+    version,
+    immutableHash: `sha256:${hash({ name: definition.name, version, handlers: definition.handlers })}`,
+    handlers: definition.handlers,
+    createdAt: now()
+  };
+}
+
+const guardianHandler: ChallengeHandler = { id: "guardian", kind: "guardian", mode: "automatic", configuration: { turnstile: true, datadome: true } };
+
+/**
+ * `guardian` documents the process-level Turnstile/DataDome guardian every Fabric Chromium carries.
+ * `captcha-solver` additionally enables token solving (reCAPTCHA v2/hCaptcha) through each provider
+ * whose credential the deployment configured; without a credential no provider is ever called.
+ */
 export const builtInChallengeSets: readonly ChallengeHandlerSet[] = [
-  {
-    ref: "challenge_reporting@1" as ChallengeHandlerSet["ref"],
-    family: "reporting",
-    version: 1,
-    immutableHash: "challenge-reporting-v1",
+  makeChallengeSet({ name: "guardian", handlers: [guardianHandler] }),
+  makeChallengeSet({
+    name: "captcha-solver",
     handlers: [
-      { id: "cloudflare-rebrowser", kind: "cloudflare", mode: "automatic", configuration: { strategy: "rebrowser" } },
-      { id: "death-by-captcha", kind: "dbc", mode: "automatic", configuration: { extension: true, api: true } },
-      { id: "anticaptcha-recaptcha", kind: "anticaptcha", mode: "automatic", configuration: { provider: "anticaptcha" } }
-    ],
-    createdAt: now()
-  },
-  {
-    ref: "challenge_news@1" as ChallengeHandlerSet["ref"],
-    family: "news",
-    version: 1,
-    immutableHash: "challenge-news-v1",
-    handlers: [{ id: "news-anticaptcha", kind: "anticaptcha", mode: "automatic", configuration: { provider: "anticaptcha" } }],
-    createdAt: now()
-  },
-  {
-    ref: "challenge_chat-interactive@1" as ChallengeHandlerSet["ref"],
-    family: "chat-interactive",
-    version: 1,
-    immutableHash: "challenge-chat-interactive-v1",
-    handlers: [{ id: "authenticated-turnstile", kind: "interactive-turnstile", mode: "manual", configuration: { observationBoundary: "dom-only" } }],
-    createdAt: now()
-  },
-  {
-    ref: "challenge-avatar-manual@1" as ChallengeHandlerSet["ref"],
-    family: "avatar-manual",
-    version: 1,
-    immutableHash: "challenge-avatar-manual-v1",
-    handlers: [{ id: "manual-auth", kind: "manual-handoff", mode: "manual", configuration: { resumeRequired: true } }],
-    createdAt: now()
-  },
-  {
-    ref: "challenge-signup-manual@1" as ChallengeHandlerSet["ref"],
-    family: "signup-manual",
-    version: 1,
-    immutableHash: "challenge-signup-manual-v1",
-    handlers: [{ id: "security-account-selection", kind: "manual-handoff", mode: "manual", configuration: { visible: true } }],
-    createdAt: now()
-  },
-  {
-    ref: "challenge-social-fallback@1" as ChallengeHandlerSet["ref"],
-    family: "social-fallback",
-    version: 1,
-    immutableHash: "challenge-social-fallback-v1",
-    handlers: [{ id: "social-strategy-fallback", kind: "social-fallback", mode: "fallback", configuration: { preserveOrder: true } }],
-    createdAt: now()
-  }
+      guardianHandler,
+      { id: "death-by-captcha", kind: "dbc", mode: "automatic", configuration: { provider: "death-by-captcha" } },
+      { id: "anticaptcha", kind: "anticaptcha", mode: "automatic", configuration: { provider: "anticaptcha" } }
+    ]
+  }),
+  makeChallengeSet({ name: "manual-handoff", handlers: [guardianHandler, { id: "manual-handoff", kind: "manual-handoff", mode: "manual", configuration: { resumeRequired: true } }] })
 ];
 
 export function parseProxyUrl(raw: string): { descriptor: ProxyDescriptor; credential?: EphemeralProxyCredential } {

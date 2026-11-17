@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { AssignmentSigner, BrowserScheduler, FakeClock, ProfileVolumeManager, MemoryVolumeDriver, WebhookCallbackDispatcher, CallbackQueue } from "@browser-fabric/control-plane";
 import { builtInEgressPolicies, ChallengeCoordinator } from "@browser-fabric/policy";
 import { RecipeRegistry } from "@browser-fabric/recipes";
-import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, makeWorker } from "@browser-fabric/testkit";
+import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, makeWorker, exampleCatalog } from "@browser-fabric/testkit";
 import type { JobId, Worker } from "@browser-fabric/contracts";
 
 describe("advanced lifecycle boundaries", () => {
@@ -35,10 +35,10 @@ describe("advanced lifecycle boundaries", () => {
       manual: async () => "expired"
     });
     const registry = await import("@browser-fabric/policy");
-    const manualSet = registry.builtInChallengeSets.find((set) => set.family === "avatar-manual")!;
+    const manualSet = registry.builtInChallengeSets.find((set) => set.family === "manual-handoff")!;
     const manual = await coordinator.run(manualSet, "manual-handoff", { sessionId: "session", project: "project", signal: new AbortController().signal });
     expect(manual.status).toBe("awaiting_manual");
-    const unknown = await coordinator.run(manualSet, "cloudflare", { sessionId: "session", project: "project" });
+    const unknown = await coordinator.run(manualSet, "dbc", { sessionId: "session", project: "project" });
     expect(unknown.status).toBe("blocked_challenge");
   });
 
@@ -85,7 +85,7 @@ test("scheduler accepts ciphertext-only input envelopes and returns no plaintext
   await scheduler.bootstrap({ projects: [{ id: TEST_PROJECT, name: "Test" }], principals: [TEST_PRINCIPAL] });
   await scheduler.registerWorker(worker);
   const profile = await scheduler.createProfile(makeProfile(worker), TEST_PRINCIPAL);
-  const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "encrypted-input", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
+  const session = await scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "encrypted-input", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-puppeteer@1" as never, profileRef: profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
   const [assignment] = await scheduler.dispatch();
   const request = await scheduler.requestEphemeralInput({ sessionId: session.id as never, leaseId: assignment!.lease!.id, field: "password", fieldType: "password" }, { ...TEST_PRINCIPAL, certificateFingerprint: worker.certificateFingerprint });
   const envelope = encryptEphemeralInput({ request: request.request, workerId: worker.id, workerPublicKeyPem: keys.publicKeyPem, value: "ciphertext-only-secret", now: clock.now() });
@@ -126,50 +126,17 @@ test("encrypted input broker is transient, authenticated, idempotent, and one-sh
   expect(secondGet.status).toBe(404);
 });
 
-test("Companion adapter cancels nonterminal runs and completes jobs as the assigned worker", async () => {
-  const { CompanionAdapter } = await import("../apps/companion-adapter/src/index");
-  const { parseCompanionManifestCatalog, StaticCompanionManifestResolver } = await import("../apps/companion-adapter/src/manifest");
-  const { ArtifactCollector, MemoryObjectStore } = await import("@browser-fabric/control-plane");
-  const context = await bootstrapTestScheduler();
-  const profile = await context.scheduler.createProfile({ ...context.profile, ref: "profile_pfp" as never, profileFamily: "avatar-account" }, TEST_PRINCIPAL);
-  const collector = new ArtifactCollector({ scheduler: context.scheduler, objectStore: new MemoryObjectStore(undefined, () => context.clock.now()), clock: () => context.clock.now() });
-  // Artifact inputs are normally produced by a prior browser session; create a session-owned
-  // fixture here so the typed avatar path exercises the same project/digest boundary.
-  const inputSession = await context.scheduler.createBrowserSession({ project: TEST_PROJECT, idempotencyKey: "companion-avatar-input", runtime: "rebrowser-puppeteer", browserRecipeRef: "recipe_rebrowser-reporting@1" as never, profileRef: context.profile.ref, leaseMode: "writer", egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never, ttlSeconds: 600 }, TEST_PRINCIPAL);
-  const inputArtifact = await collector.capture({ project: TEST_PROJECT, sessionId: inputSession.id as never, kind: "screenshot", contentType: "image/png", bytes: new Uint8Array([137, 80, 78, 71]), policy: { ref: "artifact-policy_standard-30-days@1" as never, retentionDays: 30, allowedKinds: ["screenshot"], createdAt: new Date().toISOString() } });
-  await context.scheduler.releaseBrowserSession(inputSession.id as never, TEST_PRINCIPAL);
-  const job = await context.scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "companion-job", recipeRef: "recipe_profile-update-companion@1" as never, operation: { operation: "update_avatar", manifestRef: "manifest_1", avatarArtifactRef: inputArtifact.id, approvedBy: "principal_test" }, profileRef: profile.ref, egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never }, TEST_PRINCIPAL);
-  const [assignment] = await context.scheduler.dispatch();
-  const workerActor = { ...TEST_PRINCIPAL, certificateFingerprint: context.worker.certificateFingerprint };
-  await context.scheduler.claimAssignment(context.worker.id, assignment!.lease!.id, undefined, workerActor);
-  await context.scheduler.markLeaseStarted(assignment!.lease!.id, context.worker.id, workerActor);
-  const states: string[] = [];
-  let polls = 0;
-  const adapterClocked = new CompanionAdapter(context.scheduler, {
-    runTask: async (input) => { expect(input.browserAddress).toContain("worker.internal"); expect(input.url).toBe("https://avatar.example/update"); expect(input.prompt).toContain("account@example.test"); expect(input.prompt).toContain("Fabric account-safety requirement"); return { id: "run_1", status: "running" }; },
-    pollRun: async () => { polls += 1; states.push("poll"); return { id: "run_1", status: "completed", output: { identity: "account@example.test" } }; },
-    cancelRun: async () => { states.push("cancel"); },
-    listRunArtifacts: async () => [],
-    downloadArtifact: async () => { throw new Error("no artifact expected"); },
-    uploadFile: async () => ({ fileId: "file_1" }),
-  }, collector, new StaticCompanionManifestResolver(parseCompanionManifestCatalog({ version: 1, manifests: [{ ref: "manifest_1", url: "https://avatar.example/update", prompt: "Update the avatar", maxSteps: 10, runWith: "agent", expectedAccount: "account@example.test" }] })), () => context.clock.now());
-  await adapterClocked.execute(job.id as never, TEST_PRINCIPAL);
-  expect(states).toEqual(["poll"]);
-  expect((await context.scheduler.getJob(job.id as never, TEST_PRINCIPAL)).status).toBe("succeeded");
-  expect(assignment?.lease).toBeDefined();
-});
-
 test("typed recipe runner preserves retry, input, artifact, and normalized terminal state", async () => {
-  const { RecipeRunner, RecipeRegistry } = await import("@browser-fabric/recipes");
+  const { RecipeRunner, RecipeRegistry, builtInRecipes } = await import("@browser-fabric/recipes");
   const { ArtifactCollector, MemoryObjectStore } = await import("@browser-fabric/control-plane");
   const context = await bootstrapTestScheduler();
-  const newsProfile = await context.scheduler.createProfile({ ...context.profile, ref: "profile_runner_news" as never, profileFamily: "news-browser" }, TEST_PRINCIPAL);
-  const job = await context.scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "runner-job", recipeRef: "recipe_news-browser-fetch@1" as never, operation: { operation: "fetch_news", url: "https://news.example" }, profileRef: newsProfile.ref, egressPolicyRef: "egress_direct-egress@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never }, TEST_PRINCIPAL);
+  const fetchProfile = await context.scheduler.createProfile({ ...context.profile, ref: "profile_runner_fetch" as never, profileFamily: "default" }, TEST_PRINCIPAL);
+  const job = await context.scheduler.createJob({ project: TEST_PROJECT, idempotencyKey: "runner-job", recipeRef: "recipe_example-fetch@1" as never, operation: { operation: "fetch_page", url: "https://site.example" }, profileRef: fetchProfile.ref, egressPolicyRef: "egress_direct@1" as never, artifactPolicyRef: "artifact-policy_standard-30-days@1" as never }, TEST_PRINCIPAL);
   const [assignment] = await context.scheduler.dispatch();
   const attempts: number[] = [];
   const runner = new RecipeRunner({
     scheduler: context.scheduler,
-    registry: new RecipeRegistry(),
+    registry: new RecipeRegistry([...builtInRecipes, ...exampleCatalog.recipes]),
     artifactCollector: new ArtifactCollector({ scheduler: context.scheduler, objectStore: new MemoryObjectStore(), clock: () => context.clock.now() }),
     executorFor: () => ({ execute: async ({ job: current }) => {
       attempts.push(attempts.length + 1);

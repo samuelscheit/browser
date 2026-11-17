@@ -1,8 +1,8 @@
 /**
  * Fabric Chromium runs on servers without a GPU, so WebGL falls back to
- * SwiftShader and reports it as the unmasked renderer. Reporting kits and bot
- * checks treat "SwiftShader" (like "llvmpipe") as proof of automation and serve
- * a decoy. Every Fabric page therefore reports the integrated Intel GPU of an
+ * SwiftShader and reports it as the unmasked renderer. Bot checks treat
+ * "SwiftShader" (like "llvmpipe") as proof of automation and serve a block page
+ * or a decoy. Every Fabric page therefore reports the integrated Intel GPU of an
  * ordinary Linux desktop, which matches the Linux Chrome User-Agent Fabric
  * presents. Only the two unmasked identification strings change; rendering and
  * every other WebGL parameter stay real.

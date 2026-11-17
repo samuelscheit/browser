@@ -14,7 +14,7 @@ export const challengeObservation = (overrides: Partial<TurnstilePageObservation
   signals: ["title-marker"],
   // The guardian's CDP frame-tree pass supplies the actual Turnstile signal
   // and bounding box. This models a widget inside a closed shadow root, which
-  // is the case Media previously handled through Patchright/Rebrowser.
+  // is the case a stealth-patched driver would otherwise have to handle per application.
   challenge: false,
   solved: false,
   ...overrides,

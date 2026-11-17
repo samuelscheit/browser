@@ -24,8 +24,7 @@ export const runtimeFamilies = [
   "chromium-cdp",
   "patchright",
   "rebrowser-puppeteer",
-  "playwright-social",
-  "companion",
+  /** One-shot immutable media artifact relay. It never creates a browser lease. */
   "media-relay",
   /** Persistent, capability-gated HLS/MP4 playback relay. It never creates a browser lease. */
   "media-playback"
@@ -39,6 +38,8 @@ export function isMediaRuntime(value: string): value is MediaRuntimeFamily {
 }
 
 export const leaseModes = ["writer", "interactive", "clone"] as const;
+
+export const challengeHandlerKinds = ["guardian", "dbc", "anticaptcha", "manual-handoff"] as const;
 
 /**
  * Simultaneous external CDP clients one session may allow. Chromium serves many DevTools clients
@@ -54,6 +55,8 @@ export const MAX_EXTERNAL_CDP_CONNECTIONS = 8;
  * within it; without one the scheduler uses DEFAULT_ACTIVE_BROWSER_LEASES.
  */
 export const MAX_ACTIVE_BROWSER_LEASES = 8;
+/** Upper bound for one managed worker's browser capacity (the `fabric_workers.capacity` CHECK). */
+export const MAX_WORKER_BROWSER_LEASES = 4;
 export const DEFAULT_ACTIVE_BROWSER_LEASES = 4;
 export type LeaseMode = (typeof leaseModes)[number];
 
@@ -171,7 +174,6 @@ export interface WorkerCapabilities {
   recipeRefs: readonly RecipeRef[];
   browserVersions: Readonly<Record<string, string>>;
   supportsInteractive: boolean;
-  supportsCompanionCompanion: boolean;
   supportedProfileFamilies: readonly string[];
 }
 
@@ -212,7 +214,6 @@ export interface BrowserRecipe {
   mode: "headless" | "headful" | "interactive";
   profileFamily: string;
   requiredCapabilities: readonly string[];
-  allowedCompanionConnections: readonly ("companion" | "file-input-bridge" | "none")[];
   launch: {
     viewport: { width: number; height: number };
     locale: string;
@@ -245,18 +246,31 @@ export interface EgressPolicy {
   version: number;
   immutableHash: string;
   routes: Readonly<Partial<Record<TrafficClass, EgressRoute>>>;
-  /** Ordered proxy strategy preserved for runtimes such as SocialApi. */
+  /** Egress sidecar listeners that carry this policy's traffic from native (non-browser) workers. */
+  sidecar: EgressSidecarRouting;
+  /** Ordered proxy refs tried in turn when a proxied request fails with a retryable error. */
   proxyFallbackRefs?: readonly string[];
-  /** Hostname suffixes that are explicitly allowed to bypass proxy affinity. */
+  /** Hostname suffixes that are explicitly allowed to bypass the proxy route. */
   directExceptionHostnames?: readonly string[];
-  /** Optional provider-affinity key used to keep browser/media traffic on one egress identity. */
-  affinityKey?: string;
   constraints: {
     preserveProxyAffinity: boolean;
     disableServiceWorkersInProxyMode: boolean;
     allowDirectMediaRelay: boolean;
   };
   createdAt: string;
+}
+
+/** A named listener of the deployment's egress sidecar (see deploy/compose/egress-sidecar.json). */
+export interface EgressSidecarListener {
+  id: string;
+  port: number;
+}
+
+export interface EgressSidecarRouting {
+  /** Listener for every route of the policy that is not `direct`. */
+  listener: EgressSidecarListener;
+  /** Listener for the policy's `direct` routes and direct-exception hostnames; defaults to `listener`. */
+  directListener?: EgressSidecarListener;
 }
 
 export interface ChallengeHandlerSet {
@@ -270,7 +284,11 @@ export interface ChallengeHandlerSet {
 
 export interface ChallengeHandler {
   id: string;
-  kind: "cloudflare" | "dbc" | "anticaptcha" | "interactive-turnstile" | "manual-handoff" | "social-fallback";
+  /**
+   * `guardian`: the process-level Turnstile/DataDome guardian; `dbc`/`anticaptcha`: token solving through
+   * that provider when the deployment configured its credential; `manual-handoff`: pause for a human.
+   */
+  kind: (typeof challengeHandlerKinds)[number];
   mode: "automatic" | "manual" | "fallback";
   configuration: Readonly<Record<string, string | number | boolean>>;
 }
@@ -430,8 +448,6 @@ export interface Job {
   updatedAt: string;
   expiresAt: string;
   assignmentClaimedAt?: string;
-  /** Non-secret companion execution id (for example Companion's run id). */
-  companionRunId?: string;
   /** Reserved once for a one-shot media output so immutable retries keep the same object metadata. */
   mediaArtifactExpiresAt?: string;
   /** Active media-only attempt that authorizes exactly one result capability. */

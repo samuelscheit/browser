@@ -1,5 +1,5 @@
 /**
- * Cloudflare Turnstile: one Media-style trusted click on the checkbox at the
+ * Cloudflare Turnstile: one trusted click on the checkbox at the
  * left of the widget iframe, after a short eased approach.
  */
 import type { ChallengeBudgetPolicy, ChallengeFrameBox, ChallengeHandler } from "./challenge-handlers";

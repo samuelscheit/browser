@@ -50,6 +50,7 @@
     "apps/**/*.ts",
     "packages/**/*.ts",
     "tests/**/*.ts",
-    "apps/input-broker/**/*.ts"
+    "workers/**/*.ts",
+    "scripts/**/*.ts"
   ]
 }

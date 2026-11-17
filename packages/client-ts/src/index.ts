@@ -442,6 +442,6 @@ export class BrowserFabricClient {
 
 export type { BrowserSessionId, JobId } from "@browser-fabric/contracts";
 
-export * from "./adapters";
+export * from "./requests";
 
 export * from "./input";

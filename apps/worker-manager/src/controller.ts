@@ -34,7 +34,7 @@ interface ActiveProcess {
 const DEFAULT_LEASE_HEARTBEAT_INTERVAL_MS = 5_000;
 
 /**
- * Controller-side loop for managed fabric-host workers. It is the only component with Docker access;
+ * Controller-side loop for managed workers. It is the only component with Docker access;
  * browser worker containers themselves have no socket. Each assignment is claimed before container
  * creation, and containers are removed as soon as the durable lease/job disappears.
  */
@@ -58,7 +58,7 @@ export class ManagedWorkerController {
     this.#scheduler = options.scheduler;
     this.#mediaExecutor = options.mediaExecutor;
     this.#mediaResultGateway = options.mediaResultGateway;
-    this.#managedRuntimeFamilies = new Set(options.managedRuntimeFamilies ?? ["chromium-cdp", "patchright", "rebrowser-puppeteer", "companion", "media-relay"]);
+    this.#managedRuntimeFamilies = new Set(options.managedRuntimeFamilies ?? ["chromium-cdp", "patchright", "rebrowser-puppeteer", "media-relay"]);
     this.#manager = new WorkerManager(options.scheduler, options.browserExecutor, options.mediaExecutor);
     this.#pollIntervalMs = Math.max(250, Math.min(30_000, options.pollIntervalMs ?? 1_000));
     this.#leaseHeartbeatIntervalMs = Math.max(1_000, Math.min(15_000, options.leaseHeartbeatIntervalMs ?? DEFAULT_LEASE_HEARTBEAT_INTERVAL_MS));
@@ -109,8 +109,8 @@ export class ManagedWorkerController {
       const workers = (await this.#scheduler.listWorkers()).filter((worker) => !worker.isLocal && worker.health === "healthy").slice(0, this.#maxWorkersPerTick);
       const liveIdentities = new Set<string>();
       for (const worker of workers) {
-        // Native runtimes (notably SocialApi/Playwright) own their execution loop and must not
-        // race this controller for the same unclaimed assignment.
+        // Runtimes outside managedRuntimeFamilies (the persistent media-playback worker) own their
+        // execution loop and must not race this controller for the same unclaimed assignment.
         if (![...worker.capabilities.runtimeFamilies].some((runtime) => this.#managedRuntimeFamilies.has(runtime))) continue;
         const workerPrincipalIdentity = workerPrincipal(worker);
         for (const process of this.#active.values()) {

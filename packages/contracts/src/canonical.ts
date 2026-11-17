@@ -18,3 +18,9 @@ export function canonicalJson(value: unknown): string {
   }
   throw new Error(`canonical JSON cannot encode ${typeof value}`);
 }
+
+/** True for the loopback names a single-host deployment uses (`127.0.0.1`, `localhost`, `::1`). */
+export function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
+}

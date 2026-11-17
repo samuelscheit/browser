@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { FabricError, type BrowserSessionId, type CdpCapabilityClaims, type ProfileRef, type ProjectId, type WorkerId } from "@browser-fabric/contracts";
+import { FabricError, isLoopbackHostname, type BrowserSessionId, type CdpCapabilityClaims, type ProfileRef, type ProjectId, type WorkerId } from "@browser-fabric/contracts";
 import { epochSeconds, type Clock, SystemClock } from "./clock";
 
 function encode(value: unknown): string {
@@ -33,7 +33,13 @@ export class CapabilitySigner {
     this.#secret = options.secret;
     this.#clock = options.clock ?? new SystemClock();
     const gatewayBaseUrl = (options.gatewayBaseUrl ?? "wss://fabric.example.invalid").replace(/\/$/, "");
-    if (!/^wss:\/\//.test(gatewayBaseUrl)) throw new Error("gatewayBaseUrl must use wss://");
+    // Capability URLs are bearer secrets, so they travel only over TLS, except to a loopback edge
+    // (a single-host deployment reached through `ws://127.0.0.1:<port>` or an SSH tunnel).
+    let parsed: URL | undefined;
+    try { parsed = new URL(gatewayBaseUrl); } catch { parsed = undefined; }
+    if (!parsed || !(parsed.protocol === "wss:" || (parsed.protocol === "ws:" && isLoopbackHostname(parsed.hostname)))) {
+      throw new Error("gatewayBaseUrl must use wss:// (ws:// only for a loopback host)");
+    }
     this.#gatewayBaseUrl = gatewayBaseUrl;
   }
 

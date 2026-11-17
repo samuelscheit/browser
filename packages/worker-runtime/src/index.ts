@@ -27,7 +27,7 @@ export interface BrowserContainerSpec {
   cdpBind: { host: "127.0.0.1" | "private-overlay"; port: number };
   /**
    * A browser-level, Fabric-owned companion that observes Cloudflare
-   * Turnstile widgets and performs the bounded Media-style checkbox click.
+   * Turnstile widgets and performs one bounded, trusted checkbox click.
    * It is deliberately part of the worker spec, not an opt-in application
    * client feature, so all ordinary CDP browser sessions receive it.
    */
@@ -198,10 +198,7 @@ export class WorkerRuntimeRegistry {
 
 export function defaultRuntimeRegistry(): WorkerRuntimeRegistry {
   const registry = new WorkerRuntimeRegistry();
-  for (const family of ["chromium-cdp", "patchright", "rebrowser-puppeteer", "companion"]) registry.register(new GenericBrowserRuntime(family));
-  // Social's Python worker is an application client. Its Chromium process is built and owned by
-  // the same generic Fabric browser lifecycle as every other CDP runtime.
-  registry.register(new GenericBrowserRuntime("playwright-social"));
+  for (const family of ["chromium-cdp", "patchright", "rebrowser-puppeteer"]) registry.register(new GenericBrowserRuntime(family));
   registry.register(new MediaRelayRuntime());
   return registry;
 }

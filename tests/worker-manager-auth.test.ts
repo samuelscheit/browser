@@ -27,7 +27,6 @@ describe("worker-manager control authentication", () => {
       cdpRelayEndpoint: worker.cdpRelayEndpoint,
       ...(worker.mediaPlaybackEndpoint === undefined ? {} : { mediaPlaybackEndpoint: worker.mediaPlaybackEndpoint }),
       capabilities: {
-        supportsCompanionCompanion: worker.capabilities.supportsCompanionCompanion,
         supportedProfileFamilies: worker.capabilities.supportedProfileFamilies,
         browserVersions: worker.capabilities.browserVersions,
         recipeRefs: worker.capabilities.recipeRefs,

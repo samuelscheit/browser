@@ -53,15 +53,15 @@ test("the HTTP lifecycle relay authenticates upstream and strips CDP capability 
     if (!address || typeof address === "string") throw new Error("relay test server did not bind a TCP port");
     const response = await originalFetch(`http://127.0.0.1:${address.port}/v1/browser-sessions`, {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "reporting-test" },
-      body: JSON.stringify({ project: "project_reporting_support" }),
+      headers: { "content-type": "application/json", "idempotency-key": "example-test" },
+      body: JSON.stringify({ project: "project_example" }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ id: "browser-session_abc", status: "ready" });
     expect(seen).toEqual({
       url: "https://fabric.example/v1/browser-sessions",
       authorization: "Basic internal-only",
-      idempotencyKey: "reporting-test",
+      idempotencyKey: "example-test",
     });
   } finally {
     await relay.close();
@@ -73,7 +73,7 @@ test("relay configuration refuses missing password credentials before it can ser
   expect(() => relayConfigFromEnvironment({
     FABRIC_API_URL: "https://fabric.example/v1/other",
     FABRIC_CDP_GATEWAY_URL: "ws://fabric.example",
-    FABRIC_API_USERNAME: "principal_reporting",
+    FABRIC_API_USERNAME: "principal_example",
   })).toThrow("FABRIC_API_PASSWORD");
 });
 

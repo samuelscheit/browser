@@ -163,7 +163,7 @@ export class ChromiumProcessSupervisor {
       this.#throwIfCancelled(processId);
       // Generated Fabric browser specs opt in to the process-level guardian.
       // Starting it after CDP readiness but before the assignment is marked
-      // ready gives every page/tab the Media-style automatic Turnstile
+      // ready gives every page/tab the automatic Turnstile/DataDome
       // handling, independent of which application owns the CDP connection.
       const guardianSpec = spec.turnstileGuardian ?? turnstileGuardianSpecFromEnvironment();
       assertTurnstileGuardianSpec(guardianSpec);

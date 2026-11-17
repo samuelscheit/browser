@@ -1,5 +1,5 @@
 import { createPublicKey } from "node:crypto";
-import { FabricError, isSafeDockerVolumeName, type Principal, type Worker, type WorkerCapabilities, type WorkerResourceLimits, runtimeFamilies } from "@browser-fabric/contracts";
+import { FabricError, isSafeDockerVolumeName, type Principal, type Worker, type WorkerCapabilities, type WorkerResourceLimits, runtimeFamilies, MAX_WORKER_BROWSER_LEASES } from "@browser-fabric/contracts";
 
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length < 1 || value.length > 2048) throw new FabricError("validation_failed", `${field} must be a non-empty string`, 400);
@@ -40,14 +40,13 @@ export function parseWorkerRegistration(value: unknown, certificateFingerprint: 
     recipeRefs: recipeList as WorkerCapabilities["recipeRefs"],
     browserVersions: typeof capabilitiesInput.browserVersions === "object" && capabilitiesInput.browserVersions !== null ? capabilitiesInput.browserVersions as Record<string, string> : {},
     supportsInteractive: capabilitiesInput.supportsInteractive === true,
-    supportsCompanionCompanion: capabilitiesInput.supportsCompanionCompanion === true,
     supportedProfileFamilies: profileList as string[]
   };
   const limitsInput = input.resourceLimits;
   if (limitsInput === null || typeof limitsInput !== "object" || Array.isArray(limitsInput)) throw new FabricError("validation_failed", "resourceLimits must be an object", 400);
   const limits = limitsInput as Record<string, unknown>;
   const resourceLimits: WorkerResourceLimits = {
-    maxBrowserLeases: boundedInt(limits.maxBrowserLeases, "resourceLimits.maxBrowserLeases", 1, 3),
+    maxBrowserLeases: boundedInt(limits.maxBrowserLeases, "resourceLimits.maxBrowserLeases", 1, MAX_WORKER_BROWSER_LEASES),
     cpuMilli: boundedInt(limits.cpuMilli, "resourceLimits.cpuMilli", 100, 64_000),
     memoryMiB: boundedInt(limits.memoryMiB, "resourceLimits.memoryMiB", 128, 131_072),
     pids: boundedInt(limits.pids, "resourceLimits.pids", 32, 16_384),
@@ -55,7 +54,7 @@ export function parseWorkerRegistration(value: unknown, certificateFingerprint: 
     temporaryStorageMiB: boundedInt(limits.temporaryStorageMiB, "resourceLimits.temporaryStorageMiB", 64, 1_048_576)
   };
   const isLocal = input.isLocal === true;
-  const capacity = boundedInt(input.capacity, "capacity", 0, isLocal ? 1 : 3);
+  const capacity = boundedInt(input.capacity, "capacity", 0, isLocal ? 1 : MAX_WORKER_BROWSER_LEASES);
   if (isLocal && (!capabilities.supportsInteractive || capacity !== 1)) throw new FabricError("validation_failed", "local workers must support interactive mode and have capacity one", 400);
   // A media task is intentionally outside the browser-lease cap, but it is still a bounded
   // worker resource. Normalize the default here rather than letting a later registration/replay

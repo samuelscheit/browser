@@ -167,7 +167,7 @@ export class MemoryObjectStore implements ObjectStore {
   }
 }
 
-/** Adapter boundary for MinIO/S3. The AWS SDK can implement this without changing Fabric contracts. */
+/** Adapter boundary for S3-compatible stores (RustFS, AWS S3, ...). The AWS SDK can implement this without changing Fabric contracts. */
 export interface S3LikeClient {
   /** `ifNoneMatch="*"` is required for the first write to an immutable key. */
   putObject(input: { bucket: string; key: string; body: Uint8Array; contentType: string; metadata: Record<string, string>; ifNoneMatch?: "*" }): Promise<{ etag?: string }>;
@@ -281,11 +281,11 @@ function publicMetadata(metadata: Record<string, string>): Record<string, string
 }
 
 /**
- * Small dependency-free S3/MinIO client used by production workers. It implements the subset
+ * Small dependency-free S3 client used by production workers. It implements the subset
  * needed by ObjectStore and signs every request with AWS Signature V4; credentials never appear
  * in URLs, object metadata, or error messages. Keeping this adapter here avoids making the
  * control-plane contract depend on a particular AWS SDK package while remaining compatible with
- * MinIO and other S3-compatible stores.
+ * RustFS, AWS S3 and other S3-compatible stores.
  */
 export interface S3HttpClientOptions {
   endpoint: string;

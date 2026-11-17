@@ -6,6 +6,7 @@ import { PgSqlClient } from "./postgres-client";
 import { PostgresFabricStore } from "./store";
 import { loadPostgresMigrations } from "./migrations";
 import type { EphemeralInputVault } from "./ephemeral";
+import { loadFabricCatalog, type FabricCatalog } from "./catalog";
 
 export interface PostgresSchedulerOptions {
   databaseUrl: string;
@@ -18,6 +19,8 @@ export interface PostgresSchedulerOptions {
   ephemeralInputVault?: EphemeralInputVault;
   /** Explicit deployment cap for managed browser processes. Defaults to the reviewed safe maximum. */
   maxActiveBrowserLeases?: number;
+  /** The deployment's catalog; defaults to the file named by FABRIC_CATALOG_FILE (none: built-ins only). */
+  catalog?: FabricCatalog;
 }
 
 /**
@@ -43,6 +46,8 @@ export interface PostgresSchedulerRuntime {
 /** Shared production bootstrap used by API, gateway, and worker-manager processes. */
 export async function createPostgresScheduler(options: PostgresSchedulerOptions): Promise<PostgresSchedulerRuntime> {
   if (options.capabilitySecret.length < 32) throw new Error("FABRIC_CAPABILITY_SECRET must contain at least 32 bytes");
+  // Parse the catalog before touching the database so a broken catalog never half-starts a process.
+  const catalog = options.catalog ?? await loadFabricCatalog();
   const pool = new Pool({ connectionString: options.databaseUrl, max: options.poolSize ?? 10, ssl: options.ssl ? { rejectUnauthorized: true } : undefined });
   const directory = options.schemaDirectory ?? new URL("../../../deploy/postgres/", import.meta.url);
   const schema = await loadPostgresMigrations(directory);
@@ -52,6 +57,7 @@ export async function createPostgresScheduler(options: PostgresSchedulerOptions)
     store,
     capabilitySigner: new CapabilitySigner({ secret: options.capabilitySecret, gatewayBaseUrl: options.gatewayBaseUrl }),
     maxActiveBrowserLeases: options.maxActiveBrowserLeases ?? maxActiveBrowserLeasesFromEnvironment(),
+    catalog,
     ...(options.ephemeralInputVault === undefined ? {} : { ephemeralInputVault: options.ephemeralInputVault })
   });
   await scheduler.bootstrap();
