@@ -41,6 +41,9 @@
       "@browser-fabric/worker-runtime": [
         "packages/worker-runtime/src/index.ts"
       ],
+      "@browser-fabric/task-agent": [
+        "packages/task-agent/src/index.ts"
+      ],
       "@browser-fabric/testkit": [
         "packages/testkit/src/index.ts"
       ]

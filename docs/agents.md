@@ -114,6 +114,34 @@ Use it to solve a login or a CAPTCHA by hand, then let the agent continue. New t
 are followed automatically. For full DevTools on a remote tab, open the `devtoolsFrontendUrl` from
 `http://127.0.0.1:9223/json/list` in Chrome.
 
+### Tasks in natural language: `fabric task`
+
+`fabric task` hands a goal to a small LLM agent that drives the same browser (its own tab) until the
+task is done, and prints the result. It works with Anthropic models and with any OpenAI-compatible
+chat-completions server.
+
+```sh
+export ANTHROPIC_API_KEY=…                       # or OPENAI_API_KEY (+ OPENAI_BASE_URL)
+fabric task "find the latest release version of bun" --url https://github.com/oven-sh/bun \
+  --model anthropic/claude-sonnet-4-5
+FABRIC_SECRET_PASSWORD=… fabric task "sign in as alice and download the March invoice" \
+  --url https://billing.example --schema invoice.schema.json --upload-dir ~/invoices --json
+```
+
+- `--schema <file>` makes the result a JSON value that matches the JSON Schema; without it the
+  result is text. `--json` prints the whole result with every step.
+- The agent sees `{{secret:NAME}}` placeholders for `FABRIC_SECRET_<NAME>` variables, never their
+  values. A value is inserted only when it is typed into the page, and is redacted wherever it would
+  appear in what the model reads, in the step log and in the result.
+- When it needs something it does not have (a one-time code, a missing password), it stops with
+  status `needs_input` (exit code 2) and a question. `--keep-tab` keeps the tab open, and
+  `--target <id>` continues in it; `fabric view` lets you do the step by hand in between.
+- Limits: `--max-steps` (default 25) model turns and `--timeout` (default 10m) wall-clock time.
+  Uploads are refused unless the file is inside an `--upload-dir`.
+
+The agent is the [`@browser-fabric/task-agent`](../packages/task-agent/README.md) library; call
+`runTask()` from code for the same thing with an `onStep` callback.
+
 ## Lifecycle and limits
 
 - The endpoint is served by a small background daemon (`fabric status`, logs in

@@ -6,6 +6,7 @@ import { choosePort, describeState, down, endpointUrl, liveState, mcp, MCP_SERVE
 import { assertName, listStates, loadCredentials, normalizeApiUrl, normalizeUsername, saveCredentials, type BrowserMode, type BrowserRequest } from "./config";
 import { runDaemon } from "./daemon";
 import { fetchIdentity } from "./remote-backend";
+import { taskCommand } from "@browser-fabric/task-agent";
 
 export const HELP = `fabric — a CDP browser for agents: your own Chrome, or remote (Browser Fabric) on request
 
@@ -33,6 +34,9 @@ tabs unless --tab picks one):
   fabric shot [file.png]     screenshot (--full for the whole page)
   fabric eval <expression>   evaluate JavaScript in the page and print the JSON result
   fabric tabs                list tabs, agent tabs marked * (use with --tab <index|id>)
+
+Tasks in natural language (an LLM agent drives the browser; fabric task --help):
+  fabric task "<goal>" [--url <start>] [--schema <file>] [--model <provider/id>] [--max-steps <n>]
 
 Manage:
   fabric status              running browsers          fabric down [name|--all]   stop
@@ -146,6 +150,11 @@ async function readPassword(values: Values): Promise<string> {
 export async function main(argv: string[]): Promise<void> {
   const [command = "help", ...rest] = argv;
   if (command === "__daemon") return runDaemon(JSON.parse(rest[0]!) as BrowserRequest, rest[1] === "warm");
+  // The task command has its own options; it only borrows the browser selection.
+  if (command === "task") {
+    await taskCommand(rest, { endpoint: async ({ remote, name }) => endpointUrl(await actionPort({ remote, name })) });
+    return;
+  }
   const separator = rest.indexOf("--");
   const { values, positionals } = parse(separator === -1 ? rest : rest.slice(0, separator));
   const passthrough = separator === -1 ? [] : rest.slice(separator + 1);
