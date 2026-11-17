@@ -74,7 +74,9 @@ for explicit Cloudflare Turnstile evidence. It locates `challenges.cloudflare.co
 through both normal DOM observation and the CDP frame tree (which covers closed shadow roots), then
 issues bounded `Input.dispatchMouseEvent` movement/press/release gestures. A lost guardian CDP
 connection makes the executor's liveness probe fail; a manager restart removes an untracked browser
-rather than silently continuing without its guardian.
+rather than silently continuing without its guardian. Every container and volume a manager creates
+carries its deployment (`com.browser-fabric.deployment`, the Compose project name), and a restart
+removes only its own deployment's browsers, so two stacks can share a Docker host.
 
 The clicker is a local input helper for visible Cloudflare Turnstile. It does not export or log
 cookies, page/form payloads, or external solver API data. After the configured bounded attempts or

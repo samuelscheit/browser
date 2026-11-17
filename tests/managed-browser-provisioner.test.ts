@@ -90,6 +90,8 @@ describe("managed browser guardians", () => {
     expect(command.calls[0]).toContain("--cap-drop");
     expect(command.calls[0]).toContain("--security-opt");
     expect(command.calls[0]).toContain("seccomp=/etc/browser-fabric/chromium-userns-seccomp.json");
+    // Owned by this deployment, so only its own manager ever reaps it.
+    expect(command.calls[0]).toContain("com.browser-fabric.deployment=browser-fabric");
     expect(command.calls[0]).toContain("/tmp:rw,noexec,nosuid,nodev,size=1073741824,mode=1777");
     expect(command.calls[0]).toContain("/tmp/.X11-unix:rw,nosuid,nodev,size=1048576,mode=1777");
     expect(command.calls[0]).toContain("--remote-debugging-address=127.0.0.1");
@@ -213,17 +215,19 @@ describe("managed browser guardians", () => {
     })).toThrow("seccomp profile path is not approved");
   });
 
-  test("removes browser containers left by a manager process that did not own their guardian", async () => {
+  /** A Docker whose `container ls` lists `names` and whose label inspect answers from `labels`. */
+  function priorContainers(names: string[], labels: Record<string, string>) {
     const command = new RecordingDockerCommand();
     const originalRun = command.run.bind(command);
     command.run = async (args) => {
       if (args[0] === "container" && args[1] === "ls") {
         command.calls.push([...args]);
-        return { exitCode: 0, stdout: "fabric-browser-old-lease\n", stderr: "" };
+        return { exitCode: 0, stdout: names.map((name) => `${name}\n`).join(""), stderr: "" };
       }
-      if (args[0] === "container" && args[1] === "inspect" && args.includes("{{ index .Config.Labels \"com.browser-fabric.worker-id\" }}|{{ index .Config.Labels \"com.browser-fabric.temporary-volumes\" }}")) {
+      const name = args.at(-1)!;
+      if (args[0] === "container" && args[1] === "inspect" && args.some((arg) => arg.includes("com.browser-fabric.deployment"))) {
         command.calls.push([...args]);
-        return { exitCode: 0, stdout: "worker_test|temporary-profile\n", stderr: "" };
+        return { exitCode: 0, stdout: `${labels[name]}\n`, stderr: "" };
       }
       if (args[0] === "container" && args[1] === "inspect" && args.includes("{{.State.Status}}|{{.State.ExitCode}}")) {
         command.calls.push([...args]);
@@ -231,14 +235,41 @@ describe("managed browser guardians", () => {
       }
       return originalRun(args);
     };
-    const executor = new DockerContainerExecutor({ command, requireImmutableImages: false });
+    return command;
+  }
+
+  test("removes its own deployment's browser containers left by a manager process that did not own their guardian", async () => {
+    const command = priorContainers(["fabric-browser-old-lease"], { "fabric-browser-old-lease": "stack-a|worker_test|temporary-profile" });
+    const executor = new DockerContainerExecutor({ command, deploymentId: "stack-a", requireImmutableImages: false });
 
     await expect(executor.stopUntrackedBrowserContainers()).resolves.toEqual(["fabric-browser-old-lease"]);
 
-    expect(command.calls[0]).toEqual(["container", "ls", "--all", "--filter", "label=com.browser-fabric.lease-id", "--format", "{{.Names}}"]);
+    // Docker ANDs label filters: only lease browsers of this deployment are listed.
+    expect(command.calls[0]).toEqual(["container", "ls", "--all", "--filter", "label=com.browser-fabric.deployment=stack-a", "--filter", "label=com.browser-fabric.lease-id", "--format", "{{.Names}}"]);
     expect(command.calls.some((args) => args[0] === "container" && args[1] === "rm" && args.includes("fabric-browser-old-lease"))).toBe(true);
-    expect(command.calls.some((args) => args[0] === "container" && args[1] === "inspect")).toBe(true);
-    expect(command.calls.some((args) => args[0] === "container" && args[1] === "create" && args.some((arg) => arg.includes("temporary-profile")))).toBe(true);
+    // Its temporary profile volume is cleaned up through a helper that carries the same ownership label.
+    const helper = command.calls.find((args) => args[0] === "container" && args[1] === "create" && args.some((arg) => arg.includes("temporary-profile")));
+    expect(helper).toContain("com.browser-fabric.deployment=stack-a");
+  });
+
+  test("never removes a browser container of another deployment on the same Docker host", async () => {
+    // Even when one slips through the listing, the inspected label decides.
+    const command = priorContainers(["fabric-browser-mine", "fabric-browser-theirs"], {
+      "fabric-browser-mine": "stack-a|worker_test|",
+      "fabric-browser-theirs": "stack-b|worker_test|their-temporary-profile",
+    });
+    const executor = new DockerContainerExecutor({ command, deploymentId: "stack-a", requireImmutableImages: false });
+
+    await expect(executor.stopUntrackedBrowserContainers()).resolves.toEqual(["fabric-browser-mine"]);
+    const touched = command.calls.filter((args) => args[0] === "container" && (args[1] === "stop" || args[1] === "rm" || args[1] === "create") || args[0] === "volume");
+    expect(touched.some((args) => args.some((arg) => arg.includes("theirs")))).toBe(false);
+  });
+
+  test("requires a Compose project name as its deployment id", () => {
+    for (const deploymentId of ["", "Stack", "../stack", "stack a", "-stack"]) {
+      expect(() => new DockerContainerExecutor({ command: new RecordingDockerCommand(), deploymentId })).toThrow("deploymentId must be a Compose project name");
+    }
+    expect(() => new DockerContainerExecutor({ command: new RecordingDockerCommand(), deploymentId: "browser-fabric_2" })).not.toThrow();
   });
 });
 

@@ -318,6 +318,8 @@ services:
       FABRIC_BROWSER_IMAGE: browser-fabric-browser:local
       FABRIC_CHROMIUM_SECCOMP_PROFILE: /etc/browser-fabric/chromium-userns-seccomp.json
       FABRIC_VOLUME_HELPER_IMAGE: docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      # Labels every browser container and volume this manager creates; restart recovery reaps only these.
+      FABRIC_DEPLOYMENT_ID: ${COMPOSE_PROJECT_NAME}
       FABRIC_DOCKER_NETWORK_CONTROL: ${FABRIC_DOCKER_NETWORK_CONTROL:-browser-fabric-control}
       FABRIC_DOCKER_NETWORK_WORKERS: ${FABRIC_DOCKER_NETWORK_WORKERS:-browser-fabric-workers}
       FABRIC_DOCKER_NETWORK_EGRESS: ${FABRIC_DOCKER_NETWORK_EGRESS:-browser-fabric-egress}

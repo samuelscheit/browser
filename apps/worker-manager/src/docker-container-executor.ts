@@ -45,6 +45,12 @@ export class ChildProcessDockerCommand implements DockerCommand {
 
 export interface DockerContainerExecutorOptions {
   command?: DockerCommand;
+  /**
+   * The Fabric deployment this manager belongs to (its Compose project name). Every container
+   * and volume it creates carries it, and restart recovery reaps only its own, so stacks sharing
+   * a Docker host (an old and a new one side by side) never touch each other's browsers.
+   */
+  deploymentId?: string;
   /** Fetch implementation used from the manager network to prove browser readiness. */
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   /** Controller-owned runtime images. Recipe image metadata never chooses an image at runtime. */
@@ -88,6 +94,10 @@ export interface DockerContainerExecutorOptions {
   tokenSolverFor?: (handlers: readonly ChallengeHandler[] | undefined) => TokenCaptchaSolver | undefined;
 }
 
+/** Label naming the deployment that owns a Docker container or volume. */
+export const DEPLOYMENT_LABEL = "com.browser-fabric.deployment";
+/** A Compose project name: lowercase letters, digits, dashes and underscores. */
+const safeDeploymentId = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const safeContainerName = /^[a-z][a-z0-9_-]{0,62}$/;
 const safeVolume = /^[a-z][a-z0-9_.-]{0,127}$/;
 const safeWorkerId = /^worker_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -186,7 +196,7 @@ function volumeMount(source: string, destination: string, readOnly = false): str
   return `type=volume,source=${source},destination=${destination}${readOnly ? ",readonly" : ""}`;
 }
 
-function createArgs(spec: BrowserProcessSpec, name: string, primaryNetwork: string, temporaryVolumes: readonly string[], browserSeccompProfile?: string): string[] {
+function createArgs(spec: BrowserProcessSpec, name: string, deploymentId: string, primaryNetwork: string, temporaryVolumes: readonly string[], browserSeccompProfile?: string): string[] {
   const container = spec.container;
   assertNetworkName(primaryNetwork);
   const temporary = temporaryVolumeLabel(temporaryVolumes);
@@ -197,6 +207,7 @@ function createArgs(spec: BrowserProcessSpec, name: string, primaryNetwork: stri
     "--restart", "no",
     "--stop-timeout", "10",
     "--label", "com.browser-fabric.managed=true",
+    "--label", `${DEPLOYMENT_LABEL}=${deploymentId}`,
     "--label", "com.browser-fabric.kind=browser",
     "--label", `com.browser-fabric.worker-id=${container.workerId}`,
     ...(temporary === undefined ? [] : ["--label", `com.browser-fabric.temporary-volumes=${temporary}`]),
@@ -232,7 +243,7 @@ function createArgs(spec: BrowserProcessSpec, name: string, primaryNetwork: stri
 export class DockerContainerExecutor implements Executor {
   readonly #command: DockerCommand;
   readonly #fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-  readonly #options: Required<Pick<DockerContainerExecutorOptions, "browserNetworks" | "containerPrefix">> & Omit<DockerContainerExecutorOptions, "browserNetworks" | "containerPrefix">;
+  readonly #options: Required<Pick<DockerContainerExecutorOptions, "browserNetworks" | "containerPrefix" | "deploymentId">> & Omit<DockerContainerExecutorOptions, "browserNetworks" | "containerPrefix" | "deploymentId">;
   readonly #containers = new Map<string, string>();
   readonly #starting = new Map<string, Promise<{ processId: string; cdpBrowserEndpoint?: string }>>();
   readonly #guardians = new Map<string, TurnstileGuardianHandle>();
@@ -252,7 +263,9 @@ export class DockerContainerExecutor implements Executor {
       requireImmutableImages: options.requireImmutableImages ?? process.env.NODE_ENV === "production",
       requireRuntimeImageOverrides: options.requireRuntimeImageOverrides ?? process.env.NODE_ENV === "production",
       ...options,
+      deploymentId: options.deploymentId ?? "browser-fabric",
     };
+    if (!safeDeploymentId.test(this.#options.deploymentId)) throw new Error("deploymentId must be a Compose project name (lowercase letters, digits, - and _)");
     for (const network of this.#options.browserNetworks) assertNetworkName(network);
     if (this.#options.egressNetwork) assertNetworkName(this.#options.egressNetwork);
     assertBrowserSeccompProfile(this.#options.browserSeccompProfile, this.#options.requireBrowserSeccompProfile === true);
@@ -297,7 +310,7 @@ export class DockerContainerExecutor implements Executor {
       await this.#prepareVolumes(spec, name, temporaryVolumes);
       const primaryNetwork = this.#options.browserNetworks[0];
       if (!primaryNetwork) throw new FabricError("worker_unavailable", "no Fabric worker network is configured", 503);
-      const createdContainer = await this.#command.run(createArgs(spec, name, primaryNetwork, temporaryVolumes, this.#options.browserSeccompProfile), { timeoutMs: this.#options.startupTimeoutMs ?? 30_000 });
+      const createdContainer = await this.#command.run(createArgs(spec, name, this.#options.deploymentId, primaryNetwork, temporaryVolumes, this.#options.browserSeccompProfile), { timeoutMs: this.#options.startupTimeoutMs ?? 30_000 });
       if (createdContainer.exitCode !== 0) throw new FabricError("worker_unavailable", `Docker could not create browser container (${createdContainer.stderr.slice(0, 500)})`, 503);
       created = true;
       for (const network of this.#runtimeNetworks(spec).filter((network) => network !== primaryNetwork)) {
@@ -370,21 +383,29 @@ export class DockerContainerExecutor implements Executor {
   }
 
   /**
-   * A manager restart loses its in-memory guardian handles. Stop every labelled
-   * browser container before reclaiming durable assignments so a stale browser
-   * can never outlive guardian ownership.
+   * A manager restart loses its in-memory guardian handles. Stop every lease
+   * browser container of this deployment before reclaiming durable assignments
+   * so a stale browser can never outlive guardian ownership. Containers of other
+   * deployments on the same Docker host are left alone (Docker ANDs the filters).
    */
   public async stopUntrackedBrowserContainers(): Promise<readonly string[]> {
     const listed = await this.#command.run([
-      "container", "ls", "--all", "--filter", "label=com.browser-fabric.lease-id", "--format", "{{.Names}}",
+      "container", "ls", "--all",
+      "--filter", `label=${DEPLOYMENT_LABEL}=${this.#options.deploymentId}`,
+      "--filter", "label=com.browser-fabric.lease-id",
+      "--format", "{{.Names}}",
     ], { timeoutMs: this.#options.stopTimeoutMs ?? 20_000 });
     if (listed.exitCode !== 0) throw new FabricError("worker_unavailable", `Docker could not list prior browser containers (${listed.stderr.slice(0, 500)})`, 503);
-    const containers = [...new Set(listed.stdout.split(/\r?\n/).map((name) => name.trim()).filter(Boolean))];
-    for (const name of containers) {
+    const stopped: string[] = [];
+    for (const name of new Set(listed.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))) {
       if (!safeContainerName.test(name)) throw new FabricError("worker_unavailable", "Docker returned an invalid managed browser container name", 503);
-      await this.#stopContainer(name, await this.#untrackedCleanupMetadata(name));
+      const metadata = await this.#untrackedCleanupMetadata(name);
+      // The label filter already selected this deployment; re-checked on the inspected container.
+      if (metadata && metadata.deploymentId !== this.#options.deploymentId) continue;
+      await this.#stopContainer(name, metadata);
+      stopped.push(name);
     }
-    return containers;
+    return stopped;
   }
 
   public containerFor(identity: string): string | undefined { return this.#containers.get(identity); }
@@ -434,21 +455,21 @@ export class DockerContainerExecutor implements Executor {
     return [...new Set(networks)];
   }
 
-  async #untrackedCleanupMetadata(name: string): Promise<{ workerId: string; volumes: string[] } | undefined> {
+  async #untrackedCleanupMetadata(name: string): Promise<{ deploymentId: string; workerId: string; volumes: string[] } | undefined> {
     const inspected = await this.#command.run([
-      "container", "inspect", "--format", "{{ index .Config.Labels \"com.browser-fabric.worker-id\" }}|{{ index .Config.Labels \"com.browser-fabric.temporary-volumes\" }}", name,
+      "container", "inspect", "--format", `{{ index .Config.Labels "${DEPLOYMENT_LABEL}" }}|{{ index .Config.Labels "com.browser-fabric.worker-id" }}|{{ index .Config.Labels "com.browser-fabric.temporary-volumes" }}`, name,
     ], { timeoutMs: this.#options.stopTimeoutMs ?? 20_000 });
     if (inspected.exitCode !== 0) {
       if (/no such container/i.test(inspected.stderr)) return undefined;
       throw new FabricError("worker_unavailable", `Docker could not inspect prior browser container (${inspected.stderr.slice(0, 500)})`, 503);
     }
-    const [workerId = "", rawVolumes = ""] = inspected.stdout.trim().split("|", 2);
+    const [deploymentId = "", workerId = "", rawVolumes = ""] = inspected.stdout.trim().split("|", 3);
     if (!safeWorkerId.test(workerId)) throw new FabricError("worker_unavailable", "prior browser container is missing a valid worker label", 503);
     const volumes = rawVolumes === "" || rawVolumes === "<no value>"
       ? []
       : rawVolumes.split(",").map((volume) => volume.trim()).filter(Boolean);
     if (volumes.some((volume) => !safeVolume.test(volume))) throw new FabricError("worker_unavailable", "prior browser container has an invalid temporary-volume label", 503);
-    return { workerId, volumes: [...new Set(volumes)] };
+    return { deploymentId, workerId, volumes: [...new Set(volumes)] };
   }
 
   async #browserEndpointOnNetwork(name: string, port: number, network: string): Promise<string> {
@@ -548,6 +569,7 @@ export class DockerContainerExecutor implements Executor {
     const created = await this.#command.run([
       "volume", "create",
       "--label", "com.browser-fabric.managed=true",
+      "--label", `${DEPLOYMENT_LABEL}=${this.#options.deploymentId}`,
       "--label", "com.browser-fabric.temporary=true",
       volume,
     ], { timeoutMs: this.#options.startupTimeoutMs ?? 30_000 });
@@ -614,6 +636,7 @@ export class DockerContainerExecutor implements Executor {
       ...(input.allowChown ? ["--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE"] : ["--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE"]),
       "--security-opt", "no-new-privileges:true",
       "--label", "com.browser-fabric.managed=true",
+      "--label", `${DEPLOYMENT_LABEL}=${this.#options.deploymentId}`,
       "--label", `com.browser-fabric.kind=${input.kind}`,
     ];
     for (const mount of input.mounts) args.push("--mount", mount);

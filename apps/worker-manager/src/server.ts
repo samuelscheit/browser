@@ -151,7 +151,11 @@ if (import.meta.main) {
   if (production && browserSeccompProfile !== CHROMIUM_SECCOMP_PROFILE_PATH) {
     throw new Error("FABRIC_CHROMIUM_SECCOMP_PROFILE must reference the approved Chromium user-namespace profile in production");
   }
+  // Compose passes its project name: stacks sharing a Docker host never reap each other's browsers.
+  const deploymentId = process.env.FABRIC_DEPLOYMENT_ID?.trim();
+  if (production && !deploymentId) throw new Error("FABRIC_DEPLOYMENT_ID is required in production (the Compose project name)");
   const browserExecutor = new DockerContainerExecutor({
+    ...(deploymentId ? { deploymentId } : {}),
     browserNetworks,
     egressNetwork,
     runtimeImageOverrides,
