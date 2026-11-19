@@ -64,6 +64,8 @@ export class TaskBrowser {
   readonly #pending = new Set<Promise<unknown>>();
   /** Resolvers waiting for Target.targetDestroyed, by target id. */
   readonly #destroyed = new Map<string, () => void>();
+  /** Targets being attached, before their tab is registered, and whether they were destroyed meanwhile. */
+  readonly #attaching = new Map<string, { destroyed: boolean }>();
   #active!: Tab;
   #unsubscribe: () => void;
 
@@ -79,6 +81,7 @@ export class TaskBrowser {
       await connection.send("Target.setDiscoverTargets", { discover: true });
       const targetId = options.targetId ?? (await connection.send("Target.createTarget", { url: "about:blank" }) as { targetId: string }).targetId;
       browser.#active = await browser.#attach(targetId, !options.targetId);
+      if (browser.#active.closed) throw new Error("The browser tab closed while it was being attached");
       return browser;
     } catch (error) {
       await browser.close(false);
@@ -99,12 +102,24 @@ export class TaskBrowser {
     return this.connection.send(method, params, sessionId, timeoutMs);
   }
 
+  /**
+   * Attach to a target and register its tab. The target can be destroyed at any point meanwhile (a
+   * popup that only started a download closes at once); the returned tab then reports `closed`.
+   */
   async #attach(targetId: string, owned: boolean): Promise<Tab> {
-    const { sessionId } = await this.send("Target.attachToTarget", { targetId, flatten: true }) as { sessionId: string };
+    const attaching = { destroyed: false };
+    this.#attaching.set(targetId, attaching);
+    let sessionId: string;
+    try {
+      ({ sessionId } = await this.send("Target.attachToTarget", { targetId, flatten: true }) as { sessionId: string });
+    } finally {
+      this.#attaching.delete(targetId);
+    }
     const tab: Tab = {
       targetId, sessionId, owned, sessions: new Map([[sessionId, { sessionId, targetId }]]), loading: false, navigations: 0,
-      worlds: new Map(), frameOrdinals: new Map([[targetId, 0]]), refFrames: new Map(), closed: false,
+      worlds: new Map(), frameOrdinals: new Map([[targetId, 0]]), refFrames: new Map(), closed: attaching.destroyed,
     };
+    if (tab.closed) return tab;
     this.#tabs.set(targetId, tab);
     await this.send("Page.enable", {}, sessionId);
     // A native file dialog would block a headful browser: report it instead (upload sets files directly).
@@ -136,6 +151,8 @@ export class TaskBrowser {
         // A popup (target=_blank, window.open) of one of our tabs becomes the active tab.
         if (info?.type === "page" && info.openerId && this.#tabs.has(info.openerId) && !this.#tabs.has(info.targetId)) {
           this.#track(this.#attach(info.targetId, true).then((tab) => {
+            // Gone before it finished attaching: the current tab stays active, and nothing opened for the agent.
+            if (tab.closed) return;
             this.#active = tab;
             this.#notices.push("A new tab opened and is now the active tab.");
           }));
@@ -144,6 +161,8 @@ export class TaskBrowser {
       }
       case "Target.targetDestroyed": {
         this.#destroyed.get(params.targetId)?.();
+        const attaching = this.#attaching.get(params.targetId);
+        if (attaching) attaching.destroyed = true;
         const tab = this.#tabs.get(params.targetId);
         if (!tab) return;
         tab.closed = true;
