@@ -17,7 +17,7 @@ import {
   type MouseStep,
 } from "@browser-fabric/worker-runtime";
 import puppeteer, { type Browser as PuppeteerBrowser } from "puppeteer-core";
-import { FakeCdpTransport, challengeObservation, inputEvents, type Command } from "./support/fake-guardian-transport";
+import { FakeCdpTransport, challengeObservation, eventually, inputEvents, type Command } from "./support/fake-guardian-transport";
 import { browserIntegration, launchChromium, type TestChromium } from "./support/chromium";
 
 /** Deterministic random source, so path properties are checked over many reproducible plans. */
@@ -271,14 +271,6 @@ function dataDomeTransport(model: WidgetModel = {}): FakeCdpTransport {
     },
   });
   return transport;
-}
-
-async function eventually(predicate: () => boolean, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error("condition not reached");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
 }
 
 type GuardianLog = { event: string; details?: Record<string, unknown> };

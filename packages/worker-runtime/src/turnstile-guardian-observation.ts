@@ -1,4 +1,4 @@
-import type { ChallengeFrameBox, ChallengeKind } from "./challenge-handlers";
+import type { CdpSend, ChallengeFrameBox, ChallengeKind } from "./challenge-handlers";
 import type { TurnstilePageObservation } from "./turnstile-guardian-types";
 
 /**
@@ -122,7 +122,51 @@ export function childFrames(tree: unknown): CdpFrame[] {
   return result;
 }
 
-type CdpDomNode = { nodeName?: unknown; backendNodeId?: unknown; frameId?: unknown; attributes?: unknown; children?: unknown; shadowRoots?: unknown };
+export type CdpDomNode = {
+  nodeId?: unknown;
+  nodeName?: unknown;
+  backendNodeId?: unknown;
+  frameId?: unknown;
+  attributes?: unknown;
+  children?: unknown;
+  shadowRoots?: unknown;
+  contentDocument?: unknown;
+};
+
+/**
+ * The document node of a challenge frame, read through DOM-domain commands only (nothing runs in
+ * the frame's JavaScript realm). `sessionId` is the frame's own session, or the page's session
+ * when the frame renders in the page's process; then `sameProcessFrameId` names the frame, whose
+ * document hangs off its owner element in the page's pierced DOM. With `subtree`, the node carries
+ * its whole subtree including closed shadow roots, whose node ids are valid on `sessionId`.
+ */
+export async function challengeFrameDocument(
+  send: CdpSend,
+  sessionId: string,
+  sameProcessFrameId: string | undefined,
+  options: { subtree?: boolean } = {},
+): Promise<CdpDomNode | undefined> {
+  if (sameProcessFrameId === undefined) {
+    const document = await send("DOM.getDocument", options.subtree ? { depth: -1, pierce: true } : { depth: 0 }, sessionId);
+    return document?.root && typeof document.root === "object" ? document.root : undefined;
+  }
+  const document = await send("DOM.getDocument", { depth: -1, pierce: true }, sessionId);
+  let found: CdpDomNode | undefined;
+  const visit = (candidate: unknown) => {
+    if (found !== undefined || !candidate || typeof candidate !== "object") return;
+    const node = candidate as CdpDomNode;
+    const content = node.contentDocument as CdpDomNode | undefined;
+    if (node.frameId === sameProcessFrameId && typeof content?.nodeId === "number") {
+      found = content;
+      return;
+    }
+    for (const children of [node.children, node.shadowRoots, content ? [content] : undefined]) {
+      if (Array.isArray(children)) for (const child of children) visit(child);
+    }
+  };
+  visit(document?.root);
+  return found;
+}
 export type DocumentIframe = { backendNodeId: number; frameId?: string; attributes: unknown };
 
 /**

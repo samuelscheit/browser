@@ -14,7 +14,7 @@ import {
   type TurnstileGuardianHandle,
 } from "@browser-fabric/worker-runtime";
 import puppeteer, { type Browser as PuppeteerBrowser } from "puppeteer-core";
-import { FakeCdpTransport, ISOLATED_CONTEXT_ID, buttonEvents, challengeObservation, inputEvents } from "./support/fake-guardian-transport";
+import { FakeCdpTransport, ISOLATED_CONTEXT_ID, buttonEvents, challengeObservation, eventually, inputEvents, morePolls } from "./support/fake-guardian-transport";
 import { browserIntegration, requireChromium } from "./support/chromium";
 
 class FakeChromiumProcess {
@@ -82,11 +82,15 @@ describe("Fabric Turnstile guardian", () => {
         return transport;
       },
       maxClickAttempts: 1,
-      pollIntervalMs: 30_000,
+      pollIntervalMs: 250,
       logger: (event, details) => logs.push({ event, details }),
     });
 
     await guardian.start();
+    // Detected at once, clicked after a human beat.
+    expect(logs.some(({ event }) => event === "detected")).toBe(true);
+    expect(inputEvents(transport)).toHaveLength(0);
+    await eventually(() => guardian.snapshot.clickAttempts === 1, 5_000);
 
     expect(transport.commands.map((command) => command.method)).toEqual(expect.arrayContaining([
       "Target.setDiscoverTargets",
@@ -115,11 +119,12 @@ describe("Fabric Turnstile guardian", () => {
       endpoint: "ws://browser.test/devtools/browser/isolated-world",
       transportFactory: async () => transport,
       maxClickAttempts: 1,
-      pollIntervalMs: 30_000,
+      pollIntervalMs: 250,
       logger: () => undefined,
     });
 
     await guardian.start();
+    await eventually(() => guardian.snapshot.clickAttempts === 1, 5_000);
 
     const worlds = transport.commands.filter((command) => command.method === "Page.createIsolatedWorld");
     expect(worlds).toHaveLength(1);
@@ -157,14 +162,15 @@ describe("Fabric Turnstile guardian", () => {
       endpoint: "ws://browser.test/devtools/browser/closed-shadow-root",
       transportFactory: async () => transport,
       maxClickAttempts: 1,
-      pollIntervalMs: 30_000,
+      pollIntervalMs: 250,
       logger: () => undefined,
     });
 
     await guardian.start();
+    await eventually(() => guardian.snapshot.clickAttempts === 1, 5_000);
 
     expect(transport.commands.find((command) => command.method === "DOM.getDocument")?.params).toMatchObject({ depth: -1, pierce: true });
-    expect(transport.commands.filter((command) => command.method === "DOM.getBoxModel").map((command) => command.params?.backendNodeId)).toEqual([73]);
+    expect(new Set(transport.commands.filter((command) => command.method === "DOM.getBoxModel").map((command) => command.params?.backendNodeId))).toEqual(new Set([73]));
     expect(buttonEvents(transport)).toHaveLength(2);
     expect(guardian.snapshot.clickAttempts).toBe(1);
     await guardian.stop();
@@ -198,11 +204,12 @@ describe("Fabric Turnstile guardian", () => {
       endpoint: "ws://browser.test/devtools/browser/multiple-widgets",
       transportFactory: async () => transport,
       maxClickAttempts: 1,
-      pollIntervalMs: 30_000,
+      pollIntervalMs: 250,
       logger: () => undefined,
     });
 
     await guardian.start();
+    await eventually(() => guardian.snapshot.clickAttempts === 2, 5_000);
 
     expect(buttonEvents(transport)).toHaveLength(4);
     expect(guardian.snapshot.clickAttempts).toBe(2);
@@ -331,16 +338,17 @@ describe("Fabric Turnstile guardian", () => {
     const guardian = new TurnstileGuardian({
       endpoint: "ws://browser.test/devtools/browser/frame-navigation",
       transportFactory: async () => transport,
-      pollIntervalMs: 30_000,
+      pollIntervalMs: 250,
       maxClickAttempts: 1,
       logger: () => undefined,
     });
 
     await guardian.start();
+    await eventually(() => guardian.snapshot.clickAttempts === 1, 5_000);
     transport.emitEvent("Page.frameNavigated", {
-      frame: { id: "turnstile-frame", parentId: "top", url: "https://challenges.cloudflare.com/turnstile/v0/reloaded" },
+      frame: { id: "turnstile-frame-1", parentId: "top", url: "https://challenges.cloudflare.com/turnstile/v0/reloaded" },
     }, "page-session-1");
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await morePolls(transport, 6);
 
     expect(guardian.snapshot.clickAttempts).toBe(1);
     await guardian.stop();
@@ -369,7 +377,7 @@ describe("Fabric Turnstile guardian", () => {
     expect(turnstileGuardianSpecFromEnvironment({})).toMatchObject({
       enabled: true,
       pollIntervalMs: 1_000,
-      challengeTimeoutMs: 12_000,
+      challengeTimeoutMs: 45_000,
       maxClickAttempts: 5,
     });
     expect(() => turnstileGuardianSpecFromEnvironment({ FABRIC_TURNSTILE_MAX_CLICK_ATTEMPTS: "0" })).toThrow(/outside/);
@@ -536,7 +544,8 @@ test.skipIf(!browserIntegration)("real Chromium receives the guardian before a r
       <input name="cf-turnstile-response" value="">
       <iframe src="https://challenges.cloudflare.com/turnstile/v0/abc" style="display:block;width:300px;height:80px;border:0"></iframe>
     `)}`, { waitUntil: "domcontentloaded", timeout: 10_000 });
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    // The synthetic frame is no recognizable widget, so the guardian clicks after its human beat.
+    await eventually(() => supervisor.guardianSnapshot(launched.processId)?.clickAttempts === 1, 10_000);
     // The supervisor reports guardian liveness and counters as part of process
     // health. The synthetic iframe cannot solve (there is no real Cloudflare
     // backend), but its input counter proves that a raw-CDP page received the

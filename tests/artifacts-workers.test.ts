@@ -68,7 +68,7 @@ describe("artifacts and worker isolation", () => {
     expect(spec.turnstileGuardian).toMatchObject({
       enabled: true,
       pollIntervalMs: 1_000,
-      challengeTimeoutMs: 12_000,
+      challengeTimeoutMs: 45_000,
       maxClickAttempts: 5,
     });
     expect(Object.keys(spec.environment).some((key) => /PASSWORD|TOKEN|COOKIE|SECRET/i.test(key))).toBe(false);

@@ -4,7 +4,7 @@
  * One guardian attaches to each Fabric-owned Chromium process independently of
  * application CDP clients. It observes every page/tab and performs bounded
  * trusted mouse gestures only on visible, URL-validated challenge iframes: a
- * single click on the Cloudflare Turnstile checkbox and a human-like slide on
+ * click on the Cloudflare Turnstile checkbox while the widget shows it, and a human-like slide on
  * DataDome's slider (one handler each, see challenge-handlers.ts). Recipes whose
  * challenge handlers enable token solving also get
  * reCAPTCHA v2 token injection from this same companion (hCaptcha is unsupported).
@@ -687,13 +687,21 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
     const decision = challengeDecision(challenge, handler.policy, now, siteAttempts);
     if (decision === "bound") {
       challenge.bounded = true;
-      this.#logger("bounded", { url: page.url, kind: box.kind, elapsedMs: now - challenge.startedAt, checks: challenge.checks, clickAttempts: challenge.attempts, siteAttempts });
+      this.#logger("bounded", {
+        url: page.url,
+        kind: box.kind,
+        elapsedMs: now - challenge.startedAt,
+        checks: challenge.checks,
+        clickAttempts: challenge.attempts,
+        siteAttempts,
+        ...(challenge.widget ? { widget: challenge.widget } : {}),
+      });
     }
     if (decision !== "act") return;
 
     let outcome;
     try {
-      outcome = await handler.act(this.#actionContext(page), box);
+      outcome = await handler.act(this.#actionContext(page, challenge), box);
     } catch (error) {
       this.#logError(`${box.kind} gesture failed`, error, { frameUrl: box.frameUrl });
       return;
@@ -711,13 +719,19 @@ export class TurnstileGuardian implements TurnstileGuardianHandle {
     this.#logger(handler.actionEvent, { url: page.url, kind: box.kind, signals, clickAttempts: challenge.attempts });
   }
 
-  #actionContext(page: AttachedPage): ChallengeActionContext {
+  #actionContext(page: AttachedPage, challenge: ChallengeState): ChallengeActionContext {
     const connection = this.#connection;
     if (!connection) throw new Error("Turnstile guardian is not connected");
     return {
       pageSessionId: page.sessionId,
       send: (method, params, sessionId) => connection.send(method, params ?? {}, sessionId),
       withFrameSession: (box, use) => this.#withFrameSession(connection, box, use),
+      elapsedMs: Date.now() - challenge.startedAt,
+      noteWidget: (state) => {
+        if (challenge.widget === state) return;
+        challenge.widget = state;
+        this.#logger("widget", { url: page.url, kind: challenge.kind, widget: state, elapsedMs: Date.now() - challenge.startedAt, clickAttempts: challenge.attempts });
+      },
     };
   }
 

@@ -14,7 +14,7 @@
  */
 import type { CdpSend, ChallengeBudgetPolicy, ChallengeFrameBox, ChallengeHandler } from "./challenge-handlers";
 import { approachSteps, between, dispatchMouseSteps, withEmulatedFocus, type MouseStep, type RandomSource } from "./trusted-mouse";
-import { attributeValue, rectFromQuad, type Rect } from "./turnstile-guardian-observation";
+import { attributeValue, challengeFrameDocument, rectFromQuad, type Rect } from "./turnstile-guardian-observation";
 
 /**
  * DataDome blocks the IP after failed slides, and a failure may reload the whole page, so
@@ -113,28 +113,6 @@ export interface DataDomeSliderWidget {
   target?: Rect;
 }
 
-async function frameDocumentNodeId(send: CdpSend, sessionId: string, sameProcessFrameId: string | undefined): Promise<number | undefined> {
-  if (sameProcessFrameId === undefined) {
-    const document = await send("DOM.getDocument", { depth: 0 }, sessionId);
-    return typeof document?.root?.nodeId === "number" ? document.root.nodeId : undefined;
-  }
-  // An in-process frame's document hangs off its owner element in the page's pierced DOM.
-  const document = await send("DOM.getDocument", { depth: -1, pierce: true }, sessionId);
-  let found: number | undefined;
-  const visit = (node: any) => {
-    if (found !== undefined || !node || typeof node !== "object") return;
-    if (node.frameId === sameProcessFrameId && typeof node.contentDocument?.nodeId === "number") {
-      found = node.contentDocument.nodeId;
-      return;
-    }
-    for (const children of [node.children, node.shadowRoots, node.contentDocument ? [node.contentDocument] : undefined]) {
-      if (Array.isArray(children)) for (const child of children) visit(child);
-    }
-  };
-  visit(document?.root);
-  return found;
-}
-
 /**
  * Reads DataDome's slider through DOM-domain commands only: they run in the renderer
  * without evaluating anything in the widget's JavaScript realm. Pass `sameProcessFrameId`
@@ -142,8 +120,8 @@ async function frameDocumentNodeId(send: CdpSend, sessionId: string, sameProcess
  * quads are then already in top-level coordinates.
  */
 export async function readDataDomeSlider(send: CdpSend, sessionId: string, sameProcessFrameId?: string): Promise<DataDomeSliderWidget | undefined> {
-  const root = await frameDocumentNodeId(send, sessionId, sameProcessFrameId);
-  if (root === undefined) return undefined;
+  const root = (await challengeFrameDocument(send, sessionId, sameProcessFrameId))?.nodeId;
+  if (typeof root !== "number") return undefined;
   const query = async (selector: string): Promise<number | undefined> => {
     const result = await send("DOM.querySelector", { nodeId: root, selector }, sessionId).catch(() => undefined);
     return typeof result?.nodeId === "number" && result.nodeId > 0 ? result.nodeId : undefined;
@@ -190,6 +168,7 @@ export function dataDomeSliderHandler(budget: { timeoutMs: number }): ChallengeH
     act: (context, box: ChallengeFrameBox) => context.withFrameSession(box, async (frameSessionId) => {
       if (frameSessionId === undefined && box.frameId === undefined) return "waiting";
       const widget = await readDataDomeSlider(context.send, frameSessionId ?? context.pageSessionId, frameSessionId ? undefined : box.frameId);
+      context.noteWidget(widget ? (widget.mode === "simple" ? widget.state : widget.mode) : "unknown");
       if (!widget) return "waiting";
       if (widget.state === "solved") return "solved";
       if (widget.mode !== "simple") return "unsupported";

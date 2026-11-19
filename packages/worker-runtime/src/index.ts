@@ -204,4 +204,5 @@ export * from "./chromium";
 export * from "./turnstile-guardian";
 export * from "./challenge-handlers";
 export * from "./datadome-slider";
+export * from "./turnstile-click";
 export type { MousePoint, MouseStep, RandomSource } from "./trusted-mouse";

@@ -7,7 +7,11 @@ import type { TokenCaptchaSolver } from "./captcha-solvers/types";
 import type { CdpFetcher, CdpTransportFactory } from "./cdp-connection";
 
 export const DEFAULT_TURNSTILE_POLL_INTERVAL_MS = 1_000;
-export const DEFAULT_TURNSTILE_CHALLENGE_TIMEOUT_MS = 12_000;
+/**
+ * Room for several clicks, each followed by Cloudflare's verdict, which takes several seconds
+ * over a slow egress such as Tor (see TURNSTILE_CLICK_POLICY).
+ */
+export const DEFAULT_TURNSTILE_CHALLENGE_TIMEOUT_MS = 45_000;
 export const DEFAULT_TURNSTILE_MAX_CLICK_ATTEMPTS = 5;
 
 export interface TurnstileGuardianSpec {
@@ -15,7 +19,7 @@ export interface TurnstileGuardianSpec {
   enabled: boolean;
   /** How often each attached page is inspected. */
   pollIntervalMs: number;
-  /** Maximum time spent on one challenge before it is bounded. */
+  /** Maximum time from detecting one challenge to its last gesture; then it is bounded. */
   challengeTimeoutMs: number;
   /** Maximum Turnstile click gestures for one challenge instance. DataDome has its own fixed, smaller budget. */
   maxClickAttempts: number;

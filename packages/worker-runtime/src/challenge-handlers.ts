@@ -37,12 +37,17 @@ export interface ChallengeActionContext {
    * detached afterwards; the frame target's URL is revalidated before `use` runs.
    */
   withFrameSession<T>(box: ChallengeFrameBox, use: (sessionId: string | undefined) => Promise<T>): Promise<T>;
+  /** Time since the guardian detected this challenge. */
+  readonly elapsedMs: number;
+  /** Records the widget state the handler read (e.g. `verifying`), for telemetry; changes are logged. */
+  noteWidget(state: string): void;
 }
 
 /**
  * - `acted`: one trusted gesture was sent; it spends one attempt.
  * - `solved`: the widget reports success; nothing to do.
- * - `waiting`: the widget is not ready (booting, resetting, out of view); retry next poll.
+ * - `waiting`: the widget is not ready (booting, verifying, resetting, out of view); retry next poll
+ *   without spending an attempt.
  * - `unsupported`: a widget variant this handler must not touch; the challenge is bounded.
  */
 export type ChallengeActionOutcome = "acted" | "solved" | "waiting" | "unsupported";
@@ -54,7 +59,10 @@ export interface ChallengeBudgetPolicy {
   timeoutMs: number;
   /** Delay from detection to the first gesture, as a person would take to see the widget. */
   firstAttemptDelayMs: number;
-  /** Delay after a gesture before the next, so the vendor's verdict can arrive first. */
+  /**
+   * Least delay after a gesture before the next, so the vendor's verdict can arrive first. A
+   * handler that can read its widget also waits while the widget reports it is still verifying.
+   */
   retryDelayMs: number;
   /**
    * Gestures per top-level origin across all tabs and documents within a sliding window. Vendors
@@ -83,6 +91,8 @@ export interface ChallengeState {
   bounded: boolean;
   /** Geometry bridges DOM and frame-tree observations of the same iframe. */
   geometryKey: string;
+  /** Last widget state the handler read, for telemetry. */
+  widget?: string;
 }
 
 export function newChallengeState(kind: ChallengeKind, policy: ChallengeBudgetPolicy, now: number, geometryKey: string): ChallengeState {

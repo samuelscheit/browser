@@ -28,15 +28,20 @@ behavior is automatically active for arbitrary sites using Cloudflare Turnstile 
 an application-specific recipe loop.
 
 The Turnstile clicker recognizes only explicit Cloudflare Turnstile signals and visible
-`challenges.cloudflare.com` Turnstile frames, and it never writes site forms. Each challenge has
-bounded time and click attempts; an unresolved challenge remains available for the
-application/manual workflow. Token-solving CAPTCHAs use the separate, recipe-gated path described
+`challenges.cloudflare.com` Turnstile frames, and it never writes site forms. Before each click it
+reads the widget's state from its frame through CDP DOM reads (never page JavaScript): it clicks only
+while the widget shows its checkbox, and leaves it alone while Cloudflare verifies, after a verdict,
+and while a failed widget retries by itself. Clicks are at least 8 seconds apart, so a slow verdict
+(for example over Tor) is never restarted by a second click. A widget whose state cannot be read
+gets the same spaced clicks after a short boot grace. Each challenge has bounded time and click
+attempts; an unresolved challenge remains available for the application/manual workflow, and the
+guardian logs every widget state change (`widget`) and the last state when it gives up (`bounded`). Token-solving CAPTCHAs use the separate, recipe-gated path described
 in the CAPTCHA token section below. If the guardian's own CDP channel dies, the owning executor reports the
 browser as unhealthy instead of exposing an unguarded ready lease.
 
 The only deployment knobs are bounded timing values (`FABRIC_TURNSTILE_POLL_INTERVAL_MS`,
 `FABRIC_TURNSTILE_CHALLENGE_TIMEOUT_MS`, and `FABRIC_TURNSTILE_MAX_CLICK_ATTEMPTS`). There is no
-disable switch: omitting them uses the reviewed defaults (1 second, 12 seconds, and five clicks).
+disable switch: omitting them uses the reviewed defaults (1 second, 45 seconds, and five clicks).
 
 ## CAPTCHA token solving
 
