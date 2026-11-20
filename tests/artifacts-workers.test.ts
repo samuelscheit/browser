@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { FabricError } from "@browser-fabric/contracts";
 import { ArtifactCollector, MemoryObjectStore } from "@browser-fabric/control-plane";
 import { builtInEgressPolicies } from "@browser-fabric/policy";
-import { defaultRuntimeRegistry, FABRIC_BROWSER_EXECUTABLE } from "@browser-fabric/worker-runtime";
+import { defaultRuntimeRegistry, FABRIC_BROWSER_EXECUTABLE, withFabricDisabledFeatures } from "@browser-fabric/worker-runtime";
 import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, createTestScheduler, makeProfile, makeWorker } from "@browser-fabric/testkit";
 
 describe("artifacts and worker isolation", () => {
@@ -122,6 +122,15 @@ describe("artifacts and worker isolation", () => {
     expect(spec.command).toContain("--disable-setuid-sandbox");
     expect(spec.command).not.toContain("--no-sandbox");
     expect(spec.cdpBind).toEqual({ host: "private-overlay", port: 9223 });
+    // Chrome 157+ would otherwise block plain-http pages (net::ERR_BLOCKED_BY_CLIENT): exactly one switch carries it.
+    expect(spec.command.filter((arg) => arg.startsWith("--disable-features="))).toEqual(["--disable-features=HttpsFirstBalancedModeAutoEnable"]);
+  });
+
+  test("a recipe's own --disable-features is merged into Fabric's, never a second switch Chrome would ignore", () => {
+    expect(withFabricDisabledFeatures(["--disable-dev-shm-usage"])).toEqual(["--disable-dev-shm-usage", "--disable-features=HttpsFirstBalancedModeAutoEnable"]);
+    expect(withFabricDisabledFeatures(["--disable-features=Translate, AutofillServerCommunication", "--lang=de", "--disable-features=Translate"]))
+      .toEqual(["--lang=de", "--disable-features=HttpsFirstBalancedModeAutoEnable,Translate,AutofillServerCommunication"]);
+    expect(withFabricDisabledFeatures(["--disable-features=HttpsFirstBalancedModeAutoEnable"])).toEqual(["--disable-features=HttpsFirstBalancedModeAutoEnable"]);
   });
 
 });

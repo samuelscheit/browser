@@ -63,6 +63,36 @@ function runtimeNetworks(policy: EgressPolicy): string[] {
   return ["fabric-workers", "fabric-egress"];
 }
 
+/**
+ * Chrome features every managed browser runs without. Chrome 157+ turns on
+ * HTTPS-First "balanced mode" by itself (`HttpsFirstBalancedModeAutoEnable`):
+ * a plain-http navigation to a site without working HTTPS then fails with
+ * net::ERR_BLOCKED_BY_CLIENT behind an interstitial no automation sees, on
+ * every egress (phishing.support case 382167075931557981,
+ * http://bitboo.clock.gert.li/…). Fabric's consumers load what they are asked
+ * to load; http pages are part of that.
+ */
+export const FABRIC_DISABLED_FEATURES = ["HttpsFirstBalancedModeAutoEnable"] as const;
+
+/**
+ * The recipe's flags with its own `--disable-features` merged into Fabric's:
+ * Chrome reads only one such switch, so a second one would silently drop the
+ * other's features.
+ */
+export function withFabricDisabledFeatures(flags: readonly string[]): string[] {
+  const features = new Set<string>(FABRIC_DISABLED_FEATURES);
+  const rest: string[] = [];
+  for (const flag of flags) {
+    const match = /^--disable-features=(.*)$/i.exec(flag);
+    if (!match) {
+      rest.push(flag);
+      continue;
+    }
+    for (const feature of match[1]!.split(",")) if (feature.trim()) features.add(feature.trim());
+  }
+  return [...rest, `--disable-features=${[...features].join(",")}`];
+}
+
 function assertRecipeEgressFlags(recipe: BrowserRecipe): void {
   for (const flag of recipe.launch.launchFlags) {
     if (forbiddenRecipeLaunchFlag.test(flag)) {
@@ -132,7 +162,7 @@ export class GenericBrowserRuntime implements BrowserRuntime {
         // an obvious automation signal. The guardian's fingerprint script masks the renderer name.
         ...(managedBrowser && recipe.mode === "interactive" ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"] : []),
         ...(recipe.launch.disableServiceWorkers ? ["--disable-service-worker"] : []),
-        ...recipe.launch.launchFlags,
+        ...withFabricDisabledFeatures(recipe.launch.launchFlags),
         // These flags are appended after immutable recipe flags so no recipe can override the
         // browser ownership, debugging boundary, or routing policy.
         // The managed launcher's bridge is the only private-overlay listener.

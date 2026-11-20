@@ -32,7 +32,9 @@ export function chromeArguments(profileDirectory: string, headless: boolean): st
     "--remote-debugging-address=127.0.0.1",
     "--no-first-run",
     "--no-default-browser-check",
-    "--disable-features=ChromeWhatsNewUI",
+    // HttpsFirstBalancedModeAutoEnable: Chrome 157+ otherwise blocks plain-http pages without HTTPS
+    // (net::ERR_BLOCKED_BY_CLIENT), as in managed browsers (worker-runtime FABRIC_DISABLED_FEATURES).
+    "--disable-features=ChromeWhatsNewUI,HttpsFirstBalancedModeAutoEnable",
     ...(headless ? ["--headless=new", "--window-size=1280,800"] : []),
     "about:blank",
   ];
