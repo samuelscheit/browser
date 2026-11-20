@@ -81,10 +81,15 @@ options and link targets. Hidden elements are left out: `display:none`, `visibil
 document lives, so the model can batch actions. When the budget is exceeded, the elements closest
 to the visible area are kept and the rest counted ("327 more not shown"). The observation also has
 the URL, title, scroll position, an excerpt of the page text, and notices (dialogs, new tabs).
+When the browser's CAPTCHA guardian saw a challenge on the page, a `Captcha:` line shows its state
+from `<html data-captcha-state data-captcha-detail>`: `solving (tencent-slider)`, `solved` or
+`failed: <detail>`. The agent never solves a CAPTCHA widget itself: it waits while one is solving
+and reports a failure. Only a page's own distorted-text or arithmetic CAPTCHA may be typed.
 
 **Actions** (the model's tools): `navigate` (http/https only), `back`, `click`, `type` (replace or
 append, optional Enter), `select` (native `<select>`), `press` (keys and chords), `scroll` (page or
-inside an element), `upload`, `wait` (for text or time), `extract` (answers a question from the
+inside an element), `upload`, `wait` (for text or time; returns early when a CAPTCHA being solved
+ends solved or failed), `extract` (answers a question from the
 whole page text in a separate model call), and the terminal `done`, `fail` and `needs_input`.
 Clicks are trusted input: the element is scrolled into view (and its frames in their parents), its
 center taken from `DOM.getContentQuads` plus the offsets of out-of-process frames, a hit test

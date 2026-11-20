@@ -1,5 +1,29 @@
 import type { TaskBrowser, Tab } from "./browser";
-import { callExpression, frameText, snapshotFrame, type RawElement, type RawFrameSnapshot } from "./page-script";
+import { callExpression, captchaState, frameText, snapshotFrame, type RawElement, type RawFrameSnapshot } from "./page-script";
+
+/** The CAPTCHA guardian's state for the active tab's document; it solves challenges, the agent does not. */
+export interface CaptchaStatus {
+  state: "solving" | "solved" | "failed";
+  /** llm-captcha's adapter or outcome, e.g. `tencent-slider` or `recaptcha-images: no model configured`. */
+  detail: string;
+}
+
+/** The active tab's CAPTCHA state; undefined when the guardian is idle there or the page cannot be read. */
+export async function captchaStatus(browser: TaskBrowser): Promise<CaptchaStatus | undefined> {
+  const tab = browser.active;
+  try {
+    return await browser.evaluate<CaptchaStatus | null>(tab.sessionId, await browser.mainWorld(tab), callExpression(captchaState)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The observation's header line: `Captcha: solving (tencent-slider)`, `Captcha: solved`, `Captcha: failed: <detail>`. */
+export function captchaLine(status: CaptchaStatus): string {
+  if (status.state === "solved") return "Captcha: solved";
+  if (!status.detail) return `Captcha: ${status.state}`;
+  return status.state === "solving" ? `Captcha: solving (${status.detail})` : `Captcha: failed: ${status.detail}`;
+}
 
 export interface ObservationOptions {
   /** Character budget of the whole observation text (roughly 4 characters per token). */
@@ -15,6 +39,8 @@ export interface Observation {
   elementCount: number;
   omittedElements: number;
   frameCount: number;
+  /** The CAPTCHA guardian's state, when it saw a challenge on this document. */
+  captcha?: CaptchaStatus;
   /** Base64 JPEG of the viewport, when screenshots are on. */
   screenshot?: string;
 }
@@ -136,6 +162,8 @@ export async function observe(browser: TaskBrowser, options: ObservationOptions,
   const url = main?.url ?? "about:blank";
   const title = main?.title ?? "";
   const header = [`URL: ${url}`, `Title: ${title || "(none)"}`];
+  const captcha = await captchaStatus(browser);
+  if (captcha) header.push(captchaLine(captcha));
   if (main) {
     const bottom = main.scrollY + main.viewportHeight;
     header.push(`Scroll: showing ${main.scrollY}-${bottom}px of ${main.scrollHeight}px${bottom < main.scrollHeight - 2 ? " (more below)" : ""}`);
@@ -166,6 +194,7 @@ export async function observe(browser: TaskBrowser, options: ObservationOptions,
   }
   return {
     url, title, text: sections.join("\n"), elementCount: elements.shown, omittedElements: elements.omitted, frameCount: frames.length,
+    ...(captcha ? { captcha } : {}),
     ...(screenshot ? { screenshot } : {}),
   };
 }

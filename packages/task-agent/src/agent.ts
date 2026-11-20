@@ -3,7 +3,7 @@ import { ACTIONS, type ActionContext } from "./actions";
 import { TaskBrowser } from "./browser";
 import { createModel } from "./llm";
 import type { ChatModel, ContentPart, TokenUsage, ToolCall, ToolResult } from "./llm/types";
-import { observe, pageText, type Observation } from "./observation";
+import { observe, pageText, type CaptchaStatus, type Observation } from "./observation";
 import { buildMessages, SYSTEM_PROMPT, taskIntro, taskTools, TERMINAL_TOOLS, type HistoryStep } from "./prompt";
 import { Secrets, UploadPolicy, validateSchema, type JsonSchema } from "./safety";
 
@@ -22,6 +22,8 @@ export interface StepLog {
   /** Page the step acted on. */
   url: string;
   title: string;
+  /** The CAPTCHA guardian's state on that page, when it saw a challenge there. */
+  captcha?: CaptchaStatus;
   /** The model's text alongside its tool calls, if any. */
   thought: string;
   actions: ActionLog[];
@@ -175,7 +177,7 @@ export async function runTask(options: RunTaskOptions): Promise<TaskResult> {
         signal,
       });
       addUsage(stepUsage, response.usage);
-      const acted = { url: current.observation.url, title: current.observation.title };
+      const acted = { url: current.observation.url, title: current.observation.title, ...(current.observation.captcha ? { captcha: current.observation.captcha } : {}) };
       const log: StepLog = { step, ...acted, thought: secrets.redact(response.text), actions: [], usage: stepUsage, durationMs: 0 };
       const assistant = { role: "assistant" as const, text: response.text, toolCalls: response.toolCalls };
 

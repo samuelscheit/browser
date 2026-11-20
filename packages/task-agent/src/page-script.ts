@@ -399,23 +399,13 @@ export function scrollDocument(dx: number, dy: number): boolean {
 }
 
 /**
- * How far a slider's handle can travel right: from the handle's right edge to
- * the right edge of its track, the nearest enclosing element at least twice as
- * wide as the handle ("Slide to verify" bars, range thumbs). Both rectangles
- * come from one frame, so the distance needs no frame offset. Null when no
- * such track encloses the element.
+ * What the browser's CAPTCHA guardian (llm-captcha) published for this document on
+ * `<html data-captcha-state data-captcha-detail>`. Null when it never saw a challenge or is idle.
  */
-export function sliderTravel(this: Element): { distance: number; handleWidth: number; trackWidth: number } | null {
-  const handle = this.getBoundingClientRect();
-  if (handle.width <= 0) return null;
-  for (let ancestor = this.parentElement; ancestor; ancestor = ancestor.parentElement) {
-    const track = ancestor.getBoundingClientRect();
-    if (track.width >= handle.width * 2 && track.height > 0 && track.height <= Math.max(handle.height * 4, 120)) {
-      return { distance: Math.max(0, track.right - handle.right), handleWidth: handle.width, trackWidth: track.width };
-    }
-    if (ancestor === document.body) break;
-  }
-  return null;
+export function captchaState(): { state: "solving" | "solved" | "failed"; detail: string } | null {
+  const state = document.documentElement.dataset.captchaState;
+  const detail = document.documentElement.dataset.captchaDetail ?? "";
+  return state === "solving" || state === "solved" || state === "failed" ? { state, detail } : null;
 }
 
 /** Scroll position and size of the frame's document. */

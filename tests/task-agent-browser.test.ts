@@ -205,25 +205,6 @@ describe.skipIf(!executable)("actions (real Chromium)", () => {
     expect(await pageLog(context)).toBe("submitted email=neo%40example.com&password=s3cret-value&country=de&nick=neo&bio=replaced+and+appended&birthday=2001-02-03&terms=on\n");
   });
 
-  test("drag slides a handle to the end of its track with a hand's track, which a behavioural slider accepts", async () => {
-    const context = await open("/slider");
-    const handle = ref(await look(context), "Slide to verify");
-    expect(await ACTIONS.drag!(context, { ref: handle })).toBe(`dragged ${handle} to the end of its track`);
-    expect(await pageLog(context)).toBe("verified\n");
-  });
-
-  test("drag by dx moves only that far, and refuses an element outside any track or with no distance", async () => {
-    const context = await open("/slider");
-    const handle = ref(await look(context), "Slide to verify");
-    expect(await ACTIONS.drag!(context, { ref: handle, dx: 100 })).toBe(`dragged ${handle} by 100,0px`);
-    expect(await pageLog(context)).toMatch(/^refused moves=\d+ end=false back=false\n$/);
-    await expect(ACTIONS.drag!(context, { ref: handle, dx: 0 })).rejects.toThrow("there is no distance to drag");
-    await context.browser.close(false);
-    const other = await open("/form");
-    const field = ref(await look(other), /textbox/);
-    await expect(ACTIONS.drag!(other, { ref: field })).rejects.toThrow("sits in no slider track");
-  });
-
   test("press sends trusted keys and chords to the focused element", async () => {
     const context = await open("/counter");
     const observation = await look(context);
@@ -276,6 +257,59 @@ describe.skipIf(!executable)("actions (real Chromium)", () => {
     expect(await ACTIONS.wait!(context, { text: "late content arrived", seconds: 5 })).toBe("the text \"late content arrived\" is on the page");
     const started = Date.now();
     await expect(ACTIONS.wait!(context, { text: "never", seconds: 1 })).rejects.toThrow("did not appear within 1s");
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  test("the observation shows the CAPTCHA guardian's state; idle or absent shows nothing", async () => {
+    const solving = await look(await open("/captcha?after=60000"));
+    expect(solving.text.split("\n").slice(0, 3)).toEqual([expect.stringMatching(/^URL: /), "Title: Captcha gate", "Captcha: solving (tencent-slider)"]);
+    expect(solving.captcha).toEqual({ state: "solving", detail: "tencent-slider" });
+    await browser!.close(false);
+    expect((await look(await open("/captcha?initial=solved&outcome=none"))).text).toContain("\nCaptcha: solved\n");
+    await browser!.close(false);
+    expect((await look(await open("/captcha?initial=solving&outcome=failed&after=0"))).text).toContain("\nCaptcha: failed: tencent-slider: puzzle refused\n");
+    for (const path of ["/captcha?initial=idle&outcome=none", "/captcha?initial=none&outcome=none", "/form"]) {
+      await browser!.close(false);
+      const observation = await look(await open(path));
+      expect(observation.text).not.toContain("Captcha:");
+      expect(observation.captcha).toBeUndefined();
+    }
+  });
+
+  test("wait returns as soon as a CAPTCHA being solved is solved, then the page goes on", async () => {
+    const context = await open("/captcha?after=1500");
+    const started = Date.now();
+    expect(await ACTIONS.wait!(context, { seconds: 30 })).toMatch(/^the CAPTCHA was solved after (1\.[4-9]|2\.\d)s$/);
+    expect(Date.now() - started).toBeLessThan(4_000);
+    const observation = await look(context);
+    expect(observation.text).toContain("\nCaptcha: solved\n");
+    await ACTIONS.click!(context, { ref: ref(observation, "Continue") });
+    expect(await pageLog(context)).toBe("continued\n");
+  });
+
+  test("wait for text returns early with the detail when the CAPTCHA fails, and reports one still solving at its deadline", async () => {
+    const failing = await open("/captcha?outcome=failed&after=800");
+    const started = Date.now();
+    expect(await ACTIONS.wait!(failing, { text: "Welcome back", seconds: 20 })).toMatch(/^the CAPTCHA guardian failed after \d\.\ds: tencent-slider: puzzle refused$/);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    await browser!.close(false);
+
+    const slow = await open("/captcha?after=60000");
+    expect(await ACTIONS.wait!(slow, { seconds: 1 })).toBe("waited 1s; the CAPTCHA is still being solved");
+    await expect(ACTIONS.wait!(slow, { text: "Welcome back", seconds: 1 })).rejects.toThrow("the text \"Welcome back\" did not appear within 1s; the CAPTCHA is still being solved");
+  });
+
+  test("a CAPTCHA state already there when the wait begins does not end it; one arriving during it does", async () => {
+    const solved = await open("/captcha?initial=solved&outcome=none");
+    let started = Date.now();
+    expect(await ACTIONS.wait!(solved, { seconds: 1 })).toBe("waited 1s");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_000);
+    await browser!.close(false);
+
+    // Never seen solving: the guardian went straight from idle to solved between two polls.
+    const quick = await open("/captcha?initial=none&outcome=solved&after=700");
+    started = Date.now();
+    expect(await ACTIONS.wait!(quick, { seconds: 10 })).toMatch(/^the CAPTCHA was solved after \d\.\ds$/);
     expect(Date.now() - started).toBeLessThan(3_000);
   });
 

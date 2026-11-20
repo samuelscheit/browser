@@ -186,6 +186,30 @@ describe.skipIf(!executable)("runTask end to end (scripted model, real Chromium)
     ]);
   });
 
+  test("the model sees the CAPTCHA guardian's state, waits while it solves, and goes on once solved", async () => {
+    const model = new ScriptedModel([
+      (request, page) => {
+        expect(page).toContain("\nCaptcha: solving (tencent-slider)\n");
+        expect(request.system).toContain("While it reads solving, call wait");
+        return { calls: [{ name: "wait", arguments: { seconds: 30 } }] };
+      },
+      (_request, page) => {
+        expect(page).toContain("\nCaptcha: solved\n");
+        return { calls: [{ name: "click", arguments: { ref: refIn(page, "button \"Continue\"") } }] };
+      },
+      (_request, page) => {
+        expect(page).toContain("continued");
+        return { calls: [{ name: "done", arguments: { result: "past the gate", summary: "waited for the CAPTCHA, then continued" } }] };
+      },
+    ]);
+    const started = Date.now();
+    const result = await runTask({ cdpEndpoint: chromium.endpoint, goal: "get past the gate", startUrl: `${site.origin}/captcha?after=1500`, model });
+    expect(result).toMatchObject({ status: "done", result: "past the gate" });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(result.steps.map((step) => step.captcha)).toEqual([{ state: "solving", detail: "tencent-slider" }, { state: "solved", detail: "tencent-slider" }, { state: "solved", detail: "tencent-slider" }]);
+    expect(result.steps[0]!.actions).toEqual([{ tool: "wait", args: { seconds: 30 }, ok: true, output: expect.stringMatching(/^the CAPTCHA was solved after \d\.\ds$/) }]);
+  });
+
   test("stops at the step limit", async () => {
     const scroll = () => ({ calls: [{ name: "scroll", arguments: { direction: "down" } }] });
     const result = await runTask({ cdpEndpoint: chromium.endpoint, goal: "scroll forever", startUrl: `${site.origin}/counter`, model: new ScriptedModel([scroll, scroll, scroll, scroll]), maxSteps: 3 });

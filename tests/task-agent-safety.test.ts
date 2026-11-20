@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Secrets, UploadPolicy, validateSchema, type ChatMessage } from "@browser-fabric/task-agent";
 import { parseChord } from "../packages/task-agent/src/keys";
-import { buildMessages, taskTools, type HistoryStep } from "../packages/task-agent/src/prompt";
+import { buildMessages, SYSTEM_PROMPT, taskTools, type HistoryStep } from "../packages/task-agent/src/prompt";
 import { parseTimeout } from "../packages/task-agent/src/cli";
 import { functionSource } from "../packages/task-agent/src/browser";
 
@@ -162,6 +162,16 @@ describe("tools", () => {
     expect(tools.map((tool) => tool.name)).not.toContain("upload");
     expect(taskTools({ uploads: true }).map((tool) => tool.name)).toContain("upload");
     for (const tool of tools) expect(tool.parameters).toMatchObject({ type: "object" });
+  });
+
+  test("CAPTCHAs are left to the browser's guardian: no drag tool, wait while solving, report a failure", () => {
+    const names = taskTools({ uploads: true }).map((tool) => tool.name);
+    expect(names).not.toContain("drag");
+    expect(names.indexOf("upload")).toBe(names.indexOf("scroll") - 1);
+    expect(taskTools({ uploads: false }).find((tool) => tool.name === "wait")!.description).toContain("Returns early when a CAPTCHA being solved ends solved or failed");
+    expect(SYSTEM_PROMPT).not.toContain("CAPTCHA solution");
+    expect(SYSTEM_PROMPT).toContain("While it reads solving, call wait");
+    expect(SYSTEM_PROMPT).toContain("On failed, call fail and report the CAPTCHA failure");
   });
 });
 
