@@ -398,6 +398,26 @@ export function scrollDocument(dx: number, dy: number): boolean {
   return window.scrollX !== before[0] || window.scrollY !== before[1];
 }
 
+/**
+ * How far a slider's handle can travel right: from the handle's right edge to
+ * the right edge of its track, the nearest enclosing element at least twice as
+ * wide as the handle ("Slide to verify" bars, range thumbs). Both rectangles
+ * come from one frame, so the distance needs no frame offset. Null when no
+ * such track encloses the element.
+ */
+export function sliderTravel(this: Element): { distance: number; handleWidth: number; trackWidth: number } | null {
+  const handle = this.getBoundingClientRect();
+  if (handle.width <= 0) return null;
+  for (let ancestor = this.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    const track = ancestor.getBoundingClientRect();
+    if (track.width >= handle.width * 2 && track.height > 0 && track.height <= Math.max(handle.height * 4, 120)) {
+      return { distance: Math.max(0, track.right - handle.right), handleWidth: handle.width, trackWidth: track.width };
+    }
+    if (ancestor === document.body) break;
+  }
+  return null;
+}
+
 /** Scroll position and size of the frame's document. */
 export function scrollState(): { scrollY: number; scrollHeight: number; viewportHeight: number } {
   return { scrollY: Math.round(window.scrollY), scrollHeight: Math.round(document.documentElement.scrollHeight), viewportHeight: Math.round(window.innerHeight) };

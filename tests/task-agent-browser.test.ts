@@ -205,6 +205,25 @@ describe.skipIf(!executable)("actions (real Chromium)", () => {
     expect(await pageLog(context)).toBe("submitted email=neo%40example.com&password=s3cret-value&country=de&nick=neo&bio=replaced+and+appended&birthday=2001-02-03&terms=on\n");
   });
 
+  test("drag slides a handle to the end of its track with a hand's track, which a behavioural slider accepts", async () => {
+    const context = await open("/slider");
+    const handle = ref(await look(context), "Slide to verify");
+    expect(await ACTIONS.drag!(context, { ref: handle })).toBe(`dragged ${handle} to the end of its track`);
+    expect(await pageLog(context)).toBe("verified\n");
+  });
+
+  test("drag by dx moves only that far, and refuses an element outside any track or with no distance", async () => {
+    const context = await open("/slider");
+    const handle = ref(await look(context), "Slide to verify");
+    expect(await ACTIONS.drag!(context, { ref: handle, dx: 100 })).toBe(`dragged ${handle} by 100,0px`);
+    expect(await pageLog(context)).toMatch(/^refused moves=\d+ end=false back=false\n$/);
+    await expect(ACTIONS.drag!(context, { ref: handle, dx: 0 })).rejects.toThrow("there is no distance to drag");
+    await context.browser.close(false);
+    const other = await open("/form");
+    const field = ref(await look(other), /textbox/);
+    await expect(ACTIONS.drag!(other, { ref: field })).rejects.toThrow("sits in no slider track");
+  });
+
   test("press sends trusted keys and chords to the focused element", async () => {
     const context = await open("/counter");
     const observation = await look(context);

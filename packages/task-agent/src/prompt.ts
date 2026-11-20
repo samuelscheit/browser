@@ -34,6 +34,11 @@ export function taskTools(options: { resultSchema?: JsonSchema; uploads: boolean
       description: "Choose an option of a native <select> by its value or label (values for a multi-select). For custom dropdowns, click instead.",
       parameters: { type: "object", properties: { ref: REF, value: { type: "string" }, values: { type: "array", items: { type: "string" } } }, required: ["ref"] },
     },
+    {
+      name: "drag",
+      description: "Press on an element and drag it with a human hand's mouse movement, then release. Without toRef or dx it drags a slider's handle to the end of its track (\"Slide to verify\", slider puzzles, range sliders); with toRef it drops onto that element; with dx/dy it moves by that many pixels.",
+      parameters: { type: "object", properties: { ref: REF, toRef: REF, dx: { type: "number" }, dy: { type: "number" } }, required: ["ref"] },
+    },
     { name: "press", description: "Press a key or chord on the focused element: Enter, Tab, Escape, ArrowDown, PageDown, Control+A, Shift+Tab, a single character, …", parameters: { type: "object", properties: { key: { type: "string" } }, required: ["key"] } },
     {
       name: "scroll",

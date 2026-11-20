@@ -1,7 +1,7 @@
 import type { ResolvedRef, TaskBrowser } from "./browser";
 import { parseChord } from "./keys";
 import { pageText } from "./observation";
-import { assignValue, callExpression, chooseOptions, coveringElement, editKind, scrollDocument, scrollState, selectContents } from "./page-script";
+import { assignValue, callExpression, chooseOptions, coveringElement, editKind, scrollDocument, scrollState, selectContents, sliderTravel } from "./page-script";
 import type { Secrets, UploadPolicy } from "./safety";
 
 export interface ActionContext {
@@ -79,6 +79,52 @@ async function clickRef(context: ActionContext, ref: ResolvedRef, force: boolean
   await mouseClick(context, page);
 }
 
+/** A pause of `min`–`max` ms, uneven like a hand's. */
+const pause = (min: number, max: number, random: () => number) => Bun.sleep(Math.round(min + random() * (max - min)));
+
+/**
+ * The pointer positions of a hand dragging `dx`/`dy` from the press point:
+ * eased out (fast start, slow arrival), a little vertical drift and jitter,
+ * 30–48 steps 10–30 ms apart, never moving backwards along the drag, the last
+ * step exactly on the target. Behavioural sliders score this track; a jump
+ * to the end in one move is refused as a bot.
+ */
+export function dragTrack(dx: number, dy: number, random: () => number = Math.random): Array<{ x: number; y: number; delayMs: number }> {
+  const steps = 30 + Math.floor(random() * 19);
+  const drift = (random() - 0.5) * 4;
+  const track: Array<{ x: number; y: number; delayMs: number }> = [];
+  let last = 0;
+  for (let step = 1; step <= steps; step++) {
+    const t = step / steps;
+    const eased = 1 - Math.pow(1 - t, 3);
+    const progress = step === steps ? 1 : Math.max(last, Math.min(1, eased + (random() - 0.5) * 0.01));
+    last = progress;
+    const wobble = step === steps ? 0 : Math.sin(t * Math.PI) * drift + (random() - 0.5) * 1.2;
+    track.push({ x: dx * progress, y: dy * progress + wobble, delayMs: 10 + Math.round(random() * 20) });
+  }
+  return track;
+}
+
+/** Press on `start` and drag by `dx`/`dy` with a hand's track: approach, press, eased drag, hold, release. */
+async function mouseDrag(context: ActionContext, start: Point, dx: number, dy: number, random: () => number = Math.random): Promise<void> {
+  const { browser } = context;
+  const sessionId = browser.active.sessionId;
+  const move = (x: number, y: number, buttons: number) => browser.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: buttons ? "left" : "none", buttons }, sessionId);
+  const from = { x: start.x - 25 - random() * 30, y: start.y + 15 + random() * 25 };
+  for (let step = 1; step <= 6; step++) await move(from.x + ((start.x - from.x) * step) / 6, from.y + ((start.y - from.y) * step) / 6, 0);
+  await pause(120, 280, random);
+  await browser.send("Input.dispatchMouseEvent", { type: "mousePressed", x: start.x, y: start.y, button: "left", buttons: 1, clickCount: 1 }, sessionId);
+  await pause(60, 160, random);
+  let end = start;
+  for (const point of dragTrack(dx, dy, random)) {
+    end = { x: start.x + point.x, y: start.y + point.y };
+    await move(end.x, end.y, 1);
+    await Bun.sleep(point.delayMs);
+  }
+  await pause(150, 350, random);
+  await browser.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: end.x, y: end.y, button: "left", buttons: 0, clickCount: 1 }, sessionId);
+}
+
 async function pressChord(context: ActionContext, chord: string): Promise<void> {
   const { modifiers, modifierKeys, key } = parseChord(chord);
   const sessionId = context.browser.active.sessionId;
@@ -153,6 +199,32 @@ export const ACTIONS: Record<string, (context: ActionContext, args: Args) => Pro
     const resolved = await context.browser.resolveRef(ref);
     const outcome = await navigated(context, () => clickRef(context, resolved, args.force === true));
     return join(`clicked ${ref}`, outcome);
+  },
+
+  async drag(context, args) {
+    const ref = string(args, "ref")!;
+    const toRef = string(args, "toRef", false);
+    const dxArg = number(args, "dx");
+    const dyArg = number(args, "dy");
+    const resolved = await context.browser.resolveRef(ref);
+    const start = await locate(context, resolved);
+    let dx: number;
+    let dy: number;
+    let where: string;
+    if (toRef) {
+      const target = await locate(context, await context.browser.resolveRef(toRef));
+      [dx, dy, where] = [target.x - start.x, target.y - start.y, `onto ${toRef}`];
+    } else if (dxArg !== undefined || dyArg !== undefined) {
+      [dx, dy, where] = [dxArg ?? 0, dyArg ?? 0, `by ${Math.round(dxArg ?? 0)},${Math.round(dyArg ?? 0)}px`];
+    } else {
+      const travel = await context.browser.callOn<{ distance: number } | null>(resolved, sliderTravel);
+      if (!travel) throw new ActionError(`${ref} sits in no slider track wider than itself; give toRef or dx`);
+      // Past the end by a few pixels: the widget clamps it, and a hand overshoots.
+      [dx, dy, where] = [travel.distance + 4 + Math.random() * 4, 0, "to the end of its track"];
+    }
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) throw new ActionError("there is no distance to drag");
+    const outcome = await navigated(context, () => mouseDrag(context, start, dx, dy));
+    return join(`dragged ${ref} ${where}`, outcome);
   },
 
   async type(context, args) {

@@ -17,6 +17,33 @@ const ITEMS = [
 function routes(otherOrigin: string): Record<string, (request: Request, url: URL) => Response | Promise<Response>> {
   const html = (body: string, init: ResponseInit = {}) => new Response(body, { ...init, headers: { "content-type": "text/html; charset=utf-8", ...(init.headers ?? {}) } });
   return {
+    // A behavioural "slide to verify" gate like phishing kits use (storage.googleapis.com/…/lis, 2026-11-20):
+    // it passes only a trusted press on the handle, many moves that never go back, and a release at the end.
+    "/slider": () => html(page("Slider", `
+      <p>Please verify you are human</p>
+      <div id="track" style="position:relative;width:300px;height:50px;margin:40px;background:#ddd;border-radius:25px">
+        <div id="handle" role="button" aria-label="Slide to verify" style="position:absolute;left:0;top:0;width:50px;height:50px;border-radius:25px;background:#39f;cursor:grab">→</div>
+      </div>
+      ${LOG_SCRIPT}
+      <script>
+        const track = document.getElementById('track'), handle = document.getElementById('handle');
+        let down = null, moves = 0, back = false, last = 0;
+        handle.addEventListener('mousedown', (event) => { if (!event.isTrusted) return; down = event.clientX; moves = 0; back = false; last = 0; });
+        document.addEventListener('mousemove', (event) => {
+          if (down === null) return;
+          const offset = Math.max(0, Math.min(event.clientX - down, track.clientWidth - handle.clientWidth));
+          if (offset < last - 0.5) back = true;
+          last = offset; moves++;
+          handle.style.left = offset + 'px';
+        });
+        document.addEventListener('mouseup', () => {
+          if (down === null) return;
+          const atEnd = last >= track.clientWidth - handle.clientWidth - 1;
+          log(atEnd && moves >= 15 && !back ? 'verified' : 'refused moves=' + moves + ' end=' + atEnd + ' back=' + back);
+          down = null;
+          if (!(atEnd && moves >= 15 && !back)) handle.style.left = '0px';
+        });
+      </script>`)),
     "/form": () => html(page("Form", `
       <h1>Account form</h1>
       <form id="form" onsubmit="event.preventDefault(); log('submitted ' + new URLSearchParams(new FormData(this)))">
