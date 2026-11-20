@@ -248,8 +248,9 @@ export interface ChallengeHandlerSet {
 export interface ChallengeHandler {
   id: string;
   /**
-   * `guardian`: the process-level Turnstile/DataDome guardian; `dbc`/`anticaptcha`: token solving through
-   * that provider when the deployment configured its credential; `manual-handoff`: pause for a human.
+   * `guardian`: the process-level CAPTCHA guardian (llm-captcha); `dbc`/`anticaptcha`: the reCAPTCHA v2
+   * token fallback through that provider when llm-captcha failed and the deployment configured its
+   * credential; `manual-handoff`: pause for a human.
    */
   kind: (typeof challengeHandlerKinds)[number];
   mode: "automatic" | "manual" | "fallback";

@@ -94,13 +94,17 @@ describe("Fabric egress sidecar", () => {
     expect(listeners.get("proxy")).toMatchObject({ mode: "proxy", upstreamSecretFile: "/run/secrets/egress_proxy_upstreams", optional: true });
     expect(listeners.get("proxy")?.fallbackToDirect).toBeUndefined();
     expect(listeners.get("tor")).toMatchObject({ mode: "proxy", upstreamUrls: ["socks5h://fabric-tor:9050"] });
-    expect(listeners.get("captcha-solver")?.allowedHostnameSuffixes).toEqual(["dbcapi.me", "anti-captcha.com"]);
+    // The token providers and the AI gateway the CAPTCHA guardian's model is served from.
+    expect(listeners.get("captcha-solver")?.allowedHostnameSuffixes).toEqual(["dbcapi.me", "anti-captcha.com", "ollama.samuelscheit.com"]);
     const stack = await Bun.file(new URL("../deploy/compose/compose.yml", import.meta.url)).text();
     const egressBlock = stack.slice(stack.indexOf("  fabric-egress-sidecar:"), stack.indexOf("\n  fabric-tor:"));
     expect(egressBlock).toContain("egress_proxy_upstreams");
-    // The solver listener is credential-free: provider keys are mounted only into the manager.
-    for (const solverSecret of ["deathbycaptcha_username", "deathbycaptcha_password", "anticaptcha_client_key"]) {
+    // The solver listener is credential-free: provider and model keys are mounted only into the manager.
+    const managerStart = stack.indexOf("\n  fabric-worker-manager:\n");
+    const managerBlock = stack.slice(managerStart, stack.indexOf("\n  fabric-", managerStart + 1));
+    for (const solverSecret of ["deathbycaptcha_username", "deathbycaptcha_password", "anticaptcha_client_key", "llm_captcha_api_key"]) {
       expect(egressBlock).not.toContain(solverSecret);
+      expect(managerBlock).toContain(`/run/secrets/${solverSecret}`);
     }
   });
 

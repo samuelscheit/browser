@@ -15,59 +15,72 @@ plane through the API or the typed clients.
 `fabric up` (your own everyday Chrome) or `fabric up --remote` (a Fabric browser) prints a plain
 `http://127.0.0.1:<port>` CDP endpoint for Playwright, Puppeteer or an MCP, plus a live view.
 
-## Global Cloudflare Turnstile guardian
+## Global CAPTCHA guardian
 
-Every Fabric-owned **Chromium** process starts a process-level Turnstile guardian before its lease
-is marked ready (managed Docker Compose browsers, federated local browsers, and the CLI's local
-browser). The guardian uses a second browser-level CDP connection, watches every
-page/tab—including dynamically created tabs and Turnstile frames hidden in closed shadow roots—and
-performs one bounded, jittered trusted mouse gesture on the Turnstile checkbox (and a human-like
-slide on DataDome's slider CAPTCHA). It is
-independent of the application's Puppeteer, Playwright, Patchright, or raw-CDP connection, so the
-behavior is automatically active for arbitrary sites using Cloudflare Turnstile rather than being
-an application-specific recipe loop.
+Every Fabric-owned **Chromium** process starts a process-level CAPTCHA guardian before its lease is
+marked ready (managed Docker Compose browsers, federated local browsers, and the CLI's local
+browser). The guardian uses a second browser-level CDP connection, watches every page/tab—including
+dynamically created tabs—and runs [llm-captcha](https://github.com/samuelscheit/llm-captcha)'s CDP
+solver on each one. It is independent of the application's Puppeteer, Playwright, Patchright, or
+raw-CDP connection, so every site's challenges are handled without an application-specific loop.
 
-The Turnstile clicker recognizes only explicit Cloudflare Turnstile signals and visible
-`challenges.cloudflare.com` Turnstile frames, and it never writes site forms. Before each click it
-reads the widget's state from its frame through CDP DOM reads (never page JavaScript): it clicks only
-while the widget shows its checkbox, and leaves it alone while Cloudflare verifies, after a verdict,
-and while a failed widget retries by itself. Clicks are at least 8 seconds apart, so a slow verdict
-(for example over Tor) is never restarted by a second click. A widget whose state cannot be read
-gets the same spaced clicks after a short boot grace. Each challenge has bounded time and click
-attempts; an unresolved challenge remains available for the application/manual workflow, and the
-guardian logs every widget state change (`widget`) and the last state when it gives up (`bounded`). Token-solving CAPTCHAs use the separate, recipe-gated path described
-in the CAPTCHA token section below. If the guardian's own CDP channel dies, the owning executor reports the
-browser as unhealthy instead of exposing an unguarded ready lease.
+llm-captcha recognizes the challenges in every frame (out-of-process frames and closed shadow roots
+included) from declarative adapters: checkboxes (Cloudflare Turnstile, reCAPTCHA v2, hCaptcha, …),
+image grids, sliders (DataDome, GeeTest, Tencent, Aliyun, …), press-and-hold and proof-of-work
+interstitials. It answers with trusted CDP input: human-like mouse tracks, drags and focus emulation.
+Checkboxes, sliders and press-and-hold need no model; image and text challenges ask the deployment's
+vision model. The page's top document publishes the state
+(`<html data-captcha-state="solving|solved|failed" data-captcha-detail="…">`), so an agent waits while
+it reads `solving`.
 
-The only deployment knobs are bounded timing values (`FABRIC_TURNSTILE_POLL_INTERVAL_MS`,
-`FABRIC_TURNSTILE_CHALLENGE_TIMEOUT_MS`, and `FABRIC_TURNSTILE_MAX_CLICK_ATTEMPTS`). There is no
-disable switch: omitting them uses the reviewed defaults (1 second, 45 seconds, and five clicks).
+- **Model:** `claude-opus-5-5` through Fabric's AI gateway's Anthropic Messages API
+  (`FABRIC_LLM_CAPTCHA_BASE_URL`, default `https://ollama.samuelscheit.com/v1`;
+  `FABRIC_LLM_CAPTCHA_MODEL`). The key is the Docker secret `llm_captcha_api_key`
+  (`FABRIC_LLM_CAPTCHA_API_KEY_FILE`), read by the worker manager (or local agent) only; it never
+  enters a browser and is never logged. Without a key, model challenges end `failed`.
+- **Egress:** model requests leave through the egress sidecar's `captcha-solver` listener, which admits
+  only the solver hostnames.
+- **Bounds:** at most one solve session per page at a time; pages are independent. A session that
+  fails is final for its page document (no paid loops) until a top-level navigation; a session that
+  errors after asking the model counts as failed. After `solved` the page stays watched, since a later
+  step can show a new challenge. Navigation, page close and guardian stop abort a session, and its
+  remaining input never reaches the page.
+- **Knobs:** `FABRIC_CAPTCHA_POLL_INTERVAL_MS` (default 1 s), `FABRIC_CAPTCHA_SOLVE_TIMEOUT_MS`
+  (3 min per session) and `FABRIC_CAPTCHA_MAX_ROUNDS` (8 model rounds, slides or holds per challenge).
+  There is no disable switch.
+- **Logging:** page origins, adapter ids, llm-captcha's short outcome and stable error classes only.
 
-## CAPTCHA token solving
+If the guardian's own CDP channel dies, the owning executor reports the browser as unhealthy instead
+of exposing an unguarded ready lease.
 
-Token CAPTCHAs are solved by a recipe-gated companion, not by the Turnstile clicker. A browser solves
-only when its recipe's challenge handler set contains an **automatic** `dbc` or `anticaptcha` handler
-**and** the deployment configured that provider's credential. The built-in browser recipes use
-`challenge_captcha-solver@1`; a catalog recipe that must never spend provider credit uses
-`challenge_guardian@1` instead.
+## reCAPTCHA v2 token fallback
 
-- **Supported widget:** Google reCAPTCHA v2 checkboxes (Death by Captcha token type 4, AntiCaptcha
-  `RecaptchaV2TaskProxyless`). hCaptcha is not solved: neither provider's public documentation names a
-  hCaptcha task for this path, so it fails closed as `unsupported` rather than guessing.
-- **Where it runs:** the guardian detects the widget's sitekey in its isolated world, asks the solver
-  for one token, fills the page's response field in that isolated world, then calls the widget's own
-  `data-callback` in the main world. The page's callback therefore sees the same token a human solve
-  would produce.
-- **Credentials:** provider keys are Docker secrets mounted only into the worker manager. Browser
-  containers and the egress sidecar never receive them. An empty or `#`-prefixed secret file means the
-  provider is not configured.
-- **Egress:** solver API traffic leaves through the `captcha-solver` sidecar listener (port 11003),
-  which admits only the `dbcapi.me` and `anti-captcha.com` hostnames.
-- **Bounds:** one paid solve per page document. A failed solve is not retried on later polls, and a
-  navigation resets the budget. A canceled solve is never retried through a second provider. The
-  overall deadline is two minutes per token.
-- **Logging:** only the widget kind, the page origin, and a stable failure class are logged. Sitekeys,
-  tokens, provider bodies, and credentials are never logged.
+llm-captcha alone is not enough for reCAPTCHA v2. Measured live on the production egress with
+`claude-opus-5-5`, it passed Turnstile 5/5 but reCAPTCHA v2 forms only 0–2/5: its image-grid answers
+were wrong, on one site it ended `idle` ("no challenge found") with the widget under a cookie banner,
+and once it ended `solved` with an empty `g-recaptcha-response`. The guardian therefore buys reCAPTCHA
+v2 tokens from Death by Captcha or Anti-Captcha as a permanent second path.
+
+- **Trigger:** after every llm-captcha session, the guardian probes the top document (from its own
+  isolated world) for a visible, rendered reCAPTCHA v2 checkbox widget (not the invisible variant)
+  whose response field is still empty, whatever the session concluded. After `failed` it buys at
+  once; after `idle` or a token-less `solved` it first gives the widget a 5-second grace (it may still
+  be loading, or its token arriving), with the page kept at `solving`.
+- **Gate:** only when the recipe's challenge handler set contains an **automatic** `dbc` or
+  `anticaptcha` handler **and** the deployment configured that provider's credential. The built-in
+  browser recipes use `challenge_captcha-solver@1`; a catalog recipe that must never spend provider
+  credit uses `challenge_guardian@1`.
+- **State:** a reCAPTCHA reads `solved` only once a token is in its response field; otherwise the page
+  reads `failed` with the reason (llm-captcha's, `recaptcha: widget not reached`, or
+  `recaptcha: solved without a response token`, plus the provider's failure class).
+- **Injection:** the token fills the response field in the guardian's isolated world, then the
+  widget's own `data-callback` runs in the main world, so the page sees what a human solve produces.
+- **Bounds:** one token per page document; a provider failure is final for that document, and a
+  navigation starts over. A canceled solve is never retried through a second provider; the overall
+  deadline is two minutes per token.
+- **Credentials and egress:** provider keys are Docker secrets mounted only into the worker manager;
+  their API traffic uses the same `captcha-solver` sidecar listener (`dbcapi.me`, `anti-captcha.com`).
+  Sitekeys, tokens, provider bodies and credentials are never logged.
 
 ## External CDP client limits
 

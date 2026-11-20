@@ -1,22 +1,18 @@
-import { ChromiumProcessSupervisor, type TokenCaptchaSolver } from "@browser-fabric/worker-runtime";
-import type { ChallengeHandler } from "@browser-fabric/contracts";
+import { ChromiumProcessSupervisor } from "@browser-fabric/worker-runtime";
 import type { BrowserProcessSpec, Executor } from "@browser-fabric/worker-manager";
-import { captchaTokenSolverFor, readOptionalSecret } from "@browser-fabric/worker-manager";
+import { captchaSolvingFromEnvironment, type CaptchaSolving } from "@browser-fabric/worker-manager";
 
 /**
- * Local browsers resolve solver credentials from owner-only secret files on the operator's machine. They
- * reach the providers through the loopback egress sidecar's captcha-solver listener, never directly.
- * Without a configured solver proxy, no local browser ever solves a token.
+ * Local browsers read the CAPTCHA model key and token provider credentials from owner-only secret files
+ * on the operator's machine, and reach the model gateway and providers through the loopback egress
+ * sidecar's captcha-solver listener, never directly. Without a configured solver proxy, local guardians
+ * solve only challenges that need no model, and never buy a token.
  */
-export async function localCaptchaTokenSolverFor(): Promise<(handlers: readonly ChallengeHandler[] | undefined) => TokenCaptchaSolver | undefined> {
+export async function localCaptchaSolving(): Promise<Pick<CaptchaSolving, "captchaGuardianFactory" | "tokenSolverFor"> | Record<string, never>> {
   const proxy = process.env.FABRIC_CAPTCHA_SOLVER_PROXY_URL?.trim();
-  if (!proxy) return () => undefined;
-  return captchaTokenSolverFor({
-    providerProxyUrl: proxy,
-    deathByCaptchaUsername: await readOptionalSecret(process.env.FABRIC_DEATHBYCAPTCHA_USERNAME_FILE),
-    deathByCaptchaPassword: await readOptionalSecret(process.env.FABRIC_DEATHBYCAPTCHA_PASSWORD_FILE),
-    antiCaptchaClientKey: await readOptionalSecret(process.env.FABRIC_ANTICAPTCHA_CLIENT_KEY_FILE),
-  });
+  if (!proxy) return {};
+  const { captchaGuardianFactory, tokenSolverFor } = await captchaSolvingFromEnvironment(proxy);
+  return { captchaGuardianFactory, tokenSolverFor };
 }
 
 /** Builds the local supervisor after its solver credentials have been read from owner-only files. */
@@ -26,7 +22,7 @@ export async function createLocalChromiumSupervisor(): Promise<ChromiumProcessSu
     profileRoot: process.env.FABRIC_LOCAL_PROFILE_ROOT,
     cwd: process.env.FABRIC_LOCAL_WORKDIR ?? "/tmp",
     startupTimeoutMs: Number(process.env.FABRIC_BROWSER_STARTUP_TIMEOUT_MS ?? 20_000),
-    tokenSolverFor: await localCaptchaTokenSolverFor(),
+    ...await localCaptchaSolving(),
   });
 }
 

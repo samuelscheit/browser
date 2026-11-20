@@ -73,12 +73,14 @@ export function makeChallengeSet(definition: ChallengeSetDefinition): ChallengeH
   };
 }
 
-const guardianHandler: ChallengeHandler = { id: "guardian", kind: "guardian", mode: "automatic", configuration: { turnstile: true, datadome: true } };
+const guardianHandler: ChallengeHandler = { id: "guardian", kind: "guardian", mode: "automatic", configuration: { solver: "llm-captcha" } };
 
 /**
- * `guardian` documents the process-level Turnstile/DataDome guardian every Fabric Chromium carries.
- * `captcha-solver` additionally enables token solving (reCAPTCHA v2/hCaptcha) through each provider
- * whose credential the deployment configured; without a credential no provider is ever called.
+ * `guardian` documents the process-level CAPTCHA guardian every Fabric Chromium carries: llm-captcha
+ * solves every challenge it recognizes, with the deployment's vision model where one is needed.
+ * `captcha-solver` additionally lets a reCAPTCHA v2 widget that llm-captcha could not solve fall back
+ * to one token per page document from each provider whose credential the deployment configured;
+ * without a credential no provider is ever called.
  */
 export const builtInChallengeSets: readonly ChallengeHandlerSet[] = [
   makeChallengeSet({ name: "guardian", handlers: [guardianHandler] }),

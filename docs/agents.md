@@ -34,7 +34,7 @@ restarts Chrome with flags. It uses Chrome's own switch (Chrome 144+) instead:
 
 Chrome asks once per WebSocket, so the fabric daemon opens exactly **one** connection to Chrome and
 multiplexes every client over it: Playwright, Puppeteer, both MCP servers, the live view, the quick
-actions and the Turnstile guardian. After the first Allow, nothing prompts again until `fabric down`
+actions and the CAPTCHA guardian. After the first Allow, nothing prompts again until `fabric down`
 or until Chrome quits. If Chrome quits, the next client reconnects once, which means one new Allow.
 Chrome's toggle server has no `/json/*` and no page sockets; fabric serves both itself on `:9222`.
 
@@ -50,8 +50,8 @@ What fabric does in your Chrome:
   `*` in `fabric tabs`). The quick actions (`goto`, `eval`, `shot`) use the most recent agent tab
   and open a new one when there is none, so they never take over the tab you are working in.
   `--tab` can still pick any tab.
-- The Turnstile guardian watches **agent tabs only**. It runs over the same connection, so it adds
-  no prompt.
+- The CAPTCHA guardian watches **agent tabs only** (and their out-of-process frames). It runs over the
+  same connection, so it adds no prompt.
 - Playwright (`connectOverCDP`) redirects downloads of the whole browser into its temp folder while
   it is connected. fabric restores Chrome's default when the last client that changed it leaves.
 
@@ -161,9 +161,10 @@ The agent is the [`@browser-fabric/task-agent`](../packages/task-agent/README.md
   `fabric up --remote` says so; `fabric up --remote --fresh` or the local browser always work.
 - Every endpoint uses one upstream connection however many clients it serves, so a remote
   session's limit of eight CDP clients is never the bottleneck.
-- Turnstile checkboxes are clicked automatically in every mode (in your own Chrome, only in agent
-  tabs; the same guardian every Fabric
-  browser runs).
+- CAPTCHAs are solved automatically in every mode (in your own Chrome, only in agent tabs) by the
+  same llm-captcha guardian every Fabric browser runs. Locally it has no model, so it solves
+  checkboxes (Turnstile, reCAPTCHA), sliders and press-and-hold; a remote browser also solves image
+  and text challenges. Before acting on a page, wait while `<html data-captcha-state>` reads `solving`.
 
 ## Security
 

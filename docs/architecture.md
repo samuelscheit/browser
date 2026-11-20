@@ -54,7 +54,7 @@ manifest the Compose bootstrap generates.
 
 The gateway authenticates the capability before accepting a WebSocket upgrade. Once accepted it forwards complete WebSocket frames between the client and worker-local browser endpoint. It never parses or exposes a command-level HTTP proxy. One external connection is allowed by default (a session may opt into up to eight), with a 60-second reconnect grace period.
 
-## Browser-level Turnstile guardian
+## Browser-level CAPTCHA guardian
 
 Each Fabric-owned Chromium process has two independent CDP clients:
 
@@ -65,25 +65,28 @@ application (Puppeteer / Playwright / Patchright / raw CDP)
                 Fabric Chromium browser
                          ^
                          |
-         process-level Turnstile guardian
+          process-level CAPTCHA guardian (llm-captcha)
 ```
 
 The guardian is created by the Docker executor or local Chromium supervisor **before** readiness is
-published. It discovers page targets, attaches a separate flattened CDP session per page, and polls
-for explicit Cloudflare Turnstile evidence. It locates `challenges.cloudflare.com` Turnstile frames
-through both normal DOM observation and the CDP frame tree (which covers closed shadow roots), then
-issues bounded `Input.dispatchMouseEvent` movement/press/release gestures. A lost guardian CDP
-connection makes the executor's liveness probe fail; a manager restart removes an untracked browser
-rather than silently continuing without its guardian. Every container and volume a manager creates
-carries its deployment (`com.browser-fabric.deployment`, the Compose project name), and a restart
-removes only its own deployment's browsers, so two stacks can share a Docker host.
+published. It discovers page targets, attaches a separate flattened CDP session per page (installing
+the GPU identity there), and runs llm-captcha's solver on each page: one session at a time per page,
+with one solver driver per page document so its isolated worlds are injected once. Out-of-process
+challenge frames are reached through frame sessions the guardian attaches in flat mode on its own
+connection and releases on navigation or page close. A failed session is final for its document; a
+navigation, page close or stop aborts a running session, and its remaining input is refused before it
+reaches the browser. A visible reCAPTCHA v2 widget still without a response after a session gets one
+provider token per document when the recipe enables a provider (see
+[`docs/README.md`](README.md#recaptcha-v2-token-fallback) for why).
 
-The clicker is a local input helper for visible Cloudflare Turnstile. It does not export or log
-cookies, page/form payloads, or external solver API data. After the configured bounded attempts or
-timeout it stops clicking and leaves the browser usable for the normal application/manual path.
-Token-solving CAPTCHAs follow the separate recipe-gated path described in
-[`docs/README.md`](README.md#captcha-token-solving): one paid solve per page document, with provider
-keys kept in the worker manager and never in a browser or the egress sidecar.
+A lost guardian CDP connection makes the executor's liveness probe fail; a manager restart removes an
+untracked browser rather than silently continuing without its guardian. Every container and volume a
+manager creates carries its deployment (`com.browser-fabric.deployment`, the Compose project name), and
+a restart removes only its own deployment's browsers, so two stacks can share a Docker host.
+
+The guardian does not export or log cookies or page/form payloads. The model key and the token
+provider keys stay in the worker manager; model and provider requests leave through the egress
+sidecar's `captcha-solver` listener, never from a browser.
 
 ## Durable versus ephemeral data
 

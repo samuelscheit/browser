@@ -4,7 +4,7 @@ import { DockerContainerExecutor, type DockerCommand } from "../apps/worker-mana
 import { buildBrowserProcessSpec } from "../apps/worker-manager/src";
 import { createWorkerManagerFetch } from "../apps/worker-manager/src/server";
 import { ManagedWorkerController } from "../apps/worker-manager/src/controller";
-import type { TurnstileGuardianFactory, TurnstileGuardianHandle, TurnstileGuardianSnapshot } from "@browser-fabric/worker-runtime";
+import type { CaptchaGuardianFactory, CaptchaGuardianHandle, CaptchaGuardianSnapshot } from "@browser-fabric/worker-runtime";
 import { AssignmentSigner, workerEnrollmentTokenHash } from "@browser-fabric/control-plane";
 import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, createTestScheduler, makeProfile, makeWorker } from "@browser-fabric/testkit";
 
@@ -21,13 +21,13 @@ class RecordingDockerCommand implements DockerCommand {
   }
 }
 
-class FakeGuardian implements TurnstileGuardianHandle {
+class FakeGuardian implements CaptchaGuardianHandle {
   public starts = 0;
   public stops = 0;
   public running = true;
 
-  public get snapshot(): TurnstileGuardianSnapshot {
-    return { running: this.running, attachedPages: 0, checks: 0, clickAttempts: 0 };
+  public get snapshot(): CaptchaGuardianSnapshot {
+    return { running: this.running, attachedPages: 0, checks: 0, solved: 0, failed: 0 };
   }
 
   public async start(): Promise<void> { this.starts += 1; }
@@ -59,7 +59,7 @@ describe("managed browser guardians", () => {
     const command = new RecordingDockerCommand();
     const guardian = new FakeGuardian();
     const factoryInputs: Array<{ endpoint: string; enabled: boolean }> = [];
-    const guardianFactory: TurnstileGuardianFactory = ({ endpoint, spec }) => {
+    const guardianFactory: CaptchaGuardianFactory = ({ endpoint, spec }) => {
       factoryInputs.push({ endpoint, enabled: spec.enabled });
       return guardian;
     };
@@ -69,7 +69,7 @@ describe("managed browser guardians", () => {
         expect(String(input)).toBe("http://172.30.0.44:9223/json/version");
         return new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" }));
       },
-      turnstileGuardianFactory: guardianFactory,
+      captchaGuardianFactory: guardianFactory,
       closeBrowser: async (endpoint) => { command.calls.push(["cdp", "Browser.close", endpoint]); return true; },
       requireImmutableImages: false,
       browserSeccompProfile: "/etc/browser-fabric/chromium-userns-seccomp.json",
@@ -137,7 +137,7 @@ describe("managed browser guardians", () => {
     const executor = new DockerContainerExecutor({
       command,
       fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" })),
-      turnstileGuardianFactory: () => new FakeGuardian(),
+      captchaGuardianFactory: () => new FakeGuardian(),
       requireImmutableImages: false,
     });
     const cloned = {
@@ -159,15 +159,15 @@ describe("managed browser guardians", () => {
   test("removes a newly created container when its mandatory guardian cannot start", async () => {
     const { worker, assignment } = await claimedBrowserAssignment();
     const command = new RecordingDockerCommand();
-    const guardianFactory: TurnstileGuardianFactory = () => ({
-      snapshot: { running: false, attachedPages: 0, checks: 0, clickAttempts: 0 },
+    const guardianFactory: CaptchaGuardianFactory = () => ({
+      snapshot: { running: false, attachedPages: 0, checks: 0, solved: 0, failed: 0 },
       start: async () => { throw new Error("guardian CDP connection failed"); },
       stop: async () => undefined,
     });
     const executor = new DockerContainerExecutor({
       command,
       fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" })),
-      turnstileGuardianFactory: guardianFactory,
+      captchaGuardianFactory: guardianFactory,
       // An unreachable browser cannot close itself; Docker removal still follows.
       closeBrowser: async () => false,
       requireImmutableImages: false,

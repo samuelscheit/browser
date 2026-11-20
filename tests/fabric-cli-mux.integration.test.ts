@@ -287,7 +287,24 @@ run("fabric endpoint multiplexer on a Chrome with the remote-debugging toggle", 
     expect(proxy.upgrades).toBe(1);
   }, 30_000);
 
-  test("the Turnstile guardian shares the socket and watches agent tabs only, never the user's own", async () => {
+  test("an agent tab's out-of-process frames are agent targets, so the guardian can reach a CAPTCHA widget in one; the user's are not", async () => {
+    const frameUrl = (title: string) => `http://captcha-${title}.test:${site.port}/?title=${title}`;
+    const userTab = await directly(async (connection) => (await connection.send("Target.createTarget", { url: html("users-framed-tab", `<iframe src="${frameUrl("user")}"></iframe>`) })).targetId as string);
+    const agent = await (await fetch(`${base}/json/new?${html("agent-framed-tab", `<iframe src="${frameUrl("agent")}"></iframe>`)}`, { method: "PUT" })).json() as { id: string };
+    const frames = await waitFor(async () => {
+      const { targetInfos } = await directly(async (connection) => connection.send("Target.getTargets")) as { targetInfos: { targetId: string; type: string; url: string; parentFrameId?: string }[] };
+      const iframes = targetInfos.filter((info) => info.type === "iframe" && info.url.includes("captcha-"));
+      return iframes.length === 2 ? iframes : undefined;
+    });
+    const agentFrame = frames.find((info) => info.url.includes("captcha-agent"))!;
+    const userFrame = frames.find((info) => info.url.includes("captcha-user"))!;
+    expect(agentFrame.parentFrameId).toBe(agent.id);
+    expect(server.mux!.isAgentTarget(agentFrame.targetId)).toBe(true);
+    expect(server.mux!.isAgentTarget(userFrame.targetId)).toBe(false);
+    expect(server.mux!.isAgentTarget(userTab)).toBe(false);
+  }, 30_000);
+
+  test("the CAPTCHA guardian shares the socket and watches agent tabs only, never the user's own", async () => {
     // The user opens a tab in their Chrome (not through fabric).
     const userTab = await directly(async (connection) => (await connection.send("Target.createTarget", { url: html("users-own-tab") })).targetId as string);
     const agent = await (await fetch(`${base}/json/new?${html("agent-tab")}`, { method: "PUT" })).json() as { id: string };

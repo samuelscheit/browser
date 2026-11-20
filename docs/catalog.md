@@ -19,8 +19,8 @@ is [`deploy/compose/catalog.example.json`](../deploy/compose/catalog.example.jso
 | Egress | `egress_direct@1` | every traffic class through the sidecar's `direct` listener |
 | Egress | `egress_proxy@1` | every traffic class through the `proxy` listener (upstream URL/pool in a secret) |
 | Egress | `egress_tor@1` | documents, APIs, assets and downloads through Tor (`--profile tor`) |
-| Challenge set | `challenge_guardian@1` | the Turnstile/DataDome guardian only; never spends solver credit |
-| Challenge set | `challenge_captcha-solver@1` | guardian plus reCAPTCHA v2 token solving through Death by Captcha and Anti-Captcha, each only if its credential is configured |
+| Challenge set | `challenge_guardian@1` | the CAPTCHA guardian (llm-captcha) only; never buys a token |
+| Challenge set | `challenge_captcha-solver@1` | guardian plus the reCAPTCHA v2 token fallback through Death by Captcha and Anti-Captcha, each only if its credential is configured |
 | Challenge set | `challenge_manual-handoff@1` | guardian plus a manual handoff (`awaiting_manual`) |
 
 Fabric has one browser runtime, `chrome`: Google Chrome stable on amd64 hosts, Debian Chromium on
@@ -41,7 +41,7 @@ regardless of its recipe.
       "name": "solver-anticaptcha-only",          // ref challenge_solver-anticaptcha-only@1
       "version": 1,                              // optional, default 1
       "handlers": [
-        { "id": "guardian", "kind": "guardian", "mode": "automatic", "configuration": { "turnstile": true } },
+        { "id": "guardian", "kind": "guardian", "mode": "automatic", "configuration": { "solver": "llm-captcha" } },
         { "id": "anticaptcha", "kind": "anticaptcha", "mode": "automatic" }
       ]
     }
@@ -88,8 +88,9 @@ regardless of its recipe.
   (`reason`). The routes declare the policy; the egress sidecar's per-policy PAC enforces it (next
   section).
 - **challengeSets**: handler kinds are `guardian`, `dbc`, `anticaptcha`, `manual-handoff`; modes are
-  `automatic`, `manual`, `fallback`. Token solving is enabled only by an automatic `dbc` or
-  `anticaptcha` handler.
+  `automatic`, `manual`, `fallback`. The `guardian` handler documents the CAPTCHA guardian every
+  browser runs anyway; its configuration is informational. The reCAPTCHA v2 token fallback is enabled
+  only by an automatic `dbc` or `anticaptcha` handler.
 - **projects**: created once on first start; a restart never rewrites an existing project.
 
 ## Egress policies need a sidecar entry

@@ -13,13 +13,13 @@ import {
   type SolverFetch,
   type TokenCaptchaSolver,
 } from "@browser-fabric/worker-runtime";
-import { recaptchaCallbackScript, recaptchaFillScript, RECAPTCHA_V2_PROBE_SCRIPT } from "../packages/worker-runtime/src/captcha-solvers/recaptcha-page";
+import { recaptchaCallbackScript, recaptchaFillScript, RECAPTCHA_V2_PROBE_SCRIPT } from "../packages/worker-runtime/src/captcha-solvers/recaptcha-fallback";
 import type { ChallengeHandler } from "@browser-fabric/contracts";
 
 const SITEKEY = "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI";
 const PAGE = "https://site.example.test/form";
 const TOKEN = "03AFcWeA".padEnd(64, "x");
-const task: CaptchaTask = { kind: "recaptcha-v2", sitekey: SITEKEY, pageUrl: PAGE };
+const task: CaptchaTask = { sitekey: SITEKEY, pageUrl: PAGE };
 
 /** Deterministic clock: sleeps advance time instantly and are recorded. */
 function fakeClock(): SolverClock & { sleeps: number[] } {
@@ -141,13 +141,6 @@ describe("Death by Captcha client", () => {
     expect(String((failure as Error).message)).not.toContain("secret-balance-detail");
   });
 
-  test("solves only reCAPTCHA v2 and reports hCaptcha as unsupported without calling the provider", async () => {
-    const provider = scriptedProvider([]);
-    const solver = createDeathByCaptchaSolver({ credentials: { username: "u", password: "p" }, fetch: provider.fetch, clock: fakeClock() });
-    await expect(solver.solve({ kind: "hcaptcha", sitekey: "10000000-ffff-ffff-ffff-000000000001", pageUrl: PAGE })).rejects.toMatchObject({ kind: "unsupported" });
-    expect(provider.requests).toHaveLength(0);
-  });
-
   test("times out when the provider never reports a solution, within the overall deadline", async () => {
     const pending = { captcha: 9003, text: "" };
     const provider = scriptedProvider([{ captcha: 9003 }, pending, pending, pending, pending, pending, pending, pending, pending, pending]);
@@ -193,13 +186,6 @@ describe("AntiCaptcha client", () => {
     const solver = createAntiCaptchaSolver({ clientKey: "k", fetch: provider.fetch, clock: fakeClock() });
     await expect(solver.solve(task)).rejects.toMatchObject({ kind: "invalid_response" });
   });
-
-  test("reports hCaptcha as unsupported without calling the provider", async () => {
-    const provider = scriptedProvider([]);
-    const solver = createAntiCaptchaSolver({ clientKey: "k", fetch: provider.fetch, clock: fakeClock() });
-    await expect(solver.solve({ kind: "hcaptcha", sitekey: "10000000-ffff-ffff-ffff-000000000001", pageUrl: PAGE })).rejects.toMatchObject({ kind: "unsupported" });
-    expect(provider.requests).toHaveLength(0);
-  });
 });
 
 describe("transport and cancellation", () => {
@@ -230,10 +216,10 @@ describe("transport and cancellation", () => {
 
 describe("input validation", () => {
   test("accepts a real reCAPTCHA sitekey and rejects anything else", () => {
-    expect(isCaptchaSitekey("recaptcha-v2", SITEKEY)).toBe(true);
-    expect(isCaptchaSitekey("recaptcha-v2", "short")).toBe(false);
-    expect(isCaptchaSitekey("recaptcha-v2", "has spaces in it at all")).toBe(false);
-    expect(isCaptchaSitekey("recaptcha-v2", undefined)).toBe(false);
+    expect(isCaptchaSitekey(SITEKEY)).toBe(true);
+    expect(isCaptchaSitekey("short")).toBe(false);
+    expect(isCaptchaSitekey("has spaces in it at all")).toBe(false);
+    expect(isCaptchaSitekey(undefined)).toBe(false);
   });
 
   test("accepts a token of printable ASCII only", () => {

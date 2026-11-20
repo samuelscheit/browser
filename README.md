@@ -30,11 +30,13 @@ It runs in two shapes:
 - **Egress policy** — every browser reaches the internet only through an egress sidecar and a
   fail-closed PAC: direct, upstream proxy (or an ordered proxy list), Tor, per-host and static-asset
   exceptions.
-- **Turnstile and DataDome guardian** — a process-level companion in every Fabric browser clicks
-  Cloudflare Turnstile checkboxes and slides DataDome's slider with bounded, human-like gestures,
-  independent of the client that drives the page.
-- **CAPTCHA token solvers** — opt-in reCAPTCHA v2 solving through Death by Captcha or Anti-Captcha,
-  per recipe, with provider keys that never enter a browser.
+- **CAPTCHA guardian** — a process-level companion in every Fabric browser solves the challenges on
+  every page with [llm-captcha](https://github.com/samuelscheit/llm-captcha): checkboxes (Turnstile,
+  reCAPTCHA, hCaptcha), sliders (DataDome, GeeTest, …), press-and-hold and, with a vision model, image
+  and text challenges — independent of the client that drives the page.
+- **reCAPTCHA v2 token fallback** — llm-captcha passes reCAPTCHA image grids only rarely, so a widget
+  still without a token gets one from Death by Captcha or Anti-Captcha, per recipe, with provider keys
+  that never enter a browser.
 - **Consistent fingerprint** — a GPU-less server browser reports an ordinary desktop GPU instead of
   SwiftShader, keeps WebGL when headful, and presents a normal Chrome User-Agent when headless.
 - **Artifacts** — immutable screenshots, traces, HARs and downloads in S3-compatible storage with
@@ -137,7 +139,7 @@ clients ─► edge (Basic auth per principal) ─► API ─┬─► scheduler
                                           └─► CDP gateway ◄─┐   └─► object store (S3)
                                                             │
                     worker manager (Docker) ─► one Chrome container per lease ─► egress sidecar ─► internet
-                                                 + Turnstile/DataDome guardian      (PAC, proxy, Tor)
+                                                 + CAPTCHA guardian                 (PAC, proxy, Tor)
 ```
 
 - [docs/architecture.md](docs/architecture.md) — services, the browser runtime, allocation, CDP relay, guardian
@@ -148,7 +150,7 @@ clients ─► edge (Basic auth per principal) ─► API ─┬─► scheduler
 
 ## Responsible use
 
-Browser Fabric automates real browsers, and some of its features — the Turnstile/DataDome guardian,
+Browser Fabric automates real browsers, and some of its features — the CAPTCHA guardian,
 CAPTCHA solvers, fingerprint consistency, proxy and Tor egress — affect how websites see automated
 traffic. They exist for legitimate automation: your own accounts and services, testing and
 monitoring of sites you operate or are authorized to test, accessibility, archiving and research

@@ -13,14 +13,6 @@ export const systemSolverClock: SolverClock = {
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 
-/**
- * Provider traffic leaves through the reviewed Fabric egress sidecar, which admits only the provider
- * hostnames on its solver listener. A solver therefore cannot become a general direct-egress path.
- */
-export function proxiedSolverFetch(proxyUrl: string): SolverFetch {
-  return (input, init) => fetch(input, { ...init, proxy: proxyUrl } as RequestInit);
-}
-
 export function throwIfCanceled(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new CaptchaSolverError("canceled", "CAPTCHA solve was canceled");
 }

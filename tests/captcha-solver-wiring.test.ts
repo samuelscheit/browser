@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DockerContainerExecutor, type DockerCommand } from "../apps/worker-manager/src/docker-container-executor";
 import { buildBrowserProcessSpec, captchaTokenSolverFor } from "../apps/worker-manager/src";
-import type { TurnstileGuardianFactory, TurnstileGuardianHandle, TurnstileGuardianSnapshot, TokenCaptchaSolver } from "@browser-fabric/worker-runtime";
+import type { CaptchaGuardianFactory, CaptchaGuardianHandle, CaptchaGuardianSnapshot, TokenCaptchaSolver } from "@browser-fabric/worker-runtime";
 import { GenericBrowserRuntime } from "@browser-fabric/worker-runtime";
 import { TEST_PRINCIPAL, TEST_PROJECT, bootstrapTestScheduler, makeProfile, makeWorker } from "@browser-fabric/testkit";
 import type { ChallengeHandler } from "@browser-fabric/contracts";
@@ -16,14 +16,16 @@ class RecordingDockerCommand implements DockerCommand {
   }
 }
 
-class FakeGuardian implements TurnstileGuardianHandle {
+class FakeGuardian implements CaptchaGuardianHandle {
   public running = true;
-  public get snapshot(): TurnstileGuardianSnapshot { return { running: this.running, attachedPages: 0, checks: 0, clickAttempts: 0 }; }
+  public get snapshot(): CaptchaGuardianSnapshot { return { running: this.running, attachedPages: 0, checks: 0, solved: 0, failed: 0 }; }
   public async start(): Promise<void> { /* ready */ }
   public async stop(): Promise<void> { this.running = false; }
 }
 
 const dbcSolver: TokenCaptchaSolver = { solve: async () => `03AFcWeA${"x".repeat(56)}` };
+/** Wiring tests never reach a provider. */
+const unusedFetch = async (): Promise<Response> => { throw new Error("no provider request expected"); };
 
 /** Runs a real assignment through the executor and reports which solver, if any, its guardian received. */
 async function guardianSolverFor(recipe: { ref: string; runtime: string; profileFamily: string }) {
@@ -58,16 +60,16 @@ async function guardianSolverFor(recipe: { ref: string; runtime: string; profile
   });
 
   const seen: Array<TokenCaptchaSolver | undefined> = [];
-  const guardianFactory: TurnstileGuardianFactory = ({ tokenSolver }) => {
+  const guardianFactory: CaptchaGuardianFactory = ({ tokenSolver }) => {
     seen.push(tokenSolver);
     return new FakeGuardian();
   };
-  const selector = captchaTokenSolverFor({ providerProxyUrl: "http://fabric-egress-sidecar:11003", deathByCaptchaUsername: "u", deathByCaptchaPassword: "p" });
+  const selector = captchaTokenSolverFor({ deathByCaptchaUsername: "u", deathByCaptchaPassword: "p" }, unusedFetch);
   const spec = buildBrowserProcessSpec(worker, assignment, new Map([[recipe.runtime, new GenericBrowserRuntime(recipe.runtime)]]));
   const executor = new DockerContainerExecutor({
     command: new RecordingDockerCommand(),
     fetch: async () => new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser/managed" })),
-    turnstileGuardianFactory: guardianFactory,
+    captchaGuardianFactory: guardianFactory,
     requireImmutableImages: false,
     browserSeccompProfile: "/etc/browser-fabric/chromium-userns-seccomp.json",
     requireBrowserSeccompProfile: true,
@@ -97,7 +99,7 @@ describe("token solver wiring from the signed recipe to the guardian", () => {
   });
 
   test("a provider with no credentials yields no solver even when the recipe enables it", () => {
-    const select = captchaTokenSolverFor({ providerProxyUrl: "http://fabric-egress-sidecar:11003" });
+    const select = captchaTokenSolverFor({}, unusedFetch);
     expect(select([{ id: "death-by-captcha", kind: "dbc", mode: "automatic", configuration: {} }])).toBeUndefined();
   });
 });

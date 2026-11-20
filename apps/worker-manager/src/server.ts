@@ -3,7 +3,7 @@ import { AssignmentSigner, bunMtlsServerTls, createBunMtlsFetch, createPostgresS
 import { parseWorkerRegistration, workerPrincipal } from "./protocol";
 import { ManagedWorkerController } from "./controller";
 import { CHROMIUM_SECCOMP_PROFILE_PATH, DockerContainerExecutor } from "./docker-container-executor";
-import { captchaTokenSolverFor, readOptionalSecret } from "./captcha-solver-factory";
+import { captchaSolvingFromEnvironment } from "./captcha-solver-factory";
 import { egressSidecarListeners } from "@browser-fabric/policy";
 
 export interface WorkerManagerFetchOptions {
@@ -154,6 +154,8 @@ if (import.meta.main) {
   // Compose passes its project name: stacks sharing a Docker host never reap each other's browsers.
   const deploymentId = process.env.FABRIC_DEPLOYMENT_ID?.trim();
   if (production && !deploymentId) throw new Error("FABRIC_DEPLOYMENT_ID is required in production (the Compose project name)");
+  const captchaSolving = await captchaSolvingFromEnvironment(process.env.FABRIC_CAPTCHA_SOLVER_PROXY_URL ?? `http://fabric-egress-sidecar:${egressSidecarListeners.captchaSolver.port}`);
+  console.info(`CAPTCHA guardian: ${captchaSolving.models.length > 0 ? "vision model configured" : "no model key (only checkbox, slider and press-and-hold challenges)"}`);
   const browserExecutor = new DockerContainerExecutor({
     ...(deploymentId ? { deploymentId } : {}),
     browserNetworks,
@@ -169,12 +171,8 @@ if (import.meta.main) {
     browserSeccompProfile,
     requireBrowserSeccompProfile: production,
     volumeHelperImage: process.env.FABRIC_VOLUME_HELPER_IMAGE,
-    tokenSolverFor: captchaTokenSolverFor({
-      providerProxyUrl: process.env.FABRIC_CAPTCHA_SOLVER_PROXY_URL ?? `http://fabric-egress-sidecar:${egressSidecarListeners.captchaSolver.port}`,
-      deathByCaptchaUsername: await readOptionalSecret(process.env.FABRIC_DEATHBYCAPTCHA_USERNAME_FILE),
-      deathByCaptchaPassword: await readOptionalSecret(process.env.FABRIC_DEATHBYCAPTCHA_PASSWORD_FILE),
-      antiCaptchaClientKey: await readOptionalSecret(process.env.FABRIC_ANTICAPTCHA_CLIENT_KEY_FILE),
-    }),
+    captchaGuardianFactory: captchaSolving.captchaGuardianFactory,
+    tokenSolverFor: captchaSolving.tokenSolverFor,
   });
   const controller = new ManagedWorkerController({ scheduler: runtime.scheduler, browserExecutor });
   const stoppedOrphans = await browserExecutor.stopUntrackedBrowserContainers();

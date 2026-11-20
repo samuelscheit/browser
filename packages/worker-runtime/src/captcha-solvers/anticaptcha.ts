@@ -38,8 +38,6 @@ export function createAntiCaptchaSolver(options: AntiCaptchaSolverOptions): Toke
   return {
     async solve(task: CaptchaTask, signal?: AbortSignal): Promise<string> {
       throwIfCanceled(signal);
-      // The public documentation shows no hCaptcha task type, so this client solves only reCAPTCHA v2.
-      if (task.kind !== "recaptcha-v2") throw new CaptchaSolverError("unsupported", "Anti-Captcha does not solve this widget");
       const created = await post("/createTask", {
         clientKey: options.clientKey,
         task: { type: RECAPTCHA_V2_TASK_TYPE, websiteURL: task.pageUrl, websiteKey: task.sitekey },

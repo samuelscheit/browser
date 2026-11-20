@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { turnstileGuardianSpecFromEnvironment, type TurnstileGuardianSpec } from "./turnstile-guardian";
+import { captchaGuardianSpecFromEnvironment, type CaptchaGuardianSpec } from "./captcha-guardian";
 import type { BrowserRecipe, ChallengeHandler, EgressPolicy, Worker, WorkerAssignment } from "@browser-fabric/contracts";
 import { FabricError } from "@browser-fabric/contracts";
 import { internalEgressPacUrl } from "@browser-fabric/policy";
@@ -27,15 +27,16 @@ export interface BrowserContainerSpec {
   security: ContainerSecurity;
   cdpBind: { host: "127.0.0.1" | "private-overlay"; port: number };
   /**
-   * A browser-level, Fabric-owned companion that observes Cloudflare
-   * Turnstile widgets and performs one bounded, trusted checkbox click.
-   * It is deliberately part of the worker spec, not an opt-in application
-   * client feature, so all ordinary CDP browser sessions receive it.
+   * A browser-level, Fabric-owned companion that solves the CAPTCHAs on
+   * every page with llm-captcha (see captcha-guardian.ts). It is deliberately
+   * part of the worker spec, not an opt-in application client feature, so all
+   * ordinary CDP browser sessions receive it.
    */
-  turnstileGuardian?: TurnstileGuardianSpec;
+  captchaGuardian?: CaptchaGuardianSpec;
   /**
    * The recipe's automatic challenge handlers, copied from the signed assignment. Executors use them to
-   * decide which token solvers this browser may use. Absent when the recipe declares no challenge set.
+   * decide whether this browser gets the reCAPTCHA token fallback. Absent when the recipe declares no
+   * challenge set.
    */
   challengeHandlers?: readonly ChallengeHandler[];
 }
@@ -187,7 +188,7 @@ export class GenericBrowserRuntime implements BrowserRuntime {
       limits: worker.resourceLimits,
       security: { dockerSocketMounted: false, hostHomeMounted: false, repositoryMounted: false, applicationSecretsMounted: false },
       cdpBind: { host: worker.isLocal ? "127.0.0.1" : "private-overlay", port: cdpPort },
-      turnstileGuardian: turnstileGuardianSpecFromEnvironment(),
+      captchaGuardian: captchaGuardianSpecFromEnvironment(),
       ...(assignment.challengeHandlerSet ? { challengeHandlers: assignment.challengeHandlerSet.handlers } : {}),
     };
   }
@@ -227,12 +228,9 @@ export * from "./captcha-solvers/http";
 export * from "./captcha-solvers/registry";
 export * from "./captcha-solvers/death-by-captcha";
 export * from "./captcha-solvers/anticaptcha";
-export * from "./captcha-solvers/recaptcha-page";
+export * from "./captcha-solvers/recaptcha-fallback";
 export * from "./cdp-connection";
 export * from "./browser-executable";
 export * from "./chromium";
-export * from "./turnstile-guardian";
-export * from "./challenge-handlers";
-export * from "./datadome-slider";
-export * from "./turnstile-click";
-export type { MousePoint, MouseStep, RandomSource } from "./trusted-mouse";
+export * from "./captcha-guardian";
+export * from "./captcha-models";

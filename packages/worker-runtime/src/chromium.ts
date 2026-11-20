@@ -8,13 +8,13 @@ import { assertFailClosedPac } from "@browser-fabric/policy";
 import { closeBrowserGracefully } from "./cdp-connection";
 import { FABRIC_BROWSER_EXECUTABLE } from "./browser-executable";
 import {
-  assertTurnstileGuardianSpec,
-  defaultTurnstileGuardianFactory,
-  turnstileGuardianSpecFromEnvironment,
-  type TurnstileGuardianFactory,
-  type TurnstileGuardianHandle,
-  type TurnstileGuardianSnapshot,
-} from "./turnstile-guardian";
+  assertCaptchaGuardianSpec,
+  defaultCaptchaGuardianFactory,
+  captchaGuardianSpecFromEnvironment,
+  type CaptchaGuardianFactory,
+  type CaptchaGuardianHandle,
+  type CaptchaGuardianSnapshot,
+} from "./captcha-guardian";
 
 export interface ChromiumLaunchResult {
   processId: string;
@@ -84,11 +84,11 @@ export class ChromiumProcessSupervisor {
   readonly #starting = new Map<string, Promise<ChromiumLaunchResult>>();
   /** Cooperative cancellation for a stop racing browser/guardian startup. */
   readonly #cancelled = new Set<string>();
-  readonly #guardians = new Map<string, TurnstileGuardianHandle>();
+  readonly #guardians = new Map<string, CaptchaGuardianHandle>();
   readonly #browserEndpoints = new Map<string, string>();
   readonly #closeBrowser: typeof closeBrowserGracefully;
   readonly #spawner: ChromiumSpawner;
-  readonly #guardianFactory: TurnstileGuardianFactory;
+  readonly #guardianFactory: CaptchaGuardianFactory;
   readonly #tokenSolverFor?: (handlers: BrowserContainerSpec["challengeHandlers"]) => TokenCaptchaSolver | undefined;
   readonly #fetch: ChromiumFetcher;
   readonly #cwd: string;
@@ -103,14 +103,15 @@ export class ChromiumProcessSupervisor {
     startupTimeoutMs?: number;
     executablePath?: string;
     profileRoot?: string;
-    turnstileGuardianFactory?: TurnstileGuardianFactory;
+    /** Builds each browser's guardian; it carries the deployment's models. Defaults to one without models. */
+    captchaGuardianFactory?: CaptchaGuardianFactory;
     /** Orderly browser shutdown before signals. Tests inject a fake. */
     closeBrowser?: typeof closeBrowserGracefully;
-    /** Resolves a recipe's token solver for a locally supervised browser. Absent means no solver. */
+    /** Resolves a recipe's reCAPTCHA token fallback for a locally supervised browser. Absent means none. */
     tokenSolverFor?: (handlers: BrowserContainerSpec["challengeHandlers"]) => TokenCaptchaSolver | undefined;
   } = {}) {
     this.#spawner = options.spawner ?? defaultSpawner;
-    this.#guardianFactory = options.turnstileGuardianFactory ?? defaultTurnstileGuardianFactory;
+    this.#guardianFactory = options.captchaGuardianFactory ?? defaultCaptchaGuardianFactory;
     this.#closeBrowser = options.closeBrowser ?? closeBrowserGracefully;
     this.#tokenSolverFor = options.tokenSolverFor;
     this.#fetch = options.fetch ?? globalThis.fetch;
@@ -174,10 +175,10 @@ export class ChromiumProcessSupervisor {
       this.#throwIfCancelled(processId);
       // Generated Fabric browser specs opt in to the process-level guardian.
       // Starting it after CDP readiness but before the assignment is marked
-      // ready gives every page/tab the automatic Turnstile/DataDome
-      // handling, independent of which application owns the CDP connection.
-      const guardianSpec = spec.turnstileGuardian ?? turnstileGuardianSpecFromEnvironment();
-      assertTurnstileGuardianSpec(guardianSpec);
+      // ready gives every page/tab automatic CAPTCHA solving, independent of
+      // which application owns the CDP connection.
+      const guardianSpec = spec.captchaGuardian ?? captchaGuardianSpecFromEnvironment();
+      assertCaptchaGuardianSpec(guardianSpec);
       {
         const tokenSolver = this.#tokenSolverFor?.(spec.challengeHandlers);
         const guardian = this.#guardianFactory({ endpoint: version.webSocketDebuggerUrl, spec: guardianSpec, ...(tokenSolver ? { tokenSolver } : {}) });
@@ -189,9 +190,9 @@ export class ChromiumProcessSupervisor {
         this.#throwIfCancelled(processId);
         if (this.#processes.get(processId) !== child || this.#guardians.get(processId) !== guardian) {
           await guardian.stop().catch(() => undefined);
-          throw new FabricError("worker_unavailable", "Chromium stopped while its Turnstile guardian was starting", 503);
+          throw new FabricError("worker_unavailable", "Chromium stopped while its CAPTCHA guardian was starting", 503);
         }
-        if (!guardian.snapshot.running) throw new FabricError("worker_unavailable", "Turnstile guardian did not become ready", 503);
+        if (!guardian.snapshot.running) throw new FabricError("worker_unavailable", "CAPTCHA guardian did not become ready", 503);
       }
       return { processId, cdpBrowserEndpoint: version.webSocketDebuggerUrl, ...(child.pid === undefined ? {} : { pid: child.pid }) };
     } catch (error) {
@@ -243,7 +244,7 @@ export class ChromiumProcessSupervisor {
   }
 
   /** Exposes only guardian health/counter telemetry—never page content or tokens. */
-  public guardianSnapshot(processId: string): TurnstileGuardianSnapshot | undefined {
+  public guardianSnapshot(processId: string): CaptchaGuardianSnapshot | undefined {
     const snapshot = this.#guardians.get(processId)?.snapshot;
     return snapshot ? { ...snapshot } : undefined;
   }

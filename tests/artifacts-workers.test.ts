@@ -65,12 +65,7 @@ describe("artifacts and worker isolation", () => {
     expect(spec.command).toContain("--remote-debugging-address=127.0.0.1");
     expect(spec.command).toContain("--remote-debugging-port=9222");
     expect(spec.cdpBind).toEqual({ host: "private-overlay", port: 9223 });
-    expect(spec.turnstileGuardian).toMatchObject({
-      enabled: true,
-      pollIntervalMs: 1_000,
-      challengeTimeoutMs: 45_000,
-      maxClickAttempts: 5,
-    });
+    expect(spec.captchaGuardian).toEqual({ enabled: true, pollIntervalMs: 1_000, solveTimeoutMs: 180_000, maxRounds: 8 });
     expect(Object.keys(spec.environment).some((key) => /PASSWORD|TOKEN|COOKIE|SECRET/i.test(key))).toBe(false);
   });
 

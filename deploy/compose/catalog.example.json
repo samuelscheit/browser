@@ -7,7 +7,7 @@
     {
       "name": "solver-anticaptcha-only",
       "handlers": [
-        { "id": "guardian", "kind": "guardian", "mode": "automatic", "configuration": { "turnstile": true, "datadome": true } },
+        { "id": "guardian", "kind": "guardian", "mode": "automatic", "configuration": { "solver": "llm-captcha" } },
         { "id": "anticaptcha", "kind": "anticaptcha", "mode": "automatic" }
       ]
     }

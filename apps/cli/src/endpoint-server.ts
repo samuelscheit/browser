@@ -1,5 +1,5 @@
 import type { Server, ServerWebSocket } from "bun";
-import { TurnstileGuardian, type CdpConnection } from "@browser-fabric/worker-runtime";
+import { CaptchaGuardian, type CdpConnection } from "@browser-fabric/worker-runtime";
 import type { BrowserBackend } from "./backend";
 import { CdpMultiplexer, type ClientKind, type MuxClient, type TargetInfo } from "./cdp-mux";
 
@@ -14,15 +14,18 @@ type ClientData = {
   closed: boolean;
 };
 
-/** The companion that clicks Turnstile checkboxes, attached through the shared connection. */
+/**
+ * The companion that solves CAPTCHAs, attached through the shared connection. It has no model here, so it
+ * solves the challenges that need none: checkboxes (Turnstile, reCAPTCHA), sliders, press-and-hold.
+ */
 export interface Guardian { start(): Promise<void>; stop(): Promise<void> }
 export type GuardianFactory = (mux: CdpMultiplexer, agentTabsOnly: boolean, log: (message: string) => void) => Guardian;
 
-export const turnstileGuardian: GuardianFactory = (mux, agentTabsOnly, log) => new TurnstileGuardian({
+export const captchaGuardian: GuardianFactory = (mux, agentTabsOnly, log) => new CaptchaGuardian({
   // Never dialled: the transport is an in-process client of the multiplexer.
   endpoint: "ws://127.0.0.1/devtools/browser/fabric-guardian",
   transportFactory: async () => mux.transport({ agentTabsOnly }),
-  logger: (event) => log(`turnstile ${event}`),
+  logger: (event) => log(`captcha ${event}`),
 });
 
 export interface EndpointServerOptions {
@@ -225,9 +228,9 @@ export class EndpointServer {
         this.#anchor = anchor;
         if (this.#options.backend.guardian) {
           const log = this.#options.log ?? (() => undefined);
-          const guardian = (this.#options.guardian ?? turnstileGuardian)(mux, usersBrowser, log);
+          const guardian = (this.#options.guardian ?? captchaGuardian)(mux, usersBrowser, log);
           anchor.guardian = guardian;
-          await guardian.start().catch((error) => log(`turnstile guardian unavailable: ${error instanceof Error ? error.message : String(error)}`));
+          await guardian.start().catch((error) => log(`captcha guardian unavailable: ${error instanceof Error ? error.message : String(error)}`));
         }
         if (this.#suspended) this.#options.log?.("browser resumed");
         this.#suspended = false;

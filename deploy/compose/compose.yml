@@ -301,6 +301,7 @@ services:
       - deathbycaptcha_username
       - deathbycaptcha_password
       - anticaptcha_client_key
+      - llm_captcha_api_key
     environment:
       <<: *app-environment
       PORT: '8082'
@@ -328,6 +329,11 @@ services:
       FABRIC_DEATHBYCAPTCHA_USERNAME_FILE: /run/secrets/deathbycaptcha_username
       FABRIC_DEATHBYCAPTCHA_PASSWORD_FILE: /run/secrets/deathbycaptcha_password
       FABRIC_ANTICAPTCHA_CLIENT_KEY_FILE: /run/secrets/anticaptcha_client_key
+      # The CAPTCHA guardian's vision model (Anthropic Messages API of the AI gateway); requests go
+      # through the egress sidecar's captcha-solver listener. No key: model challenges end failed.
+      FABRIC_LLM_CAPTCHA_API_KEY_FILE: /run/secrets/llm_captcha_api_key
+      FABRIC_LLM_CAPTCHA_BASE_URL: ${FABRIC_LLM_CAPTCHA_BASE_URL:-https://ollama.samuelscheit.com/v1}
+      FABRIC_LLM_CAPTCHA_MODEL: ${FABRIC_LLM_CAPTCHA_MODEL:-claude-opus-5-5}
     command: [bun, apps/worker-manager/src/server.ts]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -556,3 +562,4 @@ secrets:
   deathbycaptcha_username: { file: "${FABRIC_SECRETS_DIR:-./secrets}/deathbycaptcha_username" }
   deathbycaptcha_password: { file: "${FABRIC_SECRETS_DIR:-./secrets}/deathbycaptcha_password" }
   anticaptcha_client_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/anticaptcha_client_key" }
+  llm_captcha_api_key: { file: "${FABRIC_SECRETS_DIR:-./secrets}/llm_captcha_api_key" }

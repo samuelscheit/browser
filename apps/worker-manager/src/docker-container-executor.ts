@@ -3,12 +3,12 @@ import { isIP } from "node:net";
 import { FabricError, type ChallengeHandler } from "@browser-fabric/contracts";
 import { assertFailClosedPac } from "@browser-fabric/policy";
 import {
-  assertTurnstileGuardianSpec,
+  assertCaptchaGuardianSpec,
   closeBrowserGracefully,
-  defaultTurnstileGuardianFactory,
+  defaultCaptchaGuardianFactory,
+  type CaptchaGuardianFactory,
+  type CaptchaGuardianHandle,
   type TokenCaptchaSolver,
-  type TurnstileGuardianFactory,
-  type TurnstileGuardianHandle,
 } from "@browser-fabric/worker-runtime";
 import type { BrowserProcessSpec, Executor } from "./index";
 
@@ -83,13 +83,13 @@ export interface DockerContainerExecutorOptions {
   browserSeccompProfile?: string;
   /** Fail browser starts closed when a production seccomp profile is absent. */
   requireBrowserSeccompProfile?: boolean;
-  /** Factory boundary for the mandatory browser-level companion; production uses real CDP. */
-  turnstileGuardianFactory?: TurnstileGuardianFactory;
+  /** Factory boundary for the mandatory browser-level companion; production's carries the CAPTCHA model. */
+  captchaGuardianFactory?: CaptchaGuardianFactory;
   /** Orderly browser shutdown before Docker stops the container. Tests inject a fake. */
   closeBrowser?: typeof closeBrowserGracefully;
   /**
-   * Resolves the token solver for one browser from its recipe's challenge handler set. Absent in tests and
-   * in deployments without solver credentials; a recipe then never solves tokens.
+   * Resolves the reCAPTCHA token fallback for one browser from its recipe's challenge handler set. Absent
+   * in tests and in deployments without provider credentials; a recipe then never buys tokens.
    */
   tokenSolverFor?: (handlers: readonly ChallengeHandler[] | undefined) => TokenCaptchaSolver | undefined;
 }
@@ -162,9 +162,9 @@ function assertSpec(spec: BrowserProcessSpec, allowedEnvironmentKeys: ReadonlySe
   if (spec.container.cdpBind.host !== "private-overlay" || spec.container.cdpBind.port < 1024 || spec.container.cdpBind.port > 65_535) {
     throw new FabricError("validation_failed", "browser CDP must bind to a private worker network port", 400);
   }
-  if (!spec.container.turnstileGuardian) throw new FabricError("validation_failed", "every Fabric browser must declare the Turnstile guardian", 400);
-  try { assertTurnstileGuardianSpec(spec.container.turnstileGuardian); }
-  catch (error) { throw new FabricError("validation_failed", error instanceof Error ? error.message : "invalid Turnstile guardian", 400); }
+  if (!spec.container.captchaGuardian) throw new FabricError("validation_failed", "every Fabric browser must declare the CAPTCHA guardian", 400);
+  try { assertCaptchaGuardianSpec(spec.container.captchaGuardian); }
+  catch (error) { throw new FabricError("validation_failed", error instanceof Error ? error.message : "invalid CAPTCHA guardian", 400); }
   if (spec.container.command.length < 1 || spec.container.command.length > 64 || spec.container.command.some((arg) => arg.length > 4_096 || /[\0\r\n]/.test(arg) || forbiddenArg.test(arg))) {
     throw new FabricError("validation_failed", "browser command contains a forbidden or malformed argument", 400);
   }
@@ -246,16 +246,16 @@ export class DockerContainerExecutor implements Executor {
   readonly #options: Required<Pick<DockerContainerExecutorOptions, "browserNetworks" | "containerPrefix" | "deploymentId">> & Omit<DockerContainerExecutorOptions, "browserNetworks" | "containerPrefix" | "deploymentId">;
   readonly #containers = new Map<string, string>();
   readonly #starting = new Map<string, Promise<{ processId: string; cdpBrowserEndpoint?: string }>>();
-  readonly #guardians = new Map<string, TurnstileGuardianHandle>();
+  readonly #guardians = new Map<string, CaptchaGuardianHandle>();
   readonly #browserEndpoints = new Map<string, string>();
   readonly #closeBrowser: typeof closeBrowserGracefully;
   readonly #temporaryVolumesByContainer = new Map<string, { workerId: string; volumes: string[] }>();
-  readonly #turnstileGuardianFactory: TurnstileGuardianFactory;
+  readonly #captchaGuardianFactory: CaptchaGuardianFactory;
 
   public constructor(options: DockerContainerExecutorOptions = {}) {
     this.#command = options.command ?? new ChildProcessDockerCommand();
     this.#fetch = options.fetch ?? globalThis.fetch;
-    this.#turnstileGuardianFactory = options.turnstileGuardianFactory ?? defaultTurnstileGuardianFactory;
+    this.#captchaGuardianFactory = options.captchaGuardianFactory ?? defaultCaptchaGuardianFactory;
     this.#closeBrowser = options.closeBrowser ?? closeBrowserGracefully;
     this.#options = {
       browserNetworks: options.browserNetworks ?? ["browser-fabric-workers"],
@@ -330,20 +330,21 @@ export class DockerContainerExecutor implements Executor {
       browserEndpoint = await this.#browserEndpointOnNetwork(name, spec.container.cdpBind.port, primaryNetwork);
       await this.#waitForBrowserReady(browserEndpoint, this.#options.browserReadyTimeoutMs ?? this.#options.startupTimeoutMs ?? 30_000);
       if (this.#containers.get(identity) !== name) throw new FabricError("worker_unavailable", "browser container was stopped while becoming ready", 503);
-      const guardianSpec = spec.container.turnstileGuardian;
-      if (!guardianSpec) throw new Error("Fabric browser has no Turnstile guardian specification");
-      // The recipe's challenge handler set decides whether this browser may solve tokens. Credentials
-      // come only from the manager's secret-backed solver factory, never from a browser environment.
+      const guardianSpec = spec.container.captchaGuardian;
+      if (!guardianSpec) throw new Error("Fabric browser has no CAPTCHA guardian specification");
+      // The recipe's challenge handler set decides whether this browser may buy reCAPTCHA tokens.
+      // Credentials and the model key come only from the manager's secret-backed factories, never
+      // from a browser environment.
       const tokenSolver = this.#options.tokenSolverFor?.(spec.container.challengeHandlers);
-      const guardian = this.#turnstileGuardianFactory({ endpoint: browserEndpoint, spec: guardianSpec, ...(tokenSolver ? { tokenSolver } : {}) });
+      const guardian = this.#captchaGuardianFactory({ endpoint: browserEndpoint, spec: guardianSpec, ...(tokenSolver ? { tokenSolver } : {}) });
       this.#guardians.set(name, guardian);
       this.#browserEndpoints.set(name, browserEndpoint);
       await guardian.start();
       if (this.#containers.get(identity) !== name || this.#guardians.get(name) !== guardian) {
         await guardian.stop().catch(() => undefined);
-        throw new FabricError("worker_unavailable", "browser container was stopped while its Turnstile guardian was starting", 503);
+        throw new FabricError("worker_unavailable", "browser container was stopped while its CAPTCHA guardian was starting", 503);
       }
-      if (!guardian.snapshot.running) throw new FabricError("worker_unavailable", "Turnstile guardian did not become ready", 503);
+      if (!guardian.snapshot.running) throw new FabricError("worker_unavailable", "CAPTCHA guardian did not become ready", 503);
     } catch (error) {
       if (created) await this.#stopContainer(name, { workerId: spec.container.workerId, volumes: temporaryVolumes }).catch(() => undefined);
       else await this.#removeTemporaryVolumes(temporaryVolumes).catch(() => undefined);

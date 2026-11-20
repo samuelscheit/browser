@@ -13,6 +13,7 @@
   },
   "private": true,
   "type": "module",
+  "trustedDependencies": ["llm-captcha-solver"],
   "packageManager": "bun@1.4.0",
   "workspaces": [
     "apps/*",

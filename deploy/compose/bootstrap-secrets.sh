@@ -130,8 +130,9 @@ write_random fabric_object_store_access_key
 write_random fabric_object_store_secret_key
 
 # Operator-provided values. A comment-only file means "not configured": the proxy listener fails
-# closed and the solver provider is never called until a real value replaces it.
-for name in egress_proxy_upstreams deathbycaptcha_username deathbycaptcha_password anticaptcha_client_key; do
+# closed, the solver provider is never called, and the CAPTCHA guardian has no model until a real
+# value replaces it.
+for name in egress_proxy_upstreams deathbycaptcha_username deathbycaptcha_password anticaptcha_client_key llm_captcha_api_key; do
   missing "$name" && printf '%s\n' '# not-yet-provisioned' > "$secrets_dir/$name"
 done
 

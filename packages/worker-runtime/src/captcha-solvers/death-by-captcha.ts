@@ -44,8 +44,6 @@ export function createDeathByCaptchaSolver(options: DeathByCaptchaSolverOptions)
   return {
     async solve(task: CaptchaTask, signal?: AbortSignal): Promise<string> {
       throwIfCanceled(signal);
-      // The public documentation gives no hCaptcha token type, so this client solves only reCAPTCHA v2.
-      if (task.kind !== "recaptcha-v2") throw new CaptchaSolverError("unsupported", "Death by Captcha does not solve this widget");
       const form = new FormData();
       form.set("username", options.credentials.username);
       form.set("password", options.credentials.password);

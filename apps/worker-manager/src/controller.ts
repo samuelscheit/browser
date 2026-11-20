@@ -140,7 +140,7 @@ export class ManagedWorkerController {
         const lease = assignment.lease;
         if (!lease.assignmentClaimedAt || this.#active.has(lease.id)) continue;
         const releasedLease = await this.#scheduler
-          .failLease(lease.id, worker.id, "manager restarted; stopped an untracked browser to preserve Turnstile guardian ownership", actor)
+          .failLease(lease.id, worker.id, "manager restarted; stopped an untracked browser to preserve CAPTCHA guardian ownership", actor)
           .then(() => true)
           .catch(() => false);
         if (releasedLease) released += 1;

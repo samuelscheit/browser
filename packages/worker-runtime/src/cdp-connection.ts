@@ -1,5 +1,5 @@
 /**
- * A small CDP client shared by Fabric-owned browser companions (the Turnstile guardian), the agent
+ * A small CDP client shared by Fabric-owned browser companions (the CAPTCHA guardian), the agent
  * CLI and its live view.
  */
 

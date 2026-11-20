@@ -5,7 +5,7 @@ import type { CdpConnection, CdpTransport } from "@browser-fabric/worker-runtime
  *
  * Chrome's remote-debugging toggle (chrome://inspect/#remote-debugging) asks the user to allow
  * every new WebSocket, so the endpoint opens exactly one upstream socket and multiplexes every
- * client (Playwright, Puppeteer, MCP servers, the live view, the Turnstile guardian) over it:
+ * client (Playwright, Puppeteer, MCP servers, the live view, the CAPTCHA guardian) over it:
  *
  * - Ids: each client frame gets an id from the upstream sequence; its answer is routed back
  *   under the client's own id, so clients may reuse ids freely.
@@ -30,6 +30,8 @@ export interface TargetInfo {
   url: string;
   attached?: boolean;
   openerId?: string;
+  /** An out-of-process frame's parent frame; a top frame's id is its page's target id. */
+  parentFrameId?: string;
   browserContextId?: string;
   [key: string]: unknown;
 }
@@ -182,7 +184,7 @@ export class CdpMultiplexer {
 
   /**
    * An in-process browser-level client as a CdpTransport, for CdpConnection-based companions (the
-   * Turnstile guardian) that must not open a second upstream socket.
+   * CAPTCHA guardian) that must not open a second upstream socket.
    */
   public transport(options: { agentTabsOnly: boolean }): CdpTransport {
     type Listener = (event: any) => void;
@@ -472,6 +474,9 @@ export class CdpMultiplexer {
         this.#targets.set(info.targetId, info);
         const created = message.method === "Target.targetCreated";
         if (created && info.openerId && this.#agentTargets.has(info.openerId)) this.#agentTargets.add(info.targetId);
+        // An agent tab's out-of-process frames (a CAPTCHA widget) belong to it, so the guardian that
+        // watches agent tabs only can attach to them.
+        if (info.type === "iframe" && info.parentFrameId && this.#agentTargets.has(info.parentFrameId)) this.#agentTargets.add(info.targetId);
         for (const client of this.#clients) {
           if (!this.#visible(client, info.targetId)) continue;
           if (client.discover && matches(client.discover, info.type)) this.#deliver(client, message);

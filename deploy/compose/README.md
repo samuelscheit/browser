@@ -63,7 +63,8 @@ identity the database already trusts, and it always rebuilds the provisioning ma
 | `workers/chrome.json` | worker config: `workers/chrome/config/worker.json` plus the catalog recipes |
 | `fabric_provision_manifest` | projects, principals, workers and profiles the provisioner registers |
 | `egress_proxy_upstreams` | upstream proxy URL(s) for `egress_proxy@1`, one per line, tried in order (empty: fails closed) |
-| `deathbycaptcha_*`, `anticaptcha_client_key` | optional solver credentials (empty: provider disabled) |
+| `deathbycaptcha_*`, `anticaptcha_client_key` | optional reCAPTCHA token provider credentials (empty: provider disabled) |
+| `llm_captcha_api_key` | optional AI gateway key for the CAPTCHA guardian's vision model (empty: only challenges that need no model are solved) |
 
 Environment knobs of the bootstrap: `FABRIC_PRINCIPALS` (default `admin`; `FABRIC_ADMIN_PRINCIPAL`,
 default `admin`, gets `fabric_admin`, every other principal `project_operator`),
@@ -76,8 +77,8 @@ granted the default project.
   `docker compose up -d --force-recreate fabric-provisioner fabric-edge`.
 - **An upstream proxy:** write `http://user:pass@proxy.example:8080` (several lines are tried in order) to
   `secrets/egress_proxy_upstreams`, then `docker compose restart fabric-egress-sidecar`.
-- **CAPTCHA token solving:** write the provider credential files, then
-  `docker compose restart fabric-worker-manager`.
+- **CAPTCHA solving:** write `secrets/llm_captcha_api_key` (the guardian's model) and the token provider
+  credential files, then `docker compose restart fabric-worker-manager`.
 - **Recipes, egress policies, challenge sets, projects:** edit `catalog.json` — see
   [docs/catalog.md](../../docs/catalog.md).
 - **Capacity:** `FABRIC_MAX_ACTIVE_BROWSER_LEASES` (1–8) in `.env`; the worker's `capacity` in
