@@ -1,4 +1,4 @@
-import type { CdpConnection } from "@browser-fabric/worker-runtime";
+import type { CdpConnection } from "@browser-fabric/worker-runtime/cdp-connection";
 import { ACTIONS, type ActionContext } from "./actions";
 import { TaskBrowser } from "./browser";
 import { createModel } from "./llm";

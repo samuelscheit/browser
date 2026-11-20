@@ -41,6 +41,9 @@
       "@browser-fabric/worker-runtime": [
         "packages/worker-runtime/src/index.ts"
       ],
+      "@browser-fabric/worker-runtime/cdp-connection": [
+        "packages/worker-runtime/src/cdp-connection.ts"
+      ],
       "@browser-fabric/task-agent": [
         "packages/task-agent/src/index.ts"
       ],

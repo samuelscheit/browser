@@ -12,7 +12,10 @@
     "url": "https://github.com/samuelscheit/browser/issues"
   },
   "type": "module",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cdp-connection": "./src/cdp-connection.ts"
+  },
   "dependencies": {
     "@browser-fabric/contracts": "workspace:*",
     "@browser-fabric/policy": "workspace:*",

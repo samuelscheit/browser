@@ -1,4 +1,4 @@
-import { CdpConnection } from "@browser-fabric/worker-runtime";
+import { CdpConnection } from "@browser-fabric/worker-runtime/cdp-connection";
 import { callExpression, elementByRef, waitForDomQuiet } from "./page-script";
 
 const WORLD_NAME = "fabric-task-agent";
