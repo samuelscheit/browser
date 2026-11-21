@@ -312,7 +312,7 @@ describe("CAPTCHA guardian reCAPTCHA token fallback", () => {
         if (command.method === "Page.createIsolatedWorld") return { executionContextId: 9 };
         if (command.method !== "Runtime.evaluate" || command.params?.contextId !== 9) return undefined;
         const expression = String(command.params.expression);
-        if (expression === RECAPTCHA_V2_PROBE_SCRIPT) return { result: { value: widget.shown ? { sitekey: SITEKEY, callback: "onOk", solved: widget.solved } : null } };
+        if (expression === RECAPTCHA_V2_PROBE_SCRIPT) return { result: { value: widget.shown && !widget.solved ? { sitekey: SITEKEY } : null } };
         // The fill script: the token is in the response field from now on.
         widget.solved = true;
         return { result: { value: true } };
@@ -333,8 +333,8 @@ describe("CAPTCHA guardian reCAPTCHA token fallback", () => {
     const guardian = new CaptchaGuardian({ ...fakeGuardianOptions(transport, scripted, logs), recaptchaGraceMs: GRACE_MS, ...(tokenSolver ? { tokenSolver } : {}) });
     await guardian.start();
     await eventually(() => scripted.calls.length === 1);
-    // The page bundle is not in a fake browser; record what the guardian publishes through the driver.
-    (scripted.calls[0]!.driver as { publish(state: string, detail: string): Promise<void> }).publish = async (state, detail) => { published.push([state, detail]); };
+    // The page bundle is not in a fake browser; record what the guardian shows the page through the driver.
+    (scripted.calls[0]!.driver as unknown as { show(state: string, detail: string): Promise<void> }).show = async (state, detail) => { published.push([state, detail]); };
     return { guardian, scripted, logs, published };
   }
 
@@ -356,19 +356,45 @@ describe("CAPTCHA guardian reCAPTCHA token fallback", () => {
     const transport = recaptchaPage();
     const { guardian, scripted, logs, published } = await guardedPage(transport, solver);
     scripted.calls[0]!.finish({ state: "failed", detail: "recaptcha-images: not solved in 8 rounds" });
-    await eventually(() => published.length > 0);
+    await eventually(() => published.length > 1);
     expect(tasks).toEqual([{ sitekey: SITEKEY, pageUrl: "https://example.test/protected?case=secret" }]);
-    expect(published).toEqual([["solved", "recaptcha: token"]]);
+    // Never `failed` while the fallback is still to run: clients stop on it and release the browser.
+    expect(published).toEqual([["solving", "recaptcha: token fallback"], ["solved", "recaptcha: token"]]);
     const evaluations = transport.sent("Runtime.evaluate", "page-session-1").map((command) => command.params!);
     expect(evaluations.some((params) => params.contextId === 9 && String(params.expression).includes(JSON.stringify(TOKEN)))).toBe(true);
-    // The callback runs in the main world, where the page's global lives.
-    expect(evaluations.some((params) => params.contextId === undefined && String(params.expression).includes('"onOk"'))).toBe(true);
+    // The callbacks run in the main world, where the page's functions live, found by the widget's sitekey.
+    expect(evaluations.some((params) => params.contextId === undefined && String(params.expression).includes(JSON.stringify(SITEKEY)) && String(params.expression).includes("___grecaptcha_cfg"))).toBe(true);
     expect(logs.map(({ event }) => event)).toEqual(expect.arrayContaining(["token-fallback-started", "token-fallback-injected", "solved"]));
     // Settled: one token per document, and no further session.
     await sleep(POLLS);
     expect(tasks).toHaveLength(1);
     expect(scripted.calls).toHaveLength(1);
     expect(guardian.snapshot).toMatchObject({ solved: 1, failed: 0 });
+    await guardian.stop();
+  });
+
+  test("llm-captcha's own failed never reaches the page; the guardian says it once it knows no fallback runs", async () => {
+    const transport = recaptchaPage({ shown: false, solved: false });
+    const { guardian, scripted, published } = await guardedPage(transport, recordingSolver().solver);
+    const driver = scripted.calls[0]!.driver as { publish(state: string, detail: string): Promise<void> };
+    const before = transport.commands.length;
+    // What llm-captcha's engine does at the end of a failed solve.
+    await driver.publish("failed", "turnstile: blocked");
+    expect(transport.commands.length).toBe(before);
+    scripted.calls[0]!.finish({ state: "failed", detail: "turnstile: blocked" });
+    await eventually(() => published.length > 0);
+    expect(published).toEqual([["failed", "turnstile: blocked"]]);
+    await guardian.stop();
+  });
+
+  test("a session that timed out with the widget unsolved gets the fallback at once", async () => {
+    const { tasks, solver } = recordingSolver();
+    const { guardian, scripted, logs, published } = await guardedPage(recaptchaPage(), solver);
+    scripted.calls[0]!.finish({ state: "failed", detail: "timed out" });
+    await eventually(() => published.length > 1);
+    expect(tasks).toHaveLength(1);
+    expect(published).toEqual([["solving", "recaptcha: token fallback"], ["solved", "recaptcha: token"]]);
+    expect(logs.find(({ event }) => event === "token-fallback-started")?.details).toMatchObject({ after: "failed" });
     await guardian.stop();
   });
 
@@ -379,8 +405,8 @@ describe("CAPTCHA guardian reCAPTCHA token fallback", () => {
     await sleep(GRACE_MS / 2);
     expect(tasks).toHaveLength(0);
     await eventually(() => tasks.length === 1, 3_000);
-    await eventually(() => published.length > 0);
-    expect(published).toEqual([["solved", "recaptcha: token"]]);
+    await eventually(() => published.length > 1);
+    expect(published).toEqual([["solving", "recaptcha: token fallback"], ["solved", "recaptcha: token"]]);
     expect(logs.find(({ event }) => event === "token-fallback-started")?.details).toMatchObject({ after: "idle" });
     stop();
     await guardian.stop();
@@ -436,8 +462,8 @@ describe("CAPTCHA guardian reCAPTCHA token fallback", () => {
     const transport = recaptchaPage();
     const { guardian, scripted, published } = await guardedPage(transport, failing);
     scripted.calls[0]!.finish({ state: "failed", detail: "recaptcha-checkbox: blocked" });
-    await eventually(() => published.length > 0);
-    expect(published).toEqual([["failed", "recaptcha-checkbox: blocked; token fallback Error"]]);
+    await eventually(() => published.length > 1);
+    expect(published).toEqual([["solving", "recaptcha: token fallback"], ["failed", "recaptcha-checkbox: blocked; token fallback Error"]]);
     await sleep(POLLS);
     expect(tasks).toHaveLength(1);
     transport.navigate("page-session-1", "https://example.test/retry");

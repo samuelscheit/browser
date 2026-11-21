@@ -77,7 +77,8 @@ connection and releases on navigation or page close. A failed session is final f
 navigation, page close or stop aborts a running session, and its remaining input is refused before it
 reaches the browser. A visible reCAPTCHA v2 widget still without a response after a session gets one
 provider token per document when the recipe enables a provider (see
-[`docs/README.md`](README.md#recaptcha-v2-token-fallback) for why).
+[`docs/README.md`](README.md#recaptcha-v2-token-fallback) for why). The guardian, not llm-captcha,
+publishes `failed` on the page, and only once no fallback is still to run.
 
 A lost guardian CDP connection makes the executor's liveness probe fail; a manager restart removes an
 untracked browser rather than silently continuing without its guardian. Every container and volume a

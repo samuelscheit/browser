@@ -22,25 +22,33 @@ const FILL_FIELD_WAIT_MS = 5_000;
 const FILL_FIELD_POLL_MS = 150;
 
 /**
- * The first visible, rendered reCAPTCHA v2 checkbox widget (api.js rendered its frame into it; the
- * invisible variant is left alone), its public sitekey, its callback name, and whether its response
- * field holds a token. Null when the document shows none.
+ * The first visible reCAPTCHA v2 checkbox widget whose response field is empty: its public sitekey,
+ * or null when the document shows none.
+ *
+ * Every rendered v2 checkbox is an `api2/anchor` iframe (www.google.com or www.recaptcha.net) with its
+ * sitekey in `k` and its size in `size`, next to the widget's `g-recaptcha-response` textarea. That
+ * holds however the page rendered it: `.g-recaptcha[data-sitekey]` markup, or `grecaptcha.render()`
+ * into any container (newfold.com/abuse renders into `div#captcha`, with no `.g-recaptcha` at all).
+ * The invisible variant (`size=invisible`) and Enterprise (`enterprise/anchor`) are left alone. Below
+ * the fold counts as visible: llm-captcha scrolls a widget into view, a token needs no view at all.
  */
 export const RECAPTCHA_V2_PROBE_SCRIPT = `(() => {
-  for (const widget of Array.from(document.querySelectorAll('.g-recaptcha[data-sitekey]'))) {
-    if (String(widget.getAttribute('data-size') || '').toLowerCase() === 'invisible') continue;
-    const rect = widget.getBoundingClientRect();
-    const shown = widget.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && rect.width >= 10 && rect.height >= 10;
-    if (!shown || !widget.querySelector('iframe')) continue;
-    const sitekey = String(widget.getAttribute('data-sitekey') || '');
-    const callback = String(widget.getAttribute('data-callback') || '');
-    const response = widget.querySelector('textarea[name="g-recaptcha-response"]') || document.querySelector('textarea[name="g-recaptcha-response"]');
-    return {
-      sitekey: /^[A-Za-z0-9_-]{16,80}$/.test(sitekey) ? sitekey : '',
-      // Only a plain global identifier may be invoked; anything else is ignored.
-      callback: /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(callback) ? callback : '',
-      solved: !!response && String(response.value || '').trim().length > 0,
-    };
+  for (const anchor of Array.from(document.querySelectorAll('iframe[src*="/recaptcha/api2/anchor"]'))) {
+    let url;
+    try { url = new URL(anchor.src); } catch { continue; }
+    if (String(url.searchParams.get('size') || '').toLowerCase() === 'invisible') continue;
+    const rect = anchor.getBoundingClientRect();
+    if (!anchor.checkVisibility({ opacityProperty: true, visibilityProperty: true }) || rect.width < 10 || rect.height < 10) continue;
+    const sitekey = String(url.searchParams.get('k') || '');
+    if (!/^[A-Za-z0-9_-]{16,80}$/.test(sitekey)) continue;
+    // The widget is the nearest ancestor holding a response field; api.js adds it next to the frame.
+    let response = null;
+    for (let node = anchor.parentElement, depth = 0; node && !response && depth < 6; node = node.parentElement, depth += 1) {
+      response = node.querySelector('textarea[name="g-recaptcha-response"]');
+    }
+    // The probe never returns the response itself, only whether one is present.
+    if (!!response && String(response.value || '').trim().length > 0) continue;
+    return { sitekey };
   }
   return null;
 })()`;
@@ -63,21 +71,51 @@ export function recaptchaFillScript(token: string): string {
   })()`;
 }
 
-/** Calls the widget's own data-callback global in the page's main world. The callback name is pre-validated. */
-export function recaptchaCallbackScript(token: string, callback: string): string {
+/**
+ * Calls the success callback the page gave the widget, in the page's main world where it lives. The
+ * callback is either a function passed to `grecaptcha.render()` (newfold.com/abuse passes an inline
+ * one) or the name of a global, from `data-callback` or a string `callback` option. Both are found in
+ * reCAPTCHA's own registry `___grecaptcha_cfg.clients`, on the parameters object whose `sitekey` is
+ * the widget's; `data-callback` of the widget's element is read as well. Each callback runs once. A
+ * name is only looked up on `window`, never evaluated. Returns how many callbacks ran.
+ */
+export function recaptchaCallbackScript(token: string, sitekey: string): string {
   return `(() => {
-    const name = ${JSON.stringify(callback)};
-    const invoke = name ? window[name] : undefined;
-    if (typeof invoke !== 'function') return false;
-    invoke(${JSON.stringify(token)});
-    return true;
+    const token = ${JSON.stringify(token)};
+    const sitekey = ${JSON.stringify(sitekey)};
+    const found = new Set();
+    const add = (callback) => {
+      if (typeof callback === 'function') found.add(callback);
+      else if (typeof callback === 'string' && /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(callback) && typeof window[callback] === 'function') found.add(window[callback]);
+    };
+    const seen = new Set();
+    const visit = (value, depth) => {
+      if (!value || typeof value !== 'object' || depth > 5 || seen.has(value) || value instanceof Node || value === window) return;
+      seen.add(value);
+      let keys;
+      try { keys = Object.keys(value); } catch { return; }
+      if (value.sitekey === sitekey && 'callback' in value) add(value.callback);
+      for (const key of keys) {
+        let child;
+        try { child = value[key]; } catch { continue; }
+        visit(child, depth + 1);
+      }
+    };
+    const clients = window.___grecaptcha_cfg && window.___grecaptcha_cfg.clients;
+    if (clients && typeof clients === 'object') for (const key of Object.keys(clients)) visit(clients[key], 0);
+    for (const element of Array.from(document.querySelectorAll('[data-sitekey][data-callback]'))) {
+      if (element.getAttribute('data-sitekey') === sitekey) add(element.getAttribute('data-callback'));
+    }
+    for (const callback of found) {
+      try { callback(token); } catch {}
+    }
+    return found.size;
   })()`;
 }
 
 /** A visible reCAPTCHA v2 widget whose response field is still empty. */
 export interface PendingRecaptcha {
   sitekey: string;
-  callback: string;
 }
 
 /** Creates the guardian's isolated world in the page's current top-level document. */
@@ -97,9 +135,8 @@ async function evaluate(send: PageSend, expression: string, contextId?: number):
 
 /** The unsolved widget the document shows, if any. Throws when the world is gone (the caller makes a new one). */
 export async function probePendingRecaptcha(send: PageSend, contextId: number): Promise<PendingRecaptcha | undefined> {
-  const probe = await evaluate(send, RECAPTCHA_V2_PROBE_SCRIPT, contextId) as { sitekey?: unknown; callback?: unknown; solved?: unknown } | null | undefined;
-  if (!probe || probe.solved === true || !isCaptchaSitekey(probe.sitekey)) return undefined;
-  return { sitekey: probe.sitekey, callback: typeof probe.callback === "string" ? probe.callback : "" };
+  const probe = await evaluate(send, RECAPTCHA_V2_PROBE_SCRIPT, contextId) as { sitekey?: unknown } | null | undefined;
+  return probe && isCaptchaSitekey(probe.sitekey) ? { sitekey: probe.sitekey } : undefined;
 }
 
 export type RecaptchaTokenOutcome = { outcome: "injected" } | { outcome: "failed"; error: string };
@@ -119,7 +156,7 @@ export async function injectRecaptchaToken(input: { solver: TokenCaptchaSolver; 
       if (Date.now() >= deadline) throw new CaptchaSolverError("unavailable", "reCAPTCHA response field was not present");
       await new Promise((resolve) => setTimeout(resolve, FILL_FIELD_POLL_MS));
     }
-    if (widget.callback) await evaluate(send, recaptchaCallbackScript(token, widget.callback));
+    await evaluate(send, recaptchaCallbackScript(token, widget.sitekey));
     return { outcome: "injected" };
   } catch (error) {
     // Provider errors carry only a stable failure class; CDP errors can echo page details.

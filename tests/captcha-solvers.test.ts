@@ -237,11 +237,11 @@ describe("input validation", () => {
 });
 
 describe("page-side scripts", () => {
-  test("the probe reads only the sitekey, a callback identifier, and booleans", () => {
-    expect(RECAPTCHA_V2_PROBE_SCRIPT).toContain(".g-recaptcha[data-sitekey]");
-    // The probe must never return the response value itself, only whether one is present.
+  test("the probe finds widgets by their anchor frame and returns only a sitekey", () => {
+    expect(RECAPTCHA_V2_PROBE_SCRIPT).toContain('iframe[src*="/recaptcha/api2/anchor"]');
+    // The probe must never return the response value itself.
     expect(RECAPTCHA_V2_PROBE_SCRIPT).not.toMatch(/return\s+[^;]*\.value\b/);
-    expect(RECAPTCHA_V2_PROBE_SCRIPT).toMatch(/solved:\s*!!response\s*&&/);
+    expect(RECAPTCHA_V2_PROBE_SCRIPT).toContain("return { sitekey };");
   });
 
   test("a token is embedded as a JSON string literal, so page script cannot break out", () => {
@@ -251,13 +251,12 @@ describe("page-side scripts", () => {
     expect(fill).not.toContain(`const token = "); window.__pwned`);
   });
 
-  test("the callback invocation only calls a function named by the widget, never an arbitrary expression", () => {
-    const script = recaptchaCallbackScript(TOKEN, "onOk");
-    // The name travels as a JSON string and is looked up on window, so it cannot inject code.
-    expect(script).toContain('const name = "onOk"');
-    expect(script).toContain("window[name]");
-    expect(script).toContain("typeof invoke !== 'function'");
-    const hostile = recaptchaCallbackScript(TOKEN, `alert(1)`);
-    expect(hostile).not.toContain("alert(1)();");
+  test("the callback script carries the token and sitekey as JSON literals and looks names up on window only", () => {
+    const hostile = `"); window.__pwned = 1; ("`;
+    const script = recaptchaCallbackScript(hostile, hostile);
+    expect(script).toContain(`const token = ${JSON.stringify(hostile)};`);
+    expect(script).toContain(`const sitekey = ${JSON.stringify(hostile)};`);
+    expect(script).not.toContain("eval(");
+    expect(script).toContain("typeof window[callback] === 'function'");
   });
 });

@@ -58,7 +58,7 @@ type AttachedPage = {
   /** Advances on every top-level document; work for an older document is void. */
   document: number;
   /** One driver per document, so its isolated worlds are injected once. */
-  driver?: CdpDriver;
+  driver?: GuardianDriver;
   /** The solve session in flight. */
   solving?: AbortController;
   /** The document's session failed: no further attempt until the page navigates. */
@@ -171,16 +171,34 @@ function defaultLogger(event: string, details?: Record<string, unknown>): void {
   else console.info(`[fabric-guardian] ${event}`);
 }
 
+type PageState = Parameters<CdpDriver["publish"]>[0];
+
 /**
- * llm-captcha's CDP driver without its assist mode. Without a model, llm-captcha would put a model
- * challenge to whoever drives the browser in a panel on the page and wait for the answer; inside a
- * Fabric browser nobody is asked, so such a challenge ends `failed` at once instead.
+ * llm-captcha's CDP driver as the guardian runs it.
+ *
+ * - No assist mode: without a model, llm-captcha would put a model challenge to whoever drives the
+ *   browser in a panel on the page and wait for the answer; inside a Fabric browser nobody is asked,
+ *   so such a challenge ends `failed` at once instead.
+ * - The engine's own `failed` never reaches the page: clients stop on `failed` and release the
+ *   browser, which would kill a reCAPTCHA token fallback still to come. The guardian publishes the
+ *   final word itself with {@link show}, once it knows whether that fallback runs.
  */
-function unassistedDriver(host: CdpHost): CdpDriver {
-  const driver = new CdpDriver(host);
-  // The engine checks `driver.ask` before falling back to assist mode.
-  Object.defineProperty(driver, "ask", { value: undefined });
-  return driver;
+class GuardianDriver extends CdpDriver {
+  public constructor(host: CdpHost) {
+    super(host);
+    // The engine checks `driver.ask` before falling back to assist mode.
+    Object.defineProperty(this, "ask", { value: undefined });
+  }
+
+  /** The engine's publish: `solving` and `solved` go through; `failed` is the guardian's to say. */
+  public override async publish(state: PageState, detail: string): Promise<void> {
+    if (state !== "failed") await this.show(state, detail);
+  }
+
+  /** Sets `<html data-captcha-state data-captcha-detail>` of the document. */
+  public async show(state: PageState, detail: string): Promise<void> {
+    await super.publish(state, detail);
+  }
 }
 
 /** A command for a page document that is gone; the solver's work for it stops at the next CDP call. */
@@ -498,7 +516,7 @@ export class CaptchaGuardian implements CaptchaGuardianHandle {
   }
 
   async #session(page: AttachedPage, document: number, controller: AbortController): Promise<void> {
-    const driver = page.driver ??= unassistedDriver(this.#host(page, document));
+    const driver = page.driver ??= new GuardianDriver(this.#host(page, document));
     let modelRounds = 0;
     let result: SolveResult;
     try {
@@ -517,7 +535,7 @@ export class CaptchaGuardian implements CaptchaGuardianHandle {
       if (modelRounds > 0) {
         page.failed = true;
         this.#failed += 1;
-        await driver.publish("failed", "error").catch(() => undefined);
+        await driver.show("failed", "error").catch(() => undefined);
         this.#logger("failed", { url: page.url, detail: "error", rounds: modelRounds, error: safeErrorKind(error) });
       } else {
         this.#logError("solve error", error, { url: page.url });
@@ -538,6 +556,7 @@ export class CaptchaGuardian implements CaptchaGuardianHandle {
       return;
     }
     page.failed = true;
+    await driver.show("failed", result.detail).catch(() => undefined);
     this.#count("failed", page, safeDetail(result.detail), result.rounds.length, failedAdapter(result));
   }
 
@@ -548,28 +567,32 @@ export class CaptchaGuardian implements CaptchaGuardianHandle {
   }
 
   /**
-   * A visible reCAPTCHA v2 widget still has no response after the session. A failed session gets the
-   * token fallback at once; after an idle one, or a `solved` without a token, the widget gets a grace
-   * period (it may still be loading, or its token arriving), with the page kept at `solving`. Then the
-   * document is settled: one bought token when the recipe enables a provider, and the page reads
-   * `solved` only once that token is in, else `failed` with the reason.
+   * A visible reCAPTCHA v2 widget still has no response after the session. A failed session (out of
+   * rounds, timed out, blocked) gets the token fallback at once; after an idle one, or a `solved`
+   * without a token, the widget gets a grace period (it may still be loading, or its token arriving),
+   * with the page kept at `solving`. Then the document is settled: one bought token when the recipe
+   * enables a provider, with the page at `solving` (`recaptcha: token fallback`) meanwhile and
+   * `solved` only once that token is in, else `failed` with the reason. The page never reads
+   * `failed` while the fallback is still to run.
    */
-  async #settleRecaptcha(page: AttachedPage, document: number, controller: AbortController, driver: CdpDriver, result: SolveResult, widget: PendingRecaptcha): Promise<void> {
+  async #settleRecaptcha(page: AttachedPage, document: number, controller: AbortController, driver: GuardianDriver, result: SolveResult, widget: PendingRecaptcha): Promise<void> {
     page.recaptchaSince ??= Date.now();
     if (result.state !== "failed" && Date.now() - page.recaptchaSince < this.#options.recaptchaGraceMs) {
-      if (result.state === "solved") await driver.publish("solving", "recaptcha: waiting for its response token").catch(() => undefined);
+      if (result.state === "solved") await driver.show("solving", "recaptcha: waiting for its response token").catch(() => undefined);
       return;
     }
     // Settled: no further session for this document, so the token is bought at most once.
     page.failed = true;
     const reason = result.state === "failed" ? safeDetail(result.detail) : result.state === "idle" ? "recaptcha: widget not reached" : "recaptcha: solved without a response token";
     const finish = async (state: "solved" | "failed", detail: string) => {
-      await driver.publish(state, detail).catch(() => undefined);
+      await driver.show(state, detail).catch(() => undefined);
       this.#count(state, page, detail, result.rounds.length, state === "failed" ? failedAdapter(result) ?? "recaptcha" : undefined);
     };
     const solver = this.#options.tokenSolver;
     const contextId = solver ? await page.world : undefined;
     if (!solver || contextId === undefined) return finish("failed", reason);
+    await driver.show("solving", "recaptcha: token fallback").catch(() => undefined);
+    if (controller.signal.aborted || !this.#current(page, document)) return;
     this.#logger("token-fallback-started", { url: page.url, after: result.state });
     const token = await injectRecaptchaToken({ solver, send: this.#documentSession(page, document, page.sessionId).send, contextId, widget, pageUrl: page.url, signal: controller.signal });
     if (controller.signal.aborted || !this.#current(page, document)) return;

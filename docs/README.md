@@ -63,19 +63,27 @@ and once it ended `solved` with an empty `g-recaptcha-response`. The guardian th
 v2 tokens from Death by Captcha or Anti-Captcha as a permanent second path.
 
 - **Trigger:** after every llm-captcha session, the guardian probes the top document (from its own
-  isolated world) for a visible, rendered reCAPTCHA v2 checkbox widget (not the invisible variant)
-  whose response field is still empty, whatever the session concluded. After `failed` it buys at
-  once; after `idle` or a token-less `solved` it first gives the widget a 5-second grace (it may still
-  be loading, or its token arriving), with the page kept at `solving`.
+  isolated world) for a visible reCAPTCHA v2 checkbox widget whose response field is still empty,
+  whatever the session concluded. A widget is found by its `api2/anchor` frame (sitekey from `k`), so
+  `.g-recaptcha` markup and `grecaptcha.render()` into any container count alike, below the fold
+  too; `size=invisible` and Enterprise are left alone. After `failed` (out of rounds, timed out,
+  blocked) it buys at once; after `idle` or a token-less `solved` it first gives the widget a
+  5-second grace (it may still be loading, or its token arriving), with the page kept at `solving`.
 - **Gate:** only when the recipe's challenge handler set contains an **automatic** `dbc` or
   `anticaptcha` handler **and** the deployment configured that provider's credential. The built-in
   browser recipes use `challenge_captcha-solver@1`; a catalog recipe that must never spend provider
   credit uses `challenge_guardian@1`.
-- **State:** a reCAPTCHA reads `solved` only once a token is in its response field; otherwise the page
-  reads `failed` with the reason (llm-captcha's, `recaptcha: widget not reached`, or
-  `recaptcha: solved without a response token`, plus the provider's failure class).
+- **State:** the page never reads `failed` while the fallback is still to run, since clients stop
+  on `failed` and release the browser. llm-captcha's own `failed` is held back by the guardian's
+  driver until the probe has decided; while a token is bought the page reads
+  `solving` (`recaptcha: token fallback`). A reCAPTCHA reads `solved` only once a token is in its
+  response field; otherwise the page reads `failed` with the reason (llm-captcha's,
+  `recaptcha: widget not reached`, or `recaptcha: solved without a response token`, plus the
+  provider's failure class).
 - **Injection:** the token fills the response field in the guardian's isolated world, then the
-  widget's own `data-callback` runs in the main world, so the page sees what a human solve produces.
+  widget's success callback runs in the main world: the function or global name the page gave
+  `grecaptcha.render()`, found by sitekey in reCAPTCHA's `___grecaptcha_cfg` registry, and
+  `data-callback`. The page sees what a human solve produces.
 - **Bounds:** one token per page document; a provider failure is final for that document, and a
   navigation starts over. A canceled solve is never retried through a second provider; the overall
   deadline is two minutes per token.

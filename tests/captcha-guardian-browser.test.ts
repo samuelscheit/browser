@@ -4,7 +4,7 @@
  * failed. RUN_BROWSER_INTEGRATION=1; the vendor widgets also need network access to Cloudflare and Google.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,7 @@ import {
 } from "@browser-fabric/worker-runtime";
 import puppeteer, { type Browser as PuppeteerBrowser, type Page } from "puppeteer-core";
 import type { ChallengeHandler } from "@browser-fabric/contracts";
+import { RECAPTCHA_V2_PROBE_SCRIPT, recaptchaCallbackScript } from "../packages/worker-runtime/src/captcha-solvers/recaptcha-fallback";
 import { browserIntegration, launchChromium, requireChromium, type TestChromium } from "./support/chromium";
 import { eventually, type GuardianLog } from "./support/fake-guardian-transport";
 
@@ -286,8 +287,25 @@ describe.skipIf(!browserIntegration)("CAPTCHA guardian on a DataDome slider in a
 
 // ---------------------------------------------------------------------------------------------
 // The reCAPTCHA token fallback: a local stand-in for reCAPTCHA's image challenge, served as
-// https://www.google.com/recaptcha/api2/bframe, which llm-captcha cannot solve without a model.
+// https://www.google.com/recaptcha/api2/bframe, which llm-captcha cannot solve without a model. The
+// widget's anchor frame (https://www.google.com/recaptcha/api2/anchor) is served empty.
 // ---------------------------------------------------------------------------------------------
+
+/** Newfold's widget as saved from newfold.com/abuse: rendered by grecaptcha.render() into div#captcha. */
+const NEWFOLD_WIDGET = readFileSync(join(import.meta.dir, "fixtures/newfold-recaptcha-widget.html"), "utf8");
+const NEWFOLD_SITEKEY = "6Lc2vj8lAAAAAF4yi77gg_-kxh2q4FyIBHUK9pES";
+
+/** Every `data-captcha-state` the page reads, with its detail, in order, from the document's start. */
+const RECORD_STATES = `(() => {
+  window.__captchaStates = [];
+  // The script runs before <html> exists, so watch the document for it.
+  new MutationObserver(() => {
+    const html = document.documentElement;
+    const entry = (html.dataset.captchaState || '') + ' ' + (html.dataset.captchaDetail || '');
+    if (window.__captchaStates.at(-1) !== entry) window.__captchaStates.push(entry);
+  }).observe(document, { subtree: true, attributes: true, attributeFilter: ['data-captcha-state', 'data-captcha-detail'] });
+})()`;
+const recordedStates = (page: Page) => page.evaluate(() => (window as any).__captchaStates as string[]);
 
 const imageChallenge = `<!doctype html><html><head><style>
   body { margin: 0; font-family: sans-serif; }
@@ -308,16 +326,26 @@ describe.skipIf(!browserIntegration)("CAPTCHA guardian reCAPTCHA token fallback"
 
   beforeAll(() => {
     const { key, cert } = selfSigned(directory, "www.google.com");
-    google = Bun.serve({ hostname: "127.0.0.1", port: 0, tls: { key: Bun.file(key), cert: Bun.file(cert) }, fetch: () => new Response(imageChallenge, { headers: { "content-type": "text/html" } }) });
+    google = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      tls: { key: Bun.file(key), cert: Bun.file(cert) },
+      fetch: (request) => new Response(new URL(request.url).pathname.endsWith("/anchor") ? "<!doctype html><title>anchor</title>" : imageChallenge, { headers: { "content-type": "text/html" } }),
+    });
+    const challenge = (sitekey: string) => `<iframe src="https://www.google.com/recaptcha/api2/bframe?k=${sitekey}" style="width:400px;height:580px;border:0"></iframe>`;
     site = Bun.serve({
       port: 0,
-      fetch: () => html(`<form>
+      fetch: (request) => new URL(request.url).pathname === "/newfold"
+        // Newfold's markup, and reCAPTCHA's registry as grecaptcha.render("captcha", { sitekey, callback }) leaves it.
+        ? html(`${challenge(NEWFOLD_SITEKEY)}${NEWFOLD_WIDGET}
+          <script>window.___grecaptcha_cfg = { count: 1, clients: { 0: { id: 0, version: "fixture", Ez: { Nq: { sitekey: "${NEWFOLD_SITEKEY}", size: "normal", callback: (token) => { window.__solvedToken = token; } } } } } };</script>`)
+        : html(`<form>
           <div class="g-recaptcha" data-sitekey="${RECAPTCHA_TEST_SITEKEY}" data-callback="onCaptchaSolved">
-            <iframe title="reCAPTCHA" src="about:blank" style="width:304px;height:78px;border:0"></iframe>
+            <iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=${RECAPTCHA_TEST_SITEKEY}&size=normal" style="width:304px;height:78px;border:0"></iframe>
             <textarea name="g-recaptcha-response" style="display:none"></textarea>
           </div>
         </form>
-        <iframe src="https://www.google.com/recaptcha/api2/bframe?k=${RECAPTCHA_TEST_SITEKEY}" style="width:400px;height:580px;border:0"></iframe>
+        ${challenge(RECAPTCHA_TEST_SITEKEY)}
         <script>window.onCaptchaSolved = (token) => { window.__solvedToken = token; };</script>`),
     });
   });
@@ -328,19 +356,90 @@ describe.skipIf(!browserIntegration)("CAPTCHA guardian reCAPTCHA token fallback"
   });
 
   const args = () => [`--host-resolver-rules=MAP www.google.com 127.0.0.1:${google.port}`, "--ignore-certificate-errors"];
-  const recordingSolver = () => {
+  /** A provider that takes `delayMs` per token, as real ones take tens of seconds. */
+  const recordingSolver = (delayMs = 0) => {
     const tasks: CaptchaTask[] = [];
-    return { tasks, solver: { solve: async (task: CaptchaTask) => { tasks.push(task); return BOUGHT_TOKEN; } } satisfies TokenCaptchaSolver };
+    return { tasks, solver: { solve: async (task: CaptchaTask) => { tasks.push(task); await Bun.sleep(delayMs); return BOUGHT_TOKEN; } } satisfies TokenCaptchaSolver };
   };
 
-  test("after llm-captcha failed on the image challenge, buys one token for the document, hands it to the page and only then reads solved", async () => {
-    const { tasks, solver } = recordingSolver();
+  /** A new page that records every CAPTCHA state its documents read. */
+  const recordingPage = async (browser: PuppeteerBrowser) => {
+    const page = await browser.newPage();
+    await page.evaluateOnNewDocument(RECORD_STATES);
+    return page;
+  };
+
+  test("the probe and the callback on real DOM: any render style, invisible, Enterprise, hidden and solved widgets skipped", async () => {
+    const chromium = await launchChromium();
+    const browser = await puppeteer.connect({ browserURL: chromium.endpoint, defaultViewport: null });
+    try {
+      const page = await browser.newPage();
+      // Frames point at a closed port: rendered, never loaded, nothing leaves the machine.
+      const anchor = (path: string, sitekey: string, size = "normal", style = "") => `<iframe src="http://127.0.0.1:9/recaptcha/${path}?ar=1&k=${sitekey}&size=${size}" style="width:304px;height:78px;${style}"></iframe>`;
+      const widget = (inner: string, response = "", attributes = "") => `<div ${attributes}><div>${inner}</div><textarea name="g-recaptcha-response" style="display:none">${response}</textarea></div>`;
+      const key = (n: number) => `6Lc${String(n).repeat(37)}`;
+      const probe = () => page.evaluate(RECAPTCHA_V2_PROBE_SCRIPT);
+      await page.setContent(`<!doctype html><body>
+        ${widget(anchor("api2/anchor", key(1), "invisible"))}
+        ${widget(anchor("enterprise/anchor", key(2)))}
+        ${widget(anchor("api2/anchor", key(3), "normal", "visibility:hidden"))}
+        <div style="display:none">${widget(anchor("api2/anchor", key(4)))}</div>
+        ${widget(anchor("api2/anchor", "not a sitekey"))}
+        ${widget(anchor("api2/anchor", key(5)), "03AFsolved")}
+        <div style="margin-top:2000px">${widget(anchor("api2/anchor", key(6)), "", `id="captcha"`)}</div>
+        ${widget(anchor("api2/anchor", key(7)), "", `class="g-recaptcha" data-sitekey="${key(7)}" data-callback="onSeven"`)}
+        <script>
+          window.calls = [];
+          window.onSeven = (token) => calls.push('data-callback ' + token);
+          window.byName = (token) => calls.push('by name ' + token);
+          window.___grecaptcha_cfg = { clients: { 0: { id: 0, Ab: { Cd: { sitekey: "${key(6)}", callback: (token) => calls.push('inline ' + token) } } }, 1: { id: 1, Ef: { sitekey: "${key(7)}", callback: "byName" } }, 2: { id: 2, Gh: { sitekey: "${key(7)}", callback: "alert(1)" } } } };
+        </script>`);
+      // Below the fold, rendered by grecaptcha.render() into a container of its own.
+      expect(await probe()).toEqual({ sitekey: key(6) });
+      expect(await page.evaluate(recaptchaCallbackScript("T6", key(6)))).toBe(1);
+      await page.evaluate(() => { (document.querySelector("#captcha textarea") as HTMLTextAreaElement).value = "03AFtoken"; });
+      // `.g-recaptcha` markup, its data-callback and a string callback in the registry; an expression is never run.
+      expect(await probe()).toEqual({ sitekey: key(7) });
+      expect(await page.evaluate(recaptchaCallbackScript("T7", key(7)))).toBe(2);
+      expect(await page.evaluate(() => (window as any).calls)).toEqual(["inline T6", "by name T7", "data-callback T7"]);
+      await page.evaluate(() => { document.querySelectorAll("textarea").forEach((field) => { field.value = "03AFtoken"; }); });
+      expect(await probe()).toBeNull();
+    } finally {
+      await browser.disconnect();
+      await chromium.close();
+    }
+  }, 60_000);
+
+  test("newfold.com/abuse: a widget rendered by grecaptcha.render() below the fold gets the fallback, its inline callback runs, and the page never reads failed", async () => {
+    const { tasks, solver } = recordingSolver(1_500);
     const guarded = await launchGuarded({ args: args(), tokenSolver: solver, handlers: [{ id: "death-by-captcha", kind: "dbc", mode: "automatic", configuration: {} }] });
     try {
-      const page = await guarded.browser.newPage();
+      const page = await recordingPage(guarded.browser);
+      await page.goto(`http://localhost:${site.port}/newfold`, { waitUntil: "domcontentloaded" });
+      await waitForState(page, "solved", 30_000);
+      expect(tasks).toEqual([{ sitekey: NEWFOLD_SITEKEY, pageUrl: `http://localhost:${site.port}/newfold` }]);
+      expect(await page.evaluate(() => (window as any).__solvedToken)).toBe(BOUGHT_TOKEN);
+      expect(await page.evaluate(() => (document.getElementById("g-recaptcha-response") as HTMLTextAreaElement).value)).toBe(BOUGHT_TOKEN);
+      const states = await recordedStates(page);
+      expect(states).toContain("solving recaptcha: token fallback");
+      expect(states.at(-1)).toBe("solved recaptcha: token");
+      expect(states.filter((state) => state.startsWith("failed"))).toEqual([]);
+    } finally {
+      await guarded.close();
+    }
+  }, 90_000);
+
+  test("after llm-captcha failed on the image challenge, buys one token for the document, hands it to the page and only then reads solved", async () => {
+    const { tasks, solver } = recordingSolver(1_500);
+    const guarded = await launchGuarded({ args: args(), tokenSolver: solver, handlers: [{ id: "death-by-captcha", kind: "dbc", mode: "automatic", configuration: {} }] });
+    try {
+      const page = await recordingPage(guarded.browser);
       await page.goto(`http://localhost:${site.port}/report`, { waitUntil: "domcontentloaded" });
       await waitForState(page, "solved", 30_000);
       expect(await page.evaluate(() => document.documentElement.dataset.captchaDetail)).toBe("recaptcha: token");
+      // llm-captcha's own `failed (recaptcha-images: …)` never reaches the page: a client stopping on
+      // it would release the browser and kill the paid fallback.
+      expect(await recordedStates(page)).toEqual(["solving recaptcha-images", "solving recaptcha: token fallback", "solved recaptcha: token"]);
       expect(await page.evaluate(() => (window as any).__solvedToken)).toBe(BOUGHT_TOKEN);
       expect(await page.evaluate(() => (document.querySelector('textarea[name="g-recaptcha-response"]') as HTMLTextAreaElement).value)).toBe(BOUGHT_TOKEN);
       // One token per document, however many polls pass.
@@ -355,10 +454,12 @@ describe.skipIf(!browserIntegration)("CAPTCHA guardian reCAPTCHA token fallback"
     const { tasks, solver } = recordingSolver();
     const guarded = await launchGuarded({ args: args(), tokenSolver: solver, handlers: [{ id: "manual-auth", kind: "manual-handoff", mode: "manual", configuration: {} }] });
     try {
-      const page = await guarded.browser.newPage();
+      const page = await recordingPage(guarded.browser);
       await page.goto(`http://localhost:${site.port}/report`, { waitUntil: "domcontentloaded" });
       await waitForState(page, "failed", 30_000);
       expect(await page.evaluate(() => document.documentElement.dataset.captchaDetail)).toBe("recaptcha-images: no model configured");
+      // `failed` once, as the final word after the guardian decided no fallback runs.
+      expect(await recordedStates(page)).toEqual(["solving recaptcha-images", "failed recaptcha-images: no model configured"]);
       await new Promise((resolve) => setTimeout(resolve, 2_000));
       expect(tasks).toHaveLength(0);
       expect(await page.evaluate(() => (window as any).__solvedToken)).toBeUndefined();

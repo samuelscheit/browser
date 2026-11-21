@@ -1,0 +1,15 @@
+<!--
+  The reCAPTCHA v2 widget of https://www.newfold.com/abuse as api.js rendered it, saved 2026-11-21
+  (form fields, OneTrust banner and the lead form's action left out). The page renders it explicitly:
+  api.js?onload=onloadCallback&render=explicit, then grecaptcha.render("captcha", { sitekey, callback })
+  with an inline callback. There is no .g-recaptcha[data-sitekey] and no data-callback anywhere.
+  The widget sits below the fold. Only the frame's cb/name are fixed values here.
+-->
+<ul style="list-style:none;margin-top:1100px">
+<li>
+      <div id="captcha"><div style="width: 304px; height: 78px;"><div><iframe title="reCAPTCHA" width="304" height="78" role="presentation" name="a-fixture" frameborder="0" scrolling="no" sandbox="allow-forms allow-popups allow-same-origin allow-scripts allow-top-navigation allow-modals allow-popups-to-escape-sandbox allow-storage-access-by-user-activation" src="https://www.google.com/recaptcha/api2/anchor?ar=1&amp;k=6Lc2vj8lAAAAAF4yi77gg_-kxh2q4FyIBHUK9pES&amp;co=aHR0cHM6Ly93d3cubmV3Zm9sZC5jb206NDQz&amp;hl=en&amp;v=4i3aN5wAweL7i3ADI7BSX4B-&amp;size=normal&amp;anchor-ms=20000&amp;execute-ms=30000&amp;ovv=CADq00gF&amp;cb=fixture"></iframe></div><textarea id="g-recaptcha-response" name="g-recaptcha-response" class="g-recaptcha-response" style="width: 250px; height: 40px; border: 1px solid rgb(193, 193, 193); margin: 10px 25px; padding: 0px; resize: none; display: none;"></textarea></div><iframe style="display: none;"></iframe></div>
+      <div class="recaptchaRequired" style="display: none;">
+        Please confirm that you're not a robot.*
+      </div>
+    </li>
+</ul>
