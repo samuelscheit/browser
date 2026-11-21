@@ -19,6 +19,6 @@
   "dependencies": {
     "@browser-fabric/contracts": "workspace:*",
     "@browser-fabric/policy": "workspace:*",
-    "llm-captcha-solver": "github:samuelscheit/llm-captcha#be7c2819929643f764ff3440260de5619c974a3a"
+    "llm-captcha-solver": "github:samuelscheit/llm-captcha#aad7c6e1f634f08b0270f9191ed404894880c333"
   }
 }

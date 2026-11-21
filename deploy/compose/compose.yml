@@ -333,7 +333,7 @@ services:
       # through the egress sidecar's captcha-solver listener. No key: model challenges end failed.
       FABRIC_LLM_CAPTCHA_API_KEY_FILE: /run/secrets/llm_captcha_api_key
       FABRIC_LLM_CAPTCHA_BASE_URL: ${FABRIC_LLM_CAPTCHA_BASE_URL:-https://ollama.samuelscheit.com/v1}
-      FABRIC_LLM_CAPTCHA_MODEL: ${FABRIC_LLM_CAPTCHA_MODEL:-claude-opus-5-5}
+      FABRIC_LLM_CAPTCHA_MODELS: ${FABRIC_LLM_CAPTCHA_MODELS:-claude-opus-5-5,claude-sonnet-5-5,gpt-5.5}
     command: [bun, apps/worker-manager/src/server.ts]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

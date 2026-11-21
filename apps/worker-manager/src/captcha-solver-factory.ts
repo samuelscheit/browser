@@ -76,7 +76,7 @@ export async function captchaSolvingFromEnvironment(proxyUrl: string, env: Recor
   const models = llmCaptchaModels({
     apiKey: await readOptionalSecret(env.FABRIC_LLM_CAPTCHA_API_KEY_FILE),
     baseURL: env.FABRIC_LLM_CAPTCHA_BASE_URL,
-    model: env.FABRIC_LLM_CAPTCHA_MODEL,
+    models: env.FABRIC_LLM_CAPTCHA_MODELS,
     fetch,
   });
   return {

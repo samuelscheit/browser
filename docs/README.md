@@ -33,9 +33,10 @@ vision model. The page's top document publishes the state
 (`<html data-captcha-state="solving|solved|failed" data-captcha-detail="…">`), so an agent waits while
 it reads `solving`.
 
-- **Model:** `claude-opus-5-5` through Fabric's AI gateway's Anthropic Messages API
-  (`FABRIC_LLM_CAPTCHA_BASE_URL`, default `https://ollama.samuelscheit.com/v1`;
-  `FABRIC_LLM_CAPTCHA_MODEL`). The key is the Docker secret `llm_captcha_api_key`
+- **Models:** `claude-opus-5-5`, then `claude-sonnet-5-5`, then `gpt-5.5`, through Fabric's AI
+  gateway's Anthropic Messages API (`FABRIC_LLM_CAPTCHA_BASE_URL`, default
+  `https://ollama.samuelscheit.com/v1`; `FABRIC_LLM_CAPTCHA_MODELS`, comma-separated). The next model
+  takes over when a call fails, so a gateway cooldown on one model does not stop solving. The key is the Docker secret `llm_captcha_api_key`
   (`FABRIC_LLM_CAPTCHA_API_KEY_FILE`), read by the worker manager (or local agent) only; it never
   enters a browser and is never logged. Without a key, model challenges end `failed`.
 - **Egress:** model requests leave through the egress sidecar's `captcha-solver` listener, which admits

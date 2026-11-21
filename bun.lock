@@ -151,7 +151,7 @@
       "dependencies": {
         "@browser-fabric/contracts": "workspace:*",
         "@browser-fabric/policy": "workspace:*",
-        "llm-captcha-solver": "github:samuelscheit/llm-captcha#be7c2819929643f764ff3440260de5619c974a3a",
+        "llm-captcha-solver": "github:samuelscheit/llm-captcha#aad7c6e1f634f08b0270f9191ed404894880c333",
       },
     },
   },
@@ -247,7 +247,7 @@
 
     "json-schema": ["json-schema@0.4.0", "", {}, "sha512-es94M3nTIfsEPisRafak+HDLfHXnKBhV3vU5eqPcS3flIWqcxJWgXHXiey3YrpaNsanY5ei1VoYEbOzijuq9BA=="],
 
-    "llm-captcha-solver": ["llm-captcha-solver@github:samuelscheit/llm-captcha#be7c281", { "dependencies": { "@ai-sdk/anthropic": "4.0.107", "@ai-sdk/google": "4.0.123", "@ai-sdk/openai": "4.0.122", "@ai-sdk/openai-compatible": "3.0.94", "ai": "7.0.178", "zod": "4.6.7" }, "hasInstallScript": true }, "samuelscheit-llm-captcha-be7c281", "sha512-EYXQsde7GmqzD+VcnTE3QgGLf4jKR8+3sKr6OgiyIARZvUDaVl202T0XsZWHZSeqfRS3G9o0WmLRJpO/fwVv1w=="],
+    "llm-captcha-solver": ["llm-captcha-solver@github:samuelscheit/llm-captcha#aad7c6e", { "dependencies": { "@ai-sdk/anthropic": "4.0.107", "@ai-sdk/google": "4.0.123", "@ai-sdk/openai": "4.0.122", "@ai-sdk/openai-compatible": "3.0.94", "ai": "7.0.178", "zod": "4.6.7" }, "hasInstallScript": true }, "samuelscheit-llm-captcha-aad7c6e", "sha512-K9jXL8bKsEhj6DwFDqIFBjc7dEaJD9/ZWDx2BB9Ki2o4dREobL7A/k6HqUy/y5tg6DUK3NjETuIGVf7Qka6MGQ=="],
 
     "mitt": ["mitt@3.0.1", "", {}, "sha512-vKivATfr97l2/QBCYAkXYDbrIWPM2IIKEl7YPhjCvKlG3kE2gm+uBo6nEXK3M5/Ffh/FLpKExzOQ3JJoJGFKBw=="],
 

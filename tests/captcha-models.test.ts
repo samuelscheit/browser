@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_LLM_CAPTCHA_BASE_URL, DEFAULT_LLM_CAPTCHA_MODEL, llmCaptchaModels, proxiedFetch } from "@browser-fabric/worker-runtime";
+import { DEFAULT_LLM_CAPTCHA_BASE_URL, DEFAULT_LLM_CAPTCHA_MODELS, llmCaptchaModels, proxiedFetch } from "@browser-fabric/worker-runtime";
 import { captchaSolvingFromEnvironment } from "../apps/worker-manager/src/captcha-solver-factory";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,25 +22,27 @@ async function ask(model: unknown): Promise<void> {
 }
 
 describe("the CAPTCHA guardian's model", () => {
-  test("asks claude-opus-5-5 through the AI gateway's Messages API, with the key only in its header", async () => {
+  test("asks Opus, then Sonnet, then GPT through the AI gateway's Messages API, with the key only in its header", async () => {
     const { fetch, seen } = recordingFetch();
-    const [model, ...more] = llmCaptchaModels({ apiKey: "gateway-key", fetch });
-    expect(more).toHaveLength(0);
-    await ask(model);
-    expect(seen).toHaveLength(1);
-    expect(seen[0]!.url).toBe(`${DEFAULT_LLM_CAPTCHA_BASE_URL}/messages`);
-    expect(seen[0]!.headers["x-api-key"]).toBe("gateway-key");
-    expect(JSON.parse(seen[0]!.body).model).toBe(DEFAULT_LLM_CAPTCHA_MODEL);
-    expect(seen[0]!.body).not.toContain("gateway-key");
+    const models = llmCaptchaModels({ apiKey: "gateway-key", fetch });
+    for (const model of models) await ask(model);
+    expect(seen.map(({ body }) => JSON.parse(body).model)).toEqual(["claude-opus-5-5", "claude-sonnet-5-5", "gpt-5.5"]);
+    for (const request of seen) {
+      expect(request.url).toBe(`${DEFAULT_LLM_CAPTCHA_BASE_URL}/messages`);
+      expect(request.headers["x-api-key"]).toBe("gateway-key");
+      expect(request.body).not.toContain("gateway-key");
+    }
   });
 
-  test("takes base URL and model overrides; blank values keep the defaults", async () => {
+  test("takes a base URL and a comma-separated model list; blank values keep the defaults", async () => {
     const { fetch, seen } = recordingFetch();
-    await ask(llmCaptchaModels({ apiKey: "k", baseURL: "https://gateway.example/v1", model: "other-model", fetch })[0]);
-    await ask(llmCaptchaModels({ apiKey: "k", baseURL: " ", model: "", fetch })[0]);
+    for (const model of llmCaptchaModels({ apiKey: "k", baseURL: "https://gateway.example/v1", models: " one-model , ,other-model", fetch })) await ask(model);
+    expect(llmCaptchaModels({ apiKey: "k", baseURL: " ", models: " , ", fetch })).toHaveLength(DEFAULT_LLM_CAPTCHA_MODELS.length);
+    await ask(llmCaptchaModels({ apiKey: "k", baseURL: " ", models: "", fetch })[0]);
     expect(seen.map(({ url, body }) => [url, JSON.parse(body).model])).toEqual([
+      ["https://gateway.example/v1/messages", "one-model"],
       ["https://gateway.example/v1/messages", "other-model"],
-      [`${DEFAULT_LLM_CAPTCHA_BASE_URL}/messages`, DEFAULT_LLM_CAPTCHA_MODEL],
+      [`${DEFAULT_LLM_CAPTCHA_BASE_URL}/messages`, DEFAULT_LLM_CAPTCHA_MODELS[0]],
     ]);
   });
 
@@ -71,7 +73,7 @@ describe("the CAPTCHA guardian's model", () => {
       for (const file of ["placeholder", "key", "missing"]) {
         models.push((await captchaSolvingFromEnvironment("http://127.0.0.1:9", { FABRIC_LLM_CAPTCHA_API_KEY_FILE: join(directory, file) })).models.length);
       }
-      expect(models).toEqual([0, 1, 0]);
+      expect(models).toEqual([0, DEFAULT_LLM_CAPTCHA_MODELS.length, 0]);
       expect((await captchaSolvingFromEnvironment("http://127.0.0.1:9", {})).models).toEqual([]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
