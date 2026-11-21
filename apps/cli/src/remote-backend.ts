@@ -5,8 +5,6 @@ import { CdpConnection } from "@browser-fabric/worker-runtime";
 import type { BrowserBackend } from "./backend";
 import { basicAuthorization, type BrowserRequest, type Credentials } from "./config";
 
-export const DEFAULT_RECIPE = "recipe_chrome@1";
-export const DEFAULT_EGRESS = "egress_direct@1";
 const TERMINAL = new Set(["released", "cancelled", "failed", "timed_out"]);
 
 export function fabricClient(credentials: Credentials): BrowserFabricClient {
@@ -20,22 +18,42 @@ export async function fetchIdentity(credentials: Credentials): Promise<Principal
   return await response.json() as PrincipalCapabilities;
 }
 
+const refVersion = (ref: string): number => Number(/@(\d+)$/.exec(ref)?.[1] ?? 0);
+const newestFirst = (a: string, b: string): number => refVersion(b) - refVersion(a) || a.localeCompare(b);
+
+/** The account's default recipe: a headful (interactive) raw-CDP recipe the catalog offers, newest version first. */
+export function defaultRecipe(identity: PrincipalCapabilities): string {
+  const interactive = identity.recipes.filter((item) => item.access === "raw_cdp" && item.mode === "interactive").map((item) => item.ref).sort(newestFirst);
+  const [first] = interactive;
+  if (!first) throw new Error(`No interactive browser recipe is available to ${identity.principal}; pass --recipe. Available: ${identity.recipes.map((item) => item.ref).join(", ") || "none"}`);
+  return first;
+}
+
+/** The account's default egress: the plain `direct` policy (newest version), or the only policy when there is exactly one. */
+export function defaultEgress(identity: PrincipalCapabilities): string {
+  const direct = identity.egressPolicies.filter((ref) => /^egress_direct@\d+$/.test(ref)).sort(newestFirst)[0];
+  const only = identity.egressPolicies.length === 1 ? identity.egressPolicies[0] : undefined;
+  const chosen = direct ?? only;
+  if (!chosen) throw new Error(`No default egress policy for ${identity.principal}; pass --egress. Available: ${identity.egressPolicies.join(", ") || "none"}`);
+  return chosen;
+}
+
 /**
  * Pick what an agent almost always wants: its only project, that project's persistent interactive
- * profile (unless `--fresh`), and the interactive Chromium recipe. Every choice can be overridden.
+ * profile (unless `--fresh`), and the catalog's interactive recipe and direct egress. Every choice can be overridden.
  */
 export function sessionInput(identity: PrincipalCapabilities, request: BrowserRequest): BrowserSessionCreateInput {
   const project = request.project ?? (identity.projects.length === 1 ? identity.projects[0]!.id : undefined);
   if (!project) throw new Error(`${identity.principal} can use several projects (${identity.projects.map((item) => item.id).join(", ")}); pass --project.`);
   if (!identity.projects.some((item) => item.id === project)) throw new Error(`${identity.principal} has no access to ${project}.`);
-  const recipe = request.recipe ?? DEFAULT_RECIPE;
+  const recipe = request.recipe ?? defaultRecipe(identity);
   const recipeDefinition = identity.recipes.find((item) => item.ref === recipe);
   if (!recipeDefinition) throw new Error(`Unknown recipe ${recipe}. Available: ${identity.recipes.map((item) => item.ref).join(", ")}`);
   if (recipeDefinition.access !== "raw_cdp") throw new Error(`${recipe} is a typed-job recipe; fabric needs a raw CDP recipe.`);
   const profile = request.fresh ? undefined : request.profile ?? identity.profiles.find((item) =>
     item.status === "active" && item.profileFamily === recipeDefinition.profileFamily && (item.ownerProject === project || item.grants.some((grant) => grant === project)))?.ref;
   if (profile && !identity.profiles.some((item) => item.ref === profile)) throw new Error(`Unknown profile ${profile}. Available: ${identity.profiles.map((item) => item.ref).join(", ") || "none"}`);
-  const egress = request.egress ?? DEFAULT_EGRESS;
+  const egress = request.egress ?? defaultEgress(identity);
   if (!identity.egressPolicies.some((policy) => policy === egress)) throw new Error(`Unknown egress policy ${egress}. Available: ${identity.egressPolicies.join(", ")}`);
   const artifactPolicy = identity.artifactPolicies[0];
   if (!artifactPolicy) throw new Error("Fabric reports no artifact policy");

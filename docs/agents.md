@@ -184,5 +184,5 @@ Everything the CLI does is plain Fabric API: `GET /v1/me` lists the projects, pr
 policies the caller may use, `POST /v1/browser-sessions` (with an `Idempotency-Key` header) starts a
 session, and its `cdpEndpoint` accepts a browser-level CDP WebSocket with the same Basic credential.
 The Basic username is the principal ID, e.g. `principal_agent`. `fabric up --remote` defaults to
-`recipe_chrome@1` (headful), `egress_direct@1` and the matching profile `GET /v1/me` offers;
+the catalog's interactive (headful) recipe, its `direct` egress and the matching profile `GET /v1/me` offers;
 `--project`, `--profile`, `--recipe` and `--egress` select others.

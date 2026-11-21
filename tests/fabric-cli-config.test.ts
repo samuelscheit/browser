@@ -8,7 +8,7 @@ import { choosePort } from "../apps/cli/src/commands";
 import { assertName, basicAuthorization, listStates, loadCredentials, normalizeApiUrl, normalizeUsername, readState, saveCredentials, writeState } from "../apps/cli/src/config";
 import { parseDevToolsActivePort } from "../apps/cli/src/devtools-active-port";
 import { chromeArguments } from "../apps/cli/src/launched-chrome-backend";
-import { DEFAULT_EGRESS, DEFAULT_RECIPE, sessionInput } from "../apps/cli/src/remote-backend";
+import { defaultEgress, defaultRecipe, fetchIdentity, sessionInput } from "../apps/cli/src/remote-backend";
 import { agentIdentity, remoteRequest } from "./support/fabric-identity";
 
 let home: string;
@@ -108,8 +108,8 @@ describe("remote session defaults", () => {
   test("pick the only project, its interactive profile, the interactive recipe and eight CDP clients", () => {
     const input = sessionInput(agentIdentity(), remoteRequest({ ttlSeconds: 3600 }));
     expect(input).toMatchObject({
-      project: "project_agent", runtime: "chrome", browserRecipeRef: DEFAULT_RECIPE, profileRef: "profile_agent",
-      leaseMode: "interactive", egressPolicyRef: DEFAULT_EGRESS, artifactPolicyRef: "artifact-policy_standard-30-days@1",
+      project: "project_agent", runtime: "chrome", browserRecipeRef: "recipe_chrome@1", profileRef: "profile_agent",
+      leaseMode: "interactive", egressPolicyRef: "egress_direct@1", artifactPolicyRef: "artifact-policy_standard-30-days@1",
       ttlSeconds: 3600, maxExternalConnections: 8, metadata: { client: "fabric-cli", name: "remote" },
     });
     expect(input.idempotencyKey).toMatch(/^fabric-cli-[0-9a-f-]{36}$/);
@@ -131,6 +131,37 @@ describe("remote session defaults", () => {
     identity.projects.push({ id: "project_example", name: "Example" } as never);
     expect(sessionInput(identity, remoteRequest({ project: "project_example", recipe: "recipe_example-kiosk@1" })).profileRef).toBe("profile_example_kiosk" as never);
     expect(sessionInput(identity, remoteRequest({ project: "project_example" })).profileRef).toBeUndefined();
+  });
+
+  test("defaults follow the catalog, not hardcoded refs", () => {
+    const renamed = agentIdentity();
+    renamed.recipes = [
+      { ref: "recipe_chrome-headless@2", runtime: "chrome", mode: "headless", access: "raw_cdp", profileFamily: "default" },
+      { ref: "recipe_chrome@2", runtime: "chrome", mode: "interactive", access: "raw_cdp", profileFamily: "default" },
+      { ref: "recipe_chrome@10", runtime: "chrome", mode: "interactive", access: "raw_cdp", profileFamily: "default" },
+    ] as never;
+    renamed.egressPolicies = ["egress_tor@1", "egress_direct@3", "egress_direct@12"] as never;
+    expect(defaultRecipe(renamed)).toBe("recipe_chrome@10");
+    expect(defaultEgress(renamed)).toBe("egress_direct@12");
+    expect(sessionInput(renamed, remoteRequest())).toMatchObject({ browserRecipeRef: "recipe_chrome@10", egressPolicyRef: "egress_direct@12" });
+  });
+
+  test("a catalog without an interactive recipe or a direct egress fails listing what exists; explicit flags win", () => {
+    const identity = agentIdentity();
+    identity.recipes = identity.recipes.filter((item) => item.mode !== "interactive");
+    expect(() => sessionInput(identity, remoteRequest())).toThrow(/No interactive browser recipe.*pass --recipe. Available: recipe_example-fetch@1/);
+    identity.recipes = [{ ref: "recipe_chrome-headless@1", runtime: "chrome", mode: "headless", access: "raw_cdp", profileFamily: "default" }] as never;
+    expect(sessionInput(identity, remoteRequest({ recipe: "recipe_chrome-headless@1" })).browserRecipeRef).toBe("recipe_chrome-headless@1" as never);
+    identity.egressPolicies = ["egress_tor@1", "egress_other@1"] as never;
+    expect(() => defaultEgress(identity)).toThrow(/pass --egress. Available: egress_tor@1, egress_other@1/);
+    identity.egressPolicies = [] as never;
+    expect(() => defaultEgress(identity)).toThrow(/Available: none/);
+    identity.egressPolicies = ["egress_tor@1"] as never;
+    expect(defaultEgress(identity)).toBe("egress_tor@1");
+  });
+
+  test("an unreachable Fabric rejects instead of guessing defaults", async () => {
+    await expect(fetchIdentity({ url: "http://127.0.0.1:1/v1", username: "principal_agent", password: "x" })).rejects.toThrow();
   });
 
   test("several projects require --project", () => {
