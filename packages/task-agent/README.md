@@ -58,7 +58,8 @@ Lower-level pieces are exported too: `TaskBrowser` (tab and frame sessions), `ob
 **Its own tab.** The agent creates a tab with `Target.createTarget` and closes it (and any popups it
 opened) at the end. Popups (`target=_blank`, `window.open`) become the active tab; when one closes,
 the agent returns to the previous tab. JavaScript dialogs are accepted (prompts dismissed) and
-reported to the model, and native file choosers are intercepted.
+reported to the model, and native file choosers are intercepted (in out-of-process frames too):
+`upload` answers the one its click opens, any other is closed without files and reported.
 
 **Observation.** Each step the agent reads every frame of the tab: same-process frames through the
 page's own session, out-of-process iframes (cross-site, via `Target.setAutoAttach`) through theirs,
@@ -88,7 +89,9 @@ and reports a failure. Only a page's own distorted-text or arithmetic CAPTCHA ma
 
 **Actions** (the model's tools): `navigate` (http/https only), `back`, `click`, `type` (replace or
 append, optional Enter), `select` (native `<select>`), `press` (keys and chords), `scroll` (page or
-inside an element), `upload`, `wait` (for text or time; returns early when a CAPTCHA being solved
+inside an element), `upload` (to a file input, or to the control that opens one: an "Add file"
+button or a drop area, which it clicks and whose file chooser it answers; a file input styled out of
+sight is listed by its visible label or the area holding it), `wait` (for text or time; returns early when a CAPTCHA being solved
 ends solved or failed), `extract` (answers a question from the
 whole page text in a separate model call), and the terminal `done`, `fail` and `needs_input`.
 Clicks are trusted input: the element is scrolled into view (and its frames in their parents), its

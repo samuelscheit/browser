@@ -65,7 +65,7 @@ export function taskTools(options: { resultSchema?: JsonSchema; uploads: boolean
   if (options.uploads) {
     tools.splice(tools.findIndex((tool) => tool.name === "scroll"), 0, {
       name: "upload",
-      description: "Attach local files to a file input (only files in the allowed upload directories).",
+      description: "Attach local files (only files in the allowed upload directories) to a file field: its file input, or the control that opens its file picker (an \"Add file\" button or link, a drop area), which upload clicks.",
       parameters: { type: "object", properties: { ref: REF, path: { type: "string" }, paths: { type: "array", items: { type: "string" } } }, required: ["ref"] },
     });
   }

@@ -190,12 +190,44 @@ export function snapshotFrame(options: SnapshotScriptOptions): RawFrameSnapshot 
     return visible(control, control.getBoundingClientRect()) ? undefined : control;
   };
 
+  const parentOf = (element: Element): Element | null => element.parentElement ?? ((element.getRootNode() as ShadowRoot).host ?? null);
+
+  /**
+   * A file input styled out of sight (transparent over a drop area, display:none behind an "Add
+   * file" button, moved offscreen) stands for what a person sees in its place: its visible label,
+   * or the nearest visible element holding it and no other file input.
+   */
+  const fileStandIn = (input: HTMLInputElement): Element | undefined => {
+    const label = Array.from(input.labels ?? []).find((candidate) => visible(candidate, candidate.getBoundingClientRect()));
+    if (label) return label;
+    let holder = parentOf(input);
+    for (let level = 0; holder && level < 3 && holder !== document.body && holder !== document.documentElement; level++) {
+      if (holder.querySelectorAll("input[type=file]").length > 1) return undefined;
+      if (visible(holder, holder.getBoundingClientRect())) return holder;
+      holder = parentOf(holder);
+    }
+    return undefined;
+  };
+
   /** Walk in composed pre-order; returns whether the subtree holds a real (non-"clickable") control. */
   const walk = (root: Document | ShadowRoot | Element, pointerParent: boolean): boolean => {
     let holdsControl = false;
     for (const child of Array.from(root.children)) {
       if (++visited > MAX_VISITED) return holdsControl;
       if ((child as HTMLElement).inert) continue;
+      // Listed as itself, so upload can set it, but named and placed by its stand-in.
+      if (child.localName === "input" && (child as HTMLInputElement).type === "file" && !visible(child, child.getBoundingClientRect())) {
+        const standIn = fileStandIn(child as HTMLInputElement);
+        if (standIn) {
+          const described = describe(child, "file-input");
+          // A shadow host's innerText leaves out its shadow root, where its visible text is.
+          const shown = clean((standIn as HTMLElement).innerText || standIn.shadowRoot?.textContent, 100);
+          const name = standIn.localName === "label" ? described.name : shown || described.name;
+          candidates.push({ id: refOf(child), ...described, name, distance: distanceOf(standIn.getBoundingClientRect()) });
+          holdsControl = true;
+        }
+        continue;
+      }
       // Prune display:none subtrees (no descendant can render). A display:contents element has
       // no box of its own, so checkVisibility() is false while its children render: walk through it.
       const contents = !child.checkVisibility();

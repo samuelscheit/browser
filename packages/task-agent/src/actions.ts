@@ -1,4 +1,4 @@
-import type { ResolvedRef, TaskBrowser } from "./browser";
+import type { FileChooser, ResolvedRef, TaskBrowser } from "./browser";
 import { parseChord } from "./keys";
 import { captchaStatus, pageText, type CaptchaStatus } from "./observation";
 import { assignValue, callExpression, chooseOptions, coveringElement, editKind, scrollDocument, scrollState, selectContents } from "./page-script";
@@ -77,6 +77,20 @@ async function clickRef(context: ActionContext, ref: ResolvedRef, force: boolean
     if (cover) throw new ActionError(`the element is covered by ${cover}; close or scroll past it first (or click with force=true)`);
   }
   await mouseClick(context, page);
+}
+
+/** How long a click on an attachment control has to open its file chooser. */
+const FILE_CHOOSER_WAIT_MS = 2_000;
+
+/**
+ * The file chooser a click on the element opens: an "Add file" button, a drop area, a label, or
+ * the transparent input laid over one. Many forms keep their file input hidden (or create it on
+ * demand) and open it from such a control, as a person's click would.
+ */
+async function chooserOf(context: ActionContext, ref: string, resolved: ResolvedRef): Promise<FileChooser> {
+  const chooser = await context.browser.expectFileChooser(() => clickRef(context, resolved, false), FILE_CHOOSER_WAIT_MS);
+  if (!chooser) throw new ActionError(`${ref} is not a file input, and clicking it opened no file chooser`);
+  return chooser;
 }
 
 async function pressChord(context: ActionContext, chord: string): Promise<void> {
@@ -238,8 +252,16 @@ export const ACTIONS: Record<string, (context: ActionContext, args: Args) => Pro
       }
     });
     const resolved = await context.browser.resolveRef(ref);
-    if (await context.browser.callOn<string>(resolved, editKind) !== "file") throw new ActionError(`${ref} is not a file input`);
-    await context.browser.send("DOM.setFileInputFiles", { files, objectId: resolved.objectId }, resolved.session.sessionId);
+    if (await context.browser.callOn<string>(resolved, editKind) === "file") {
+      if (files.length > 1 && !await context.browser.callOn<boolean>(resolved, function (this: HTMLInputElement) { return this.multiple; })) {
+        throw new ActionError(`${ref} accepts one file`);
+      }
+      await context.browser.send("DOM.setFileInputFiles", { files, objectId: resolved.objectId }, resolved.session.sessionId);
+    } else {
+      const chooser = await chooserOf(context, ref, resolved);
+      if (files.length > 1 && chooser.mode !== "selectMultiple") throw new ActionError(`the file chooser ${ref} opens accepts one file`);
+      await context.browser.send("DOM.setFileInputFiles", { files, backendNodeId: chooser.backendNodeId }, chooser.sessionId);
+    }
     await context.browser.settle();
     return `attached ${files.map((file) => file.split(/[\\/]/).pop()).join(", ")} to ${ref}`;
   },

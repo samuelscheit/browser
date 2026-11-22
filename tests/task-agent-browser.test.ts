@@ -11,6 +11,7 @@ let site: FixtureSite;
 let browser: TaskBrowser | undefined;
 const uploadRoot = mkdtempSync(join(tmpdir(), "task-agent-upload-"));
 writeFileSync(join(uploadRoot, "resume.txt"), "hello upload");
+writeFileSync(join(uploadRoot, "shot.png"), "png bytes");
 const outsideFile = join(mkdtempSync(join(tmpdir(), "task-agent-outside-")), "secret.txt");
 writeFileSync(outsideFile, "nope");
 
@@ -244,10 +245,58 @@ describe.skipIf(!executable)("actions (real Chromium)", () => {
     expect(await pageLog(context)).toBe("files resume.txt:12\n");
     await expect(ACTIONS.upload!(context, { ref: input, path: outsideFile })).rejects.toThrow("outside the allowed directories");
     await expect(ACTIONS.upload!(context, { ref: input, path: "../etc/passwd" })).rejects.toThrow();
-    await expect(ACTIONS.upload!(context, { ref: ref(observation, "\"Count\""), path: "resume.txt" })).rejects.toThrow("is not a file input");
+    await expect(ACTIONS.upload!(context, { ref: ref(observation, "\"Count\""), path: "resume.txt" })).rejects.toThrow("is not a file input, and clicking it opened no file chooser");
     const disabled: ActionContext = { ...context, uploads: new UploadPolicy() };
     await expect(ACTIONS.upload!(disabled, { ref: input, path: "resume.txt" })).rejects.toThrow("file uploads are disabled");
     expect((await look(context)).text).toContain("file-input \"Attachment\" value=\"resume.txt\"");
+  });
+
+  test("file inputs out of sight are listed by their label or the area holding them", async () => {
+    const context = await open("/attachments");
+    const lines = elementLines((await look(context)).text).map((line) => line.replace(/^\[e\d+\] /, ""));
+    // Zendesk's transparent input by its label, the shadow root's display:none input by its
+    // component, the hidden single input by the paragraph holding it; dropzone.js's input sits in
+    // <body> with no label, so only its area is listed.
+    expect(lines.filter((line) => line.startsWith("file-input"))).toEqual([
+      "file-input \"Attachments (optional)\"",
+      "file-input \"Choose screenshots\"",
+      "file-input \"Attach one\"",
+    ]);
+    expect(lines).toContain("clickable \"Drop files here or click to upload\"");
+  });
+
+  test("upload sets a listed hidden input, or clicks a control and answers the file chooser it opens", async () => {
+    const context = await open("/attachments");
+    const observation = await look(context);
+    expect(await ACTIONS.upload!(context, { ref: ref(observation, "file-input \"Attachments"), paths: ["resume.txt", "shot.png"] })).toContain("attached resume.txt, shot.png");
+    expect(await ACTIONS.upload!(context, { ref: ref(observation, "Drop files here or click to upload"), paths: ["resume.txt", "shot.png"] })).toContain("attached resume.txt, shot.png");
+    expect(await ACTIONS.upload!(context, { ref: ref(observation, "button \"Choose screenshots\""), path: "shot.png" })).toContain("attached shot.png");
+    expect(await ACTIONS.upload!(context, { ref: ref(observation, "button \"Attach one\""), path: "resume.txt" })).toContain("attached resume.txt");
+    expect(await ACTIONS.upload!(context, { ref: ref(observation, "file-input \"Attach one\""), path: "shot.png" })).toContain("attached shot.png");
+    expect(await pageLog(context)).toBe("zendesk resume.txt:12,shot.png:9\ndropzone resume.txt:12,shot.png:9\nshadow shot.png:9\nsingle resume.txt:12\nsingle shot.png:9\n");
+    // Several files for a single-file input or chooser, and a control that opens none, are refused.
+    await expect(ACTIONS.upload!(context, { ref: ref(observation, "file-input \"Attach one\""), paths: ["resume.txt", "shot.png"] })).rejects.toThrow("accepts one file");
+    await expect(ACTIONS.upload!(context, { ref: ref(observation, "button \"Attach one\""), paths: ["resume.txt", "shot.png"] })).rejects.toThrow("accepts one file");
+    await expect(ACTIONS.upload!(context, { ref: ref(observation, "Plain button"), path: "resume.txt" })).rejects.toThrow("clicking it opened no file chooser");
+    expect(await pageLog(context)).toEndWith("single shot.png:9\nplain clicked\n");
+    // A refused chooser does not block the next one.
+    expect(await ACTIONS.upload!(context, { ref: ref(observation, "button \"Attach one\""), path: "resume.txt" })).toContain("attached resume.txt");
+    expect(await pageLog(context)).toEndWith("plain clicked\nsingle resume.txt:12\n");
+    // A chooser a plain click opens is closed without files, and the agent is told how to attach.
+    context.browser.drainNotices();
+    await ACTIONS.click!(context, { ref: ref(observation, "button \"Attach one\"") });
+    expect(context.browser.drainNotices()).toEqual(["A file chooser opened and was closed without files; to attach files, use upload on the control you clicked."]);
+    expect(await ACTIONS.upload!(context, { ref: ref(observation, "button \"Attach one\""), path: "shot.png" })).toContain("attached shot.png");
+  });
+
+  test("upload answers the file chooser of an out-of-process frame", async () => {
+    const context = await open("/attachments-framed");
+    const observation = await look(context);
+    const area = ref(observation, "Drop files here or click to upload");
+    expect(area).toMatch(/^f\d+e\d+$/);
+    expect(await ACTIONS.upload!(context, { ref: area, path: "shot.png" })).toContain("attached shot.png");
+    const frame = context.browser.active.refFrames.get(Number(/^f(\d+)/.exec(area)![1]))!;
+    expect(await context.browser.evaluate<string>(frame.sessionId, frame.contextId, "document.getElementById('log').textContent")).toBe("dropzone shot.png:9\n");
   });
 
   test("wait for text, and time out when it never comes", async () => {

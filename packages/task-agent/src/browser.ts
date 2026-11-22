@@ -42,6 +42,13 @@ export interface ResolvedRef {
 
 export class StaleRefError extends Error {}
 
+/** A native file chooser the page opened (intercepted, so nothing is shown): the input it is for. */
+export interface FileChooser {
+  sessionId: string;
+  backendNodeId: number;
+  mode: "selectSingle" | "selectMultiple";
+}
+
 /** A page object handed to `callOn` by reference instead of by value. */
 export class RemoteObject {
   public constructor(public readonly objectId: string) {}
@@ -66,6 +73,8 @@ export class TaskBrowser {
   readonly #destroyed = new Map<string, () => void>();
   /** Targets being attached, before their tab is registered, and whether they were destroyed meanwhile. */
   readonly #attaching = new Map<string, { destroyed: boolean }>();
+  /** Who waits for the next file chooser (see `expectFileChooser`). */
+  #chooserWaiter: ((chooser: FileChooser) => void) | undefined;
   #active!: Tab;
   #unsubscribe: () => void;
 
@@ -122,10 +131,36 @@ export class TaskBrowser {
     if (tab.closed) return tab;
     this.#tabs.set(targetId, tab);
     await this.send("Page.enable", {}, sessionId);
-    // A native file dialog would block a headful browser: report it instead (upload sets files directly).
-    await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, sessionId).catch(() => undefined);
+    await this.#interceptFileChoosers(sessionId);
     await this.#autoAttach(sessionId);
     return tab;
+  }
+
+  /**
+   * A native file dialog would block a headful browser: Chrome reports it instead, to `upload`
+   * waiting for it or as a notice. Needs the Page domain enabled on the session.
+   */
+  async #interceptFileChoosers(sessionId: string): Promise<void> {
+    await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, sessionId).catch(() => undefined);
+  }
+
+  /**
+   * Run `action` (a click) and return the file chooser it opened, or undefined when none opened
+   * within `timeoutMs` (or the chooser was for no input element, as the File System Access picker).
+   */
+  public async expectFileChooser(action: () => Promise<unknown>, timeoutMs: number): Promise<FileChooser | undefined> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const opened = new Promise<FileChooser | undefined>((resolve) => {
+      this.#chooserWaiter = resolve;
+      timer = setTimeout(() => resolve(undefined), timeoutMs);
+    });
+    try {
+      await action();
+      return await opened;
+    } finally {
+      clearTimeout(timer);
+      this.#chooserWaiter = undefined;
+    }
   }
 
   async #autoAttach(sessionId: string): Promise<void> {
@@ -181,8 +216,19 @@ export class TaskBrowser {
         if (!tab || params.targetInfo?.type !== "iframe") return;
         const child: FrameSession = { sessionId: params.sessionId, targetId: params.targetInfo.targetId, parentSessionId: message.sessionId };
         tab.sessions.set(child.sessionId, child);
-        // Nested OOPIFs attach through their parent OOPIF.
-        this.#track(this.#autoAttach(child.sessionId));
+        // An OOPIF's file chooser is reported only to its own session. Nested OOPIFs attach through their parent OOPIF.
+        this.#track(this.send("Page.enable", {}, child.sessionId).catch(() => undefined)
+          .then(() => this.#interceptFileChoosers(child.sessionId))
+          .then(() => this.#autoAttach(child.sessionId)));
+        return;
+      }
+      case "Page.fileChooserOpened": {
+        if (!this.#tabOfSession(message.sessionId)) return;
+        const waiter = this.#chooserWaiter;
+        if (waiter && typeof params.backendNodeId === "number") {
+          this.#chooserWaiter = undefined;
+          waiter({ sessionId: message.sessionId, backendNodeId: params.backendNodeId, mode: params.mode === "selectMultiple" ? "selectMultiple" : "selectSingle" });
+        } else this.#notices.push("A file chooser opened and was closed without files; to attach files, use upload on the control you clicked.");
         return;
       }
       case "Target.detachedFromTarget": {
@@ -213,9 +259,6 @@ export class TaskBrowser {
         this.#notices.push(`A ${params.type} dialog said ${JSON.stringify(String(params.message ?? "").slice(0, 300))}; it was ${accept ? "accepted" : "dismissed"}.`);
         return;
       }
-      case "Page.fileChooserOpened":
-        this.#notices.push("A file chooser opened; use the upload tool on the file input instead.");
-        return;
     }
   }
 

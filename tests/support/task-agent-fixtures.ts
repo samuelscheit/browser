@@ -116,6 +116,40 @@ function routes(otherOrigin: string): Record<string, (request: Request, url: URL
 
     "/popup-target": () => html(page("Popup", `<h1>Popup page</h1><button onclick="window.close()">Close me</button>`)),
 
+    // File fields as real forms build them, none with a visible file input: Zendesk lays a
+    // transparent input over its drop area; dropzone.js appends a hidden input to <body> and opens
+    // it from the area; a web component keeps a display:none input in its shadow root behind a
+    // button; a single-file input hides behind its button.
+    "/attachments": () => html(page("Attachments", `
+      <style>.dropzone { position: relative; border: 1px dashed; padding: 12px; width: 360px; margin: 10px 0 } .dropzone input { position: absolute; inset: 0; opacity: 0; width: 100% }</style>
+      <label for="zendesk">Attachments (optional)</label>
+      <div class="dropzone"><input type="file" id="zendesk" multiple onchange="log('zendesk ' + names(this.files))"><span><a>Add file</a> or drop files here</span></div>
+      <div id="dz" style="border: 2px dashed; padding: 20px; width: 360px; cursor: pointer">Drop files here or click to upload</div>
+      <evidence-upload></evidence-upload>
+      <p><input type="file" id="single" hidden onchange="log('single ' + names(this.files))"><button type="button" onclick="document.getElementById('single').click()">Attach one</button></p>
+      <p><button type="button" onclick="log('plain clicked')">Plain button</button></p>
+      ${LOG_SCRIPT}
+      <script>
+        function names(files) { return Array.from(files).map((f) => f.name + ':' + f.size).join(','); }
+        const hidden = document.createElement('input');
+        hidden.type = 'file'; hidden.multiple = true;
+        hidden.style.cssText = 'visibility: hidden; position: absolute; top: 0; left: 0; height: 0; width: 0';
+        hidden.addEventListener('change', () => log('dropzone ' + names(hidden.files)));
+        document.body.append(hidden);
+        document.getElementById('dz').addEventListener('click', () => hidden.click());
+        customElements.define('evidence-upload', class extends HTMLElement {
+          connectedCallback() {
+            const root = this.attachShadow({ mode: 'open' });
+            root.innerHTML = '<input type="file" multiple style="display: none"><button type="button">Choose screenshots</button>';
+            const input = root.querySelector('input');
+            root.querySelector('button').addEventListener('click', () => input.click());
+            input.addEventListener('change', () => log('shadow ' + names(input.files)));
+          }
+        });
+      </script>`)),
+
+    "/attachments-framed": () => html(page("Framed attachments", `<iframe src="${otherOrigin}/attachments" style="width:600px;height:500px"></iframe>`)),
+
     // Labels that wrap over two lines (as fonts and widths happen to make them): the center of
     // their bounding box lies between the line fragments, where a <select> sits. The custom
     // checkbox is visually hidden, so its label is what gets clicked.
