@@ -199,5 +199,36 @@ describe("PostgreSQL state projection", () => {
     const replayed = await api.transact((draft) => draft.idempotency.get(replayKey)?.responseId);
     expect(replayed as string | undefined).toBe("browser-session_a");
     expect(client.take("INSERT INTO fabric_idempotency")).toHaveLength(0);
+    expect(client.take("INSERT INTO fabric_state_snapshots")).toHaveLength(0);
+    expect(client.take("INSERT INTO fabric_capacity")).toHaveLength(0);
+  });
+
+  test("skips snapshot and projection writes when a transaction makes no state changes", async () => {
+    const client = new RecordingSqlClient();
+    const store = new PostgresFabricStore(client, "-- schema");
+    await store.transact((draft) => {
+      draft.sessions.set("browser-session_a", session("browser-session_a", "queued"));
+    });
+    expect(client.take("INSERT INTO fabric_state_snapshots")).toHaveLength(1);
+
+    client.statements = [];
+    const outcome = await store.transact((draft) => draft.sessions.size);
+    expect(outcome).toBe(1);
+    expect(client.take("INSERT INTO")).toHaveLength(0);
+    expect(client.take("DELETE FROM")).toHaveLength(0);
+    expect(client.take("UPDATE ")).toHaveLength(0);
+  });
+
+  test("prunes snapshots older than the retention window every prune interval", async () => {
+    const client = new RecordingSqlClient();
+    const store = new PostgresFabricStore(client, "-- schema");
+    for (let i = 1; i <= 125; i++) {
+      await store.transact((draft) => {
+        draft.eventSequence = i;
+      });
+    }
+    const prunes = client.take("DELETE FROM fabric_state_snapshots WHERE sequence < $1");
+    expect(prunes).toEqual([[25]]);
   });
 });
+

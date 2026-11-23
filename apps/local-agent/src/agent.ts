@@ -181,7 +181,7 @@ export class WorkerHeartbeatAgent {
   public constructor(options: { worker: Worker; transport: LocalAgentTransport; intervalMs?: number }) {
     this.#worker = options.worker;
     this.#transport = options.transport;
-    this.#intervalMs = Math.max(250, Math.min(30_000, options.intervalMs ?? 2_000));
+    this.#intervalMs = Math.max(250, Math.min(30_000, options.intervalMs ?? 10_000));
   }
 
   public async start(): Promise<void> {

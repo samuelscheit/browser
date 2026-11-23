@@ -28,8 +28,8 @@ import { Mutex } from "./mutex";
 // state forever makes heartbeat-heavy deployments grow without bound and eventually blocks the
 // control plane on multi-gigabyte snapshot scans. Retain a bounded recent window and keep the
 // normalized tables/events as the queryable history.
-const STATE_SNAPSHOT_RETENTION = 1_000;
-const STATE_SNAPSHOT_PRUNE_INTERVAL = 100;
+const STATE_SNAPSHOT_RETENTION = 100;
+const STATE_SNAPSHOT_PRUNE_INTERVAL = 25;
 
 // Only browser-session and job events are served from the hot state (the per-subject event
 // APIs). Worker and profile events are durable telemetry: they are appended to fabric_events
@@ -277,7 +277,11 @@ export class PostgresFabricStore extends InMemoryFabricStore {
         const projectionBase = cloneState(this.state);
         const draft = cloneState(this.state);
         const result = await operation(draft);
-        await this.persistNormalizedProjection(draft, transaction, projectionBase);
+        // Idle scheduler recover/dispatch ticks and idempotent replays frequently leave state
+        // unchanged; skip the normalized upserts and ~1 MB JSONB snapshot insert on no-ops.
+        if (!isDeepStrictEqual(draft, projectionBase)) {
+          await this.persistNormalizedProjection(draft, transaction, projectionBase);
+        }
         this.state = draft;
         return result;
       };
