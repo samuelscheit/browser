@@ -46,6 +46,25 @@ export interface TaskResult {
   usage: TokenUsage;
 }
 
+/**
+ * Lets whoever runs a task pause it and talk to it between model turns, for example while a person
+ * drives the same tab by hand.
+ */
+export interface TaskSteering {
+  /**
+   * Awaited before every model turn: resolves once the task may go on, with notes for the model
+   * (what happened meanwhile, new instructions). Notes reach the model with a fresh observation.
+   * Time spent here does not count against `timeoutMs`.
+   */
+  checkpoint(signal: AbortSignal): Promise<readonly string[]>;
+  /**
+   * The signal of the turn that is about to start; once it aborts, the turn ends early: an
+   * unanswered model call is dropped without using a step, actions not yet run are skipped, and
+   * the next checkpoint follows.
+   */
+  turn(): AbortSignal;
+}
+
 export interface RunTaskOptions {
   /** Browser-level CDP endpoint: http(s)://host:port or ws(s)://…/devtools/browser/…. */
   cdpEndpoint?: string;
@@ -83,6 +102,38 @@ export interface RunTaskOptions {
   maxActionsPerStep?: number;
   /** Output tokens per model turn (default 4096). */
   maxTokens?: number;
+  /** Pause the task and give it notes between model turns. */
+  steering?: TaskSteering;
+}
+
+/** A timeout whose clock can be stopped and started again. */
+function pausableTimeout(ms: number) {
+  const controller = new AbortController();
+  let remaining = ms;
+  let startedAt = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const run = () => {
+    startedAt = Date.now();
+    timer = setTimeout(() => controller.abort(new DOMException(`timed out after ${ms} ms`, "TimeoutError")), remaining);
+    (timer as { unref?: () => void }).unref?.();
+  };
+  run();
+  return {
+    signal: controller.signal,
+    pause() {
+      if (!timer) return;
+      clearTimeout(timer);
+      timer = undefined;
+      remaining = Math.max(0, remaining - (Date.now() - startedAt));
+    },
+    resume() {
+      if (!timer && !controller.signal.aborted) run();
+    },
+    clear() {
+      clearTimeout(timer);
+      timer = undefined;
+    },
+  };
 }
 
 const EXTRACT_SYSTEM = "You answer a question using only the given web page content. Be precise and concise; quote exact values (numbers, names, versions). If the content does not contain the answer, say so.";
@@ -117,8 +168,10 @@ export async function runTask(options: RunTaskOptions): Promise<TaskResult> {
   const window = options.historyWindow ?? 3;
   const observationOptions = { maxChars: options.observationChars ?? 12_000, screenshot: options.screenshots ?? false };
   const maxActions = options.maxActionsPerStep ?? 6;
-  const timeout = AbortSignal.timeout(options.timeoutMs ?? 600_000);
+  const clock = pausableTimeout(options.timeoutMs ?? 600_000);
+  const timeout = clock.signal;
   const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
+  const steering = options.steering;
   const tools = taskTools({ uploads: uploads.enabled, ...(options.resultSchema ? { resultSchema: options.resultSchema } : {}) });
   const intro = taskIntro({ goal: options.goal, ...(options.startUrl ? { startUrl: options.startUrl } : {}), ...(options.resultSchema ? { resultSchema: options.resultSchema } : {}), secretNames: secrets.names, uploadDirs: uploads.directories, maxSteps });
 
@@ -163,19 +216,55 @@ export async function runTask(options: RunTaskOptions): Promise<TaskResult> {
     const context: ActionContext = { browser, secrets, uploads };
     if (options.startUrl) await abortable(ACTIONS.navigate!(context, { url: options.startUrl }), signal);
     let current = await observeNow();
-    const initial = current.parts;
+    let initial = current.parts;
     const history: HistoryStep[] = [];
 
+    /** Wait at the steering checkpoint; its notes and a fresh observation follow the newest message. */
+    const checkpoint = async () => {
+      if (!steering) return;
+      clock.pause();
+      let notes: readonly string[];
+      try {
+        notes = await abortable(steering.checkpoint(signal), signal);
+      } finally {
+        clock.resume();
+      }
+      if (!notes.length) return;
+      current = await observeNow();
+      const added = [text(`Notes from the person supervising this task:\n${notes.map((note) => `- ${note}`).join("\n")}`), ...current.parts];
+      const last = history.at(-1);
+      if (!last) {
+        initial = added;
+      } else if (last.followUp.role === "user") {
+        last.followUp.content = [...last.followUp.content.filter((part) => part.type === "text"), ...added];
+      } else {
+        const result = last.followUp.results.at(-1)!;
+        result.content = [...result.content.filter((part) => part.type === "text"), ...added];
+      }
+    };
+
     for (let step = 1; step <= maxSteps; step += 1) {
+      await checkpoint();
+      const turn = steering?.turn();
       const started = Date.now();
       const stepUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
-      const response = await model.complete({
-        system: SYSTEM_PROMPT,
-        messages: buildMessages(intro, initial, history, window),
-        tools,
-        maxTokens: options.maxTokens ?? 4_096,
-        signal,
-      });
+      let response: Awaited<ReturnType<ChatModel["complete"]>>;
+      try {
+        response = await model.complete({
+          system: SYSTEM_PROMPT,
+          messages: buildMessages(intro, initial, history, window),
+          tools,
+          maxTokens: options.maxTokens ?? 4_096,
+          signal: turn ? AbortSignal.any([signal, turn]) : signal,
+        });
+      } catch (error) {
+        // A turn cut short before the model answered uses no step.
+        if (turn?.aborted && !signal.aborted) {
+          step -= 1;
+          continue;
+        }
+        throw error;
+      }
       addUsage(stepUsage, response.usage);
       const acted = { url: current.observation.url, title: current.observation.title, ...(current.observation.captcha ? { captcha: current.observation.captcha } : {}) };
       const log: StepLog = { step, ...acted, thought: secrets.redact(response.text), actions: [], usage: stepUsage, durationMs: 0 };
@@ -203,6 +292,7 @@ export async function runTask(options: RunTaskOptions): Promise<TaskResult> {
       };
 
       for (const [index, call] of response.toolCalls.entries()) {
+        if (!skipReason && turn?.aborted) skipReason = "the turn was interrupted by the person supervising this task";
         if (skipReason || index >= maxActions) {
           respond(call, `not executed: ${skipReason ?? `at most ${maxActions} actions per step`}`, false);
           continue;
@@ -286,6 +376,7 @@ export async function runTask(options: RunTaskOptions): Promise<TaskResult> {
     if (options.signal?.aborted) return finish("failed", "Aborted.");
     return finish("failed", `Error: ${errorMessage(error)}`);
   } finally {
+    clock.clear();
     // Only tabs this run opened are closed; an existing `targetId` tab never is.
     await browser?.close(options.keepTab === true).catch(() => undefined);
   }

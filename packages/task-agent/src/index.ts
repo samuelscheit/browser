@@ -1,4 +1,4 @@
-export { runTask, type ActionLog, type RunTaskOptions, type StepLog, type TaskResult, type TaskStatus } from "./agent";
+export { runTask, type ActionLog, type RunTaskOptions, type StepLog, type TaskResult, type TaskStatus, type TaskSteering } from "./agent";
 export { TaskBrowser, type Tab } from "./browser";
 export { captchaLine, captchaStatus, observe, pageText, type CaptchaStatus, type Observation, type ObservationOptions } from "./observation";
 export { ACTIONS, type ActionContext } from "./actions";

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { LlmError, runTask, type ChatModel, type ChatRequest, type ChatResponse, type StepLog, type ToolCall } from "@browser-fabric/task-agent";
+import { LlmError, runTask, type ChatModel, type ChatRequest, type ChatResponse, type StepLog, type TaskSteering, type ToolCall } from "@browser-fabric/task-agent";
 import { chromiumExecutable as executable, launchChromium, type TestChromium } from "./support/chromium";
 import { PASSWORD, startFixtureSite, type FixtureSite } from "./support/task-agent-fixtures";
 
@@ -280,6 +280,107 @@ describe.skipIf(!executable)("runTask end to end (scripted model, real Chromium)
     // A tab the caller brought is never closed by the agent.
     expect(await pageTargets()).toContain(first.targetId!);
     await fetch(`${chromium.endpoint}/json/close/${first.targetId}`);
+  });
+
+  test("steering: a checkpoint holds the task without using its timeout, and its notes arrive with a fresh observation", async () => {
+    const checkpoints: number[] = [];
+    let turns = 0;
+    const steering: TaskSteering = {
+      checkpoint: async () => {
+        checkpoints.push(Date.now());
+        // The second checkpoint is a person driving for longer than the whole timeout.
+        if (checkpoints.length !== 2) return [];
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        return ["A person clicked Count twice.", "Now finish."];
+      },
+      turn: () => { turns += 1; return new AbortController().signal; },
+    };
+    const model = new ScriptedModel([
+      (request, page) => {
+        expect(requestText(request)).not.toContain("Notes from the person supervising this task");
+        return { calls: [{ name: "click", arguments: { ref: refIn(page, "\"Count\"") } }] };
+      },
+      (request, page) => {
+        const sent = requestText(request);
+        expect(sent).toContain("Notes from the person supervising this task:\\n- A person clicked Count twice.\\n- Now finish.");
+        // The notes come before the observation taken after them, which is the newest one.
+        expect(sent.lastIndexOf("Notes from the person")).toBeLessThan(sent.lastIndexOf("Current page:"));
+        expect(page).toStartWith("Current page:");
+        return { calls: [{ name: "done", arguments: { result: "ok", summary: "finished after the note" } }] };
+      },
+    ]);
+    const result = await runTask({ cdpEndpoint: chromium.endpoint, goal: "count", startUrl: `${site.origin}/counter`, model, steering, timeoutMs: 1_500 });
+    expect(result).toMatchObject({ status: "done", result: "ok" });
+    expect(result.steps).toHaveLength(2);
+    expect(checkpoints).toHaveLength(2);
+    expect(turns).toBe(2);
+  });
+
+  test("steering: notes before the first turn replace the first observation", async () => {
+    let first = true;
+    const steering: TaskSteering = {
+      checkpoint: async () => (first ? (first = false, ["Look at the counter."]) : []),
+      turn: () => new AbortController().signal,
+    };
+    const model = new ScriptedModel([(request) => {
+      const first = request.messages[0]!;
+      expect(first.role).toBe("user");
+      expect(JSON.stringify(first)).toContain("Look at the counter.");
+      expect(JSON.stringify(first).match(/Current page:/g)).toHaveLength(1);
+      return { calls: [{ name: "done", arguments: { result: "seen", summary: "s" } }] };
+    }]);
+    const result = await runTask({ cdpEndpoint: chromium.endpoint, goal: "look", startUrl: `${site.origin}/counter`, model, steering });
+    expect(result.status).toBe("done");
+  });
+
+  test("steering: an interrupted model call uses no step, and an interrupted turn skips the actions not yet run", async () => {
+    let interrupt = new AbortController();
+    let checkpoints = 0;
+    const steering: TaskSteering = {
+      checkpoint: async () => (checkpoints += 1, checkpoints === 2 ? ["The person is done."] : []),
+      turn: () => (interrupt = new AbortController()).signal,
+    };
+    const model = new ScriptedModel([
+      // The person takes over while the model is still thinking.
+      async (request) => {
+        setTimeout(() => interrupt.abort(), 50);
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, 10_000);
+          request.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(request.signal!.reason); });
+        });
+        return { calls: [] };
+      },
+      // Then while its actions run: the first click lands, the rest are skipped.
+      (request, page) => {
+        expect(requestText(request)).toContain("The person is done.");
+        const count = refIn(page, "\"Count\"");
+        setTimeout(() => interrupt.abort(), 0);
+        return { calls: [{ name: "click", arguments: { ref: count } }, { name: "click", arguments: { ref: count } }] };
+      },
+      () => ({ calls: [{ name: "done", arguments: { result: "ok", summary: "s" } }] }),
+    ]);
+    // Two steps are enough only because the interrupted call used none.
+    const result = await runTask({ cdpEndpoint: chromium.endpoint, goal: "count", startUrl: `${site.origin}/counter`, model, steering, maxSteps: 2 });
+    expect(result.status).toBe("done");
+    expect(result.steps).toHaveLength(2);
+    expect(result.steps[0]!.actions.map((action) => [action.tool, action.ok, action.output])).toEqual([
+      ["click", true, expect.stringMatching(/^clicked e\d+$/)],
+      ["click", false, "not executed: the turn was interrupted by the person supervising this task"],
+    ]);
+    expect(checkpoints).toBe(3);
+  });
+
+  test("steering: a caller abort ends a task waiting at its checkpoint", async () => {
+    const controller = new AbortController();
+    const steering: TaskSteering = {
+      checkpoint: (signal) => new Promise((_resolve, reject) => {
+        setTimeout(() => controller.abort(new Error("visit ended")), 50);
+        signal.addEventListener("abort", () => reject(signal.reason));
+      }),
+      turn: () => new AbortController().signal,
+    };
+    const result = await runTask({ cdpEndpoint: chromium.endpoint, goal: "wait", startUrl: `${site.origin}/counter`, model: new ScriptedModel([]), steering, signal: controller.signal });
+    expect(result).toMatchObject({ status: "failed", summary: "Aborted.", steps: [] });
   });
 
   test("an unreachable endpoint fails cleanly", async () => {

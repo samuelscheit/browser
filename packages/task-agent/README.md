@@ -44,6 +44,7 @@ const result = await runTask({
 | `observationChars` | 12000 | Character budget of one observation (~3k tokens). |
 | `maxActionsPerStep` | 6 | Actions executed from one model reply. |
 | `onStep` | — | Called with each `StepLog` as it completes. |
+| `steering` | — | `{ checkpoint(signal), turn() }`: `checkpoint` is awaited before every model turn (the timeout clock stops meanwhile) and returns notes the model gets with a fresh observation; aborting the signal `turn()` returned ends that turn early (an unanswered model call uses no step, actions not yet run are skipped). For a person driving the same tab by hand. |
 
 `TaskResult`: `status` (`done`, `failed`, `needs_input`, `step_limit`, `timeout`), `result` (for
 `done`), `summary`, `question` (for `needs_input`), `steps` (`StepLog[]`: url, title, the model's text,
