@@ -295,9 +295,9 @@ describe.skipIf(!executable)("runTask end to end (scripted model, real Chromium)
       checkpoint: async () => {
         checkpoints.push(Date.now());
         // The second checkpoint is a person driving for longer than the whole timeout.
-        if (checkpoints.length !== 2) return [];
+        if (checkpoints.length !== 2) return { notes: [] };
         await new Promise((resolve) => setTimeout(resolve, 2_000));
-        return ["A person clicked Count twice.", "Now finish."];
+        return { notes: ["A person clicked Count twice.", "Now finish."] };
       },
       turn: () => { turns += 1; return new AbortController().signal; },
     };
@@ -325,7 +325,7 @@ describe.skipIf(!executable)("runTask end to end (scripted model, real Chromium)
   test("steering: notes before the first turn replace the first observation", async () => {
     let first = true;
     const steering: TaskSteering = {
-      checkpoint: async () => (first ? (first = false, ["Look at the counter."]) : []),
+      checkpoint: async () => ({ notes: first ? (first = false, ["Look at the counter."]) : [] }),
       turn: () => new AbortController().signal,
     };
     const model = new ScriptedModel([(request) => {
@@ -343,7 +343,7 @@ describe.skipIf(!executable)("runTask end to end (scripted model, real Chromium)
     let interrupt = new AbortController();
     let checkpoints = 0;
     const steering: TaskSteering = {
-      checkpoint: async () => (checkpoints += 1, checkpoints === 2 ? ["The person is done."] : []),
+      checkpoint: async () => (checkpoints += 1, { notes: checkpoints === 2 ? ["The person is done."] : [] }),
       turn: () => (interrupt = new AbortController()).signal,
     };
     const model = new ScriptedModel([
@@ -374,6 +374,32 @@ describe.skipIf(!executable)("runTask end to end (scripted model, real Chromium)
       ["click", false, "not executed: the turn was interrupted by the person supervising this task"],
     ]);
     expect(checkpoints).toBe(3);
+  });
+
+  test("steering: a checkpoint that names another of the task's tabs moves the agent there; an unknown tab is ignored", async () => {
+    const opener = (await (await fetch(`${chromium.endpoint}/json/new?${site.origin}/counter`, { method: "PUT" })).json() as { id: string }).id;
+    let checkpoints = 0;
+    const steering: TaskSteering = {
+      // After the popup opened (the agent is in it), the person switched back to the counter tab.
+      checkpoint: async () => (checkpoints += 1, checkpoints === 2 ? { notes: ["I switched back to the first tab."], targetId: opener } : checkpoints === 3 ? { notes: [], targetId: "no-such-tab" } : { notes: [] }),
+      turn: () => new AbortController().signal,
+    };
+    const model = new ScriptedModel([
+      (_request, page) => ({ calls: [{ name: "click", arguments: { ref: refIn(page, "link \"Open popup\"") } }] }),
+      (_request, page) => {
+        expect(page).toContain("Counter");
+        expect(page).not.toContain("Popup page");
+        return { calls: [{ name: "scroll", arguments: { direction: "down" } }] };
+      },
+      (_request, page) => {
+        expect(page).toContain("Counter");
+        return { calls: [{ name: "done", arguments: { result: "back", summary: "s" } }] };
+      },
+    ]);
+    const result = await runTask({ cdpEndpoint: chromium.endpoint, goal: "tabs", targetId: opener, model, steering });
+    expect(result).toMatchObject({ status: "done", url: `${site.origin}/counter` });
+    expect(result.steps[0]!.actions[0]!.output).toContain("new tab");
+    await fetch(`${chromium.endpoint}/json/close/${opener}`);
   });
 
   test("steering: a caller abort ends a task waiting at its checkpoint", async () => {

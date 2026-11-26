@@ -102,6 +102,14 @@ export class TaskBrowser {
     return this.#active;
   }
 
+  /** Go on in another open tab of the task (someone switched to it); false when it is not one. */
+  public focus(targetId: string): boolean {
+    const tab = this.#tabs.get(targetId);
+    if (!tab || tab.closed) return false;
+    this.#active = tab;
+    return true;
+  }
+
   /** Events since the last call (dialogs handled, tabs opened or closed), for the next observation. */
   public drainNotices(): string[] {
     return this.#notices.splice(0);

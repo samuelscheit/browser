@@ -55,10 +55,11 @@ export interface TaskResult {
 export interface TaskSteering {
   /**
    * Awaited before every model turn: resolves once the task may go on, with notes for the model
-   * (what happened meanwhile, new instructions). Notes reach the model with a fresh observation.
+   * (what happened meanwhile, new instructions) and, when someone switched tabs meanwhile, the
+   * tab to go on in (one of the task's tabs). Notes reach the model with a fresh observation.
    * Time spent here does not count against `timeoutMs`.
    */
-  checkpoint(signal: AbortSignal): Promise<readonly string[]>;
+  checkpoint(signal: AbortSignal): Promise<{ notes: readonly string[]; targetId?: string }>;
   /**
    * The signal of the turn that is about to start; once it aborts, the turn ends early: an
    * unanswered model call is dropped without using a step, actions not yet run are skipped, and
@@ -225,12 +226,14 @@ export async function runTask(options: RunTaskOptions): Promise<TaskResult> {
     const checkpoint = async () => {
       if (!steering) return;
       clock.pause();
-      let notes: readonly string[];
+      let resumed: Awaited<ReturnType<TaskSteering["checkpoint"]>>;
       try {
-        notes = await abortable(steering.checkpoint(signal), signal);
+        resumed = await abortable(steering.checkpoint(signal), signal);
       } finally {
         clock.resume();
       }
+      const { notes } = resumed;
+      if (resumed.targetId && browser!.focus(resumed.targetId)) browser!.drainNotices();
       if (!notes.length) return;
       current = await observeNow();
       const added = [text(`Notes from the person supervising this task:\n${notes.map((note) => `- ${note}`).join("\n")}`), ...current.parts];
@@ -342,7 +345,7 @@ export async function runTask(options: RunTaskOptions): Promise<TaskResult> {
               system: EXTRACT_SYSTEM,
               messages: [{ role: "user", content: [text(`Question: ${question}\n\nPage: ${browser.active === tab ? current.observation.url : "(new tab)"}\n\nPage content:\n${content}`)] }],
               maxTokens: 2_000,
-              signal,
+              signal: turn ? AbortSignal.any([signal, turn]) : signal,
             });
             addUsage(stepUsage, answer.usage);
             output = answer.text || "(no answer)";
