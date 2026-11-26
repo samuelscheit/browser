@@ -123,6 +123,12 @@ describe.skipIf(!executable)("runTask end to end (scripted model, real Chromium)
     expect(login!.actions.map((action) => [action.tool, action.ok])).toEqual([["type", true], ["type", true], ["click", true]]);
     expect(login!.actions[1]!.args).toEqual({ ref: expect.any(String), text: "{{secret:PASSWORD}}" });
     expect(login!.actions[1]!.output).toContain("(secret entered)");
+    // Each action names the element its ref pointed at, as the observation showed it.
+    expect(login!.actions.map((action) => action.target)).toEqual(['textbox "Username"', 'textbox "Password"', 'button "Sign in"']);
+    expect(search!.actions[0]!.target).toBe('searchbox "Search catalog"');
+    expect(open!.actions[0]!.target).toBe('link "Red Widget"');
+    // Actions without a ref name no element.
+    expect(extract!.actions[0]!.target).toBeUndefined();
     expect(login!.actions[2]!.output).toContain("the page navigated");
     expect(search!.url).toBe(`${site.origin}/search`);
     expect(search!.actions[0]!.output).toContain("the page navigated");

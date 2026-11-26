@@ -15,6 +15,8 @@ export interface ActionLog {
   args: Record<string, unknown>;
   ok: boolean;
   output: string;
+  /** The element the action's `ref` named, as the observation showed it: role and accessible name (`textbox "Email"`), redacted. */
+  target?: string;
 }
 
 export interface StepLog {
@@ -288,7 +290,9 @@ export async function runTask(options: RunTaskOptions): Promise<TaskResult> {
       const respond = (call: ToolCall, output: string, ok: boolean) => {
         const redacted = secrets.redact(output);
         results.push({ toolCallId: call.id, name: call.name, content: [text(redacted)], ...(ok ? {} : { isError: true }) });
-        log.actions.push({ tool: call.name, args: secrets.redactValue(call.arguments), ok, output: redacted });
+        const ref = call.arguments.ref;
+        const target = typeof ref === "string" ? current.observation.targets.get(ref) : undefined;
+        log.actions.push({ tool: call.name, args: secrets.redactValue(call.arguments), ok, output: redacted, ...(target ? { target: secrets.redact(target) } : {}) });
       };
 
       for (const [index, call] of response.toolCalls.entries()) {

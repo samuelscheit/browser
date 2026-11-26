@@ -43,6 +43,8 @@ export interface Observation {
   captcha?: CaptchaStatus;
   /** Base64 JPEG of the viewport, when screenshots are on. */
   screenshot?: string;
+  /** Each ref of this observation (`e12`, `f1e3`) and its element as the model read it: role and accessible name. */
+  targets: ReadonlyMap<string, string>;
 }
 
 interface FrameEntry {
@@ -114,6 +116,14 @@ async function snapshotFrames(browser: TaskBrowser, tab: Tab, maxChars: number):
 }
 
 const quote = (text: string) => JSON.stringify(text);
+
+const MAX_TARGET_NAME = 120;
+
+/** The element as an action names it: its role and accessible name (`textbox "Email"`). */
+export function elementTarget(element: RawElement): string {
+  const name = element.name.length > MAX_TARGET_NAME ? `${element.name.slice(0, MAX_TARGET_NAME - 1)}…` : element.name;
+  return name ? `${element.role} ${quote(name)}` : element.role;
+}
 
 export function formatElement(prefix: string, element: RawElement): string {
   const parts = [`[${prefix}e${element.id}]`, element.role];
@@ -192,8 +202,9 @@ export async function observe(browser: TaskBrowser, options: ObservationOptions,
     screenshot = await browser.send("Page.captureScreenshot", { format: "jpeg", quality: 70 }, tab.sessionId, 15_000)
       .then((result) => result.data as string).catch(() => undefined);
   }
+  const targets = new Map(frames.flatMap((frame) => frame.snapshot.elements.map((element) => [`${frame.ordinal ? `f${frame.ordinal}` : ""}e${element.id}`, elementTarget(element)] as const)));
   return {
-    url, title, text: sections.join("\n"), elementCount: elements.shown, omittedElements: elements.omitted, frameCount: frames.length,
+    url, title, text: sections.join("\n"), elementCount: elements.shown, omittedElements: elements.omitted, frameCount: frames.length, targets,
     ...(captcha ? { captcha } : {}),
     ...(screenshot ? { screenshot } : {}),
   };
