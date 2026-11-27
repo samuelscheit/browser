@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Pool } from "pg";
 import type { BrowserSessionId, JobId, Principal, Worker } from "@browser-fabric/contracts";
-import { BrowserScheduler, CapabilitySigner, FakeClock, MemoryEphemeralInputVault, PgSqlClient, PostgresFabricStore, loadPostgresMigrations } from "@browser-fabric/control-plane";
+import { BrowserScheduler, CapabilitySigner, FakeClock, MemoryEphemeralInputVault, PgSqlClient, PostgresFabricStore, loadPostgresMigrations, serializeState } from "@browser-fabric/control-plane";
 import { exampleCatalog, TEST_PRINCIPAL, TEST_PROJECT, makeProfile, makeWorker } from "@browser-fabric/testkit";
 
 /**
@@ -44,8 +44,8 @@ suite("PostgreSQL store against a real server", () => {
   });
 
   /** A scheduler process on the shared database; a second call models a sibling/restarted replica. */
-  async function startProcess(clock: FakeClock): Promise<{ scheduler: BrowserScheduler; store: PostgresFabricStore }> {
-    const store = new PostgresFabricStore(PgSqlClient.fromPool(pool), schema, { now: () => clock.now().getTime() });
+  async function startProcess(clock: FakeClock, checkpointInterval?: number): Promise<{ scheduler: BrowserScheduler; store: PostgresFabricStore }> {
+    const store = new PostgresFabricStore(PgSqlClient.fromPool(pool), schema, { now: () => clock.now().getTime(), ...(checkpointInterval === undefined ? {} : { checkpointInterval }) });
     await store.initialize();
     const scheduler = new BrowserScheduler({ catalog: exampleCatalog,
       store,
@@ -177,5 +177,51 @@ suite("PostgreSQL store against a real server", () => {
     expect(jobs.find((job) => job.idempotencyKey === "complete")?.result).toMatchObject({ title: "browser", nested: { unicode: "Grüße" } });
     expect([...snapshot.sessions.values()].find((session) => session.idempotencyKey === "stale-session")).toMatchObject({ status: "timed_out", failureReason: "browser lease heartbeat expired" });
     expect(snapshot.activeBrowserLeases).toBe(0);
+  });
+
+  test("a ready session no client connects to is released by a sibling scheduler process after the grace", async () => {
+    const recovery = await startProcess(clock);
+    const common = { project: TEST_PROJECT, runtime: "chrome" as const, browserRecipeRef: "recipe_chrome-headless@1" as never, profileRef: exampleProfile as never, leaseMode: "writer" as const, egressPolicyRef: DIRECT, artifactPolicyRef: ARTIFACTS, ttlSeconds: 900 };
+    const abandoned = await scheduler.createBrowserSession({ ...common, idempotencyKey: "abandoned-session" }, TEST_PRINCIPAL);
+    // The recovery process caches the session while it is still allocating.
+    const leaseId = await dispatchAndClaim();
+    expect((await recovery.store.snapshot()).sessions.get(abandoned.id)?.status).toBe("allocating");
+    await scheduler.markLeaseStarted(leaseId as never, worker.id, workerActor);
+
+    const elapse = async (seconds: number) => {
+      for (let remaining = seconds; remaining > 0; remaining -= 10) {
+        clock.advance(10_000);
+        await scheduler.heartbeatWorker(worker.id, workerActor);
+        await scheduler.heartbeatLease(leaseId as never, worker.id, workerActor).catch(() => undefined);
+        await recovery.scheduler.recover();
+      }
+    };
+    await elapse(50);
+    expect((await sessionRow(abandoned.id)).status).toBe("ready");
+    await elapse(20);
+    expect((await sessionRow(abandoned.id)).status).toBe("released");
+    const { rows } = await pool.query("SELECT status FROM fabric_browser_leases WHERE id = $1", [leaseId]);
+    expect(rows[0]?.status).toBe("released");
+    expect((await scheduler.getSession(abandoned.id as BrowserSessionId, TEST_PRINCIPAL)).status).toBe("released");
+  });
+
+  test("the journal stays compact and a restarted process replays its checkpoint and deltas", async () => {
+    const busy = await startProcess(clock, 5);
+    for (let beat = 0; beat < 23; beat++) {
+      clock.advance(1_000);
+      await busy.scheduler.heartbeatWorker(worker.id, workerActor);
+    }
+    const checkpoints = await pool.query("SELECT sequence FROM fabric_state_snapshots");
+    expect(checkpoints.rows).toHaveLength(1);
+    const head = await pool.query("SELECT max(sequence)::int AS head, count(*)::int AS count FROM fabric_state_deltas");
+    expect(Number(checkpoints.rows[0].sequence) % 5).toBe(0);
+    expect(head.rows[0].count).toBeLessThanOrEqual(10);
+
+    const live = await busy.store.snapshot();
+    const restarted = await startProcess(clock, 5);
+    expect(serializeState(await restarted.store.snapshot())).toEqual(serializeState(live));
+    // The long-lived process from the first test caught up incrementally to the same state.
+    expect(serializeState(await scheduler.store.snapshot())).toEqual(serializeState(live));
+    expect(live.workers.get(worker.id)?.lastHeartbeatAt).toBe(clock.now().toISOString());
   });
 });

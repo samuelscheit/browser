@@ -29,6 +29,26 @@ describe("private API and CDP gateway boundary", () => {
     expect((await missingHeader.json()).code).toBe("validation_failed");
   });
 
+  test("every error response is a problem object, never an empty or null body", async () => {
+    const { scheduler } = await bootstrapTestScheduler();
+    const failing = new Proxy(scheduler, { get: (target, property) => property === "getSession" ? async () => { throw new TypeError("adapter exploded"); } : Reflect.get(target, property) });
+    const requests: Array<[ReturnType<typeof createApiFetch>, Request, number, string]> = [
+      [createApiFetch({ scheduler, authenticate: () => undefined }), new Request("https://fabric.test/v1/me"), 401, "authentication_required"],
+      [createApiFetch({ scheduler, authenticate: () => TEST_PRINCIPAL }), new Request("https://fabric.test/v1/nowhere"), 404, "not_found"],
+      [createApiFetch({ scheduler, authenticate: () => TEST_PRINCIPAL }), new Request("https://fabric.test/v1/browser-sessions/browser-session_missing"), 404, "not_found"],
+      [createApiFetch({ scheduler, authenticate: () => TEST_PRINCIPAL }), new Request("https://fabric.test/v1/browser-sessions", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "bad" }, body: "null" }), 400, "validation_failed"],
+      [createApiFetch({ scheduler: failing, authenticate: () => TEST_PRINCIPAL }), new Request("https://fabric.test/v1/browser-sessions/browser-session_any"), 500, "internal_error"],
+    ];
+    for (const [fetchApi, request, status, code] of requests) {
+      const response = await fetchApi(request);
+      expect(response.status).toBe(status);
+      expect(response.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
+      const body = await response.json();
+      expect(body).toMatchObject({ type: `https://browser-fabric.dev/problems/${code}`, status, code });
+      expect(typeof body.detail).toBe("string");
+    }
+  });
+
   test("does not retain the legacy plaintext input endpoint", async () => {
     const context = await bootstrapTestScheduler();
     const fetchApi = createApiFetch({ scheduler: context.scheduler, authenticate: () => TEST_PRINCIPAL });

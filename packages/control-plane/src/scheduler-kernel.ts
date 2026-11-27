@@ -4,7 +4,7 @@ import { CapabilitySigner } from "./capability";
 import type { Clock } from "./clock";
 import type { EphemeralInputVault } from "./ephemeral";
 import { assertDurablePayload, safeFailureReason } from "./security";
-import type { FabricState } from "./store";
+import type { FabricState } from "./state";
 
 const asDate = (iso: string) => new Date(iso).getTime();
 const now = (clock: Clock) => clock.now().toISOString();
@@ -21,7 +21,6 @@ export interface SchedulerKernelOptions {
   capabilitySigner: CapabilitySigner;
   recipes: RecipeRegistry;
   maxActiveBrowserLeases: number;
-  reconnectGraceSeconds: number;
   assignmentClaimTimeoutSeconds: number;
   ephemeralInputVault?: EphemeralInputVault;
 }
@@ -32,7 +31,6 @@ export class SchedulerKernel {
   readonly #capabilitySigner: CapabilitySigner;
   readonly #recipes: RecipeRegistry;
   readonly #maxActiveBrowserLeases: number;
-  readonly #reconnectGraceSeconds: number;
   readonly #assignmentClaimTimeoutSeconds: number;
   readonly #ephemeralInputVault?: EphemeralInputVault;
 
@@ -41,7 +39,6 @@ export class SchedulerKernel {
     this.#capabilitySigner = options.capabilitySigner;
     this.#recipes = options.recipes;
     this.#maxActiveBrowserLeases = options.maxActiveBrowserLeases;
-    this.#reconnectGraceSeconds = options.reconnectGraceSeconds;
     this.#assignmentClaimTimeoutSeconds = options.assignmentClaimTimeoutSeconds;
     this.#ephemeralInputVault = options.ephemeralInputVault;
   }

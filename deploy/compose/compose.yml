@@ -26,6 +26,7 @@ x-app-environment: &app-environment
   NODE_ENV: production
   FABRIC_GATEWAY_BASE_URL: ${FABRIC_GATEWAY_BASE_URL:?set FABRIC_GATEWAY_BASE_URL}
   FABRIC_MAX_ACTIVE_BROWSER_LEASES: ${FABRIC_MAX_ACTIVE_BROWSER_LEASES:-4}
+  FABRIC_CDP_CLIENT_GRACE_SECONDS: ${FABRIC_CDP_CLIENT_GRACE_SECONDS:-60}
   # The deployment's own recipes, egress policies, challenge sets and projects (docs/catalog.md).
   FABRIC_CATALOG_FILE: /etc/browser-fabric/catalog.json
 

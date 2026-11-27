@@ -45,7 +45,8 @@ import { CapabilitySigner } from "./capability";
 import { type Clock, SystemClock } from "./clock";
 import { EncryptedInputRouter, type EphemeralInputEnvelope, type EphemeralInputVault } from "./ephemeral";
 import { assertDurablePayload, safeFailureReason, scalarMetadata } from "./security";
-import { type FabricState, type FabricStore, InMemoryFabricStore, idempotencyKey } from "./store";
+import { type FabricState, idempotencyKey } from "./state";
+import { type FabricStore, InMemoryFabricStore } from "./store";
 import { SchedulerKernel } from "./scheduler-kernel";
 import { recoverSchedulerState } from "./scheduler-recovery";
 import { events, getJob, getSession, watchEvents } from "./scheduler-events";
@@ -58,7 +59,11 @@ export interface BrowserSchedulerOptions {
   /** The deployment's catalog (FABRIC_CATALOG_FILE): recipes, egress policies, challenge sets and projects added to the built-ins. */
   catalog?: FabricCatalog;
   maxActiveBrowserLeases?: number;
-  reconnectGraceSeconds?: number;
+  /**
+   * How long a ready session may have no CDP client, after it becomes ready and after its last
+   * client disconnects, before recovery releases it and frees its browser slot.
+   */
+  cdpClientGraceSeconds?: number;
   assignmentClaimTimeoutSeconds?: number;
   /** Production should inject a worker-local/E2E encrypted channel; memory is for local tests. */
   ephemeralInputVault?: EphemeralInputVault;
@@ -141,6 +146,9 @@ const safeArtifactObjectKey = /^[a-z0-9][a-z0-9/_\-.]{0,511}$/;
 // control-plane replica. Accept a small, bounded clock skew while still preventing a caller from
 // stretching the immutable 30-day policy into an arbitrary retention period.
 const ARTIFACT_EXPIRY_CLOCK_SKEW_MS = 5 * 60_000;
+export const DEFAULT_CDP_CLIENT_GRACE_SECONDS = 60;
+export const MIN_CDP_CLIENT_GRACE_SECONDS = 5;
+export const MAX_CDP_CLIENT_GRACE_SECONDS = 3_600;
 
 function assertSafeCallback(callback: JobCreateInput["callback"]): void {
   if (callback === undefined) return;
@@ -236,7 +244,7 @@ export class BrowserScheduler {
   readonly #recipes: RecipeRegistry;
   readonly #catalog: FabricCatalog;
   readonly #maxActiveBrowserLeases: number;
-  readonly #reconnectGraceSeconds: number;
+  readonly #cdpClientGraceSeconds: number;
   readonly #assignmentClaimTimeoutSeconds: number;
   /** Ephemeral values live only in process memory and never enter FabricState. */
   readonly #ephemeralInputVault: EphemeralInputVault;
@@ -250,7 +258,7 @@ export class BrowserScheduler {
     this.#catalog = options.catalog ?? emptyFabricCatalog;
     this.#recipes = new RecipeRegistry([...builtInRecipes, ...this.#catalog.recipes]);
     this.#maxActiveBrowserLeases = options.maxActiveBrowserLeases ?? DEFAULT_ACTIVE_BROWSER_LEASES;
-    this.#reconnectGraceSeconds = options.reconnectGraceSeconds ?? 60;
+    this.#cdpClientGraceSeconds = options.cdpClientGraceSeconds ?? DEFAULT_CDP_CLIENT_GRACE_SECONDS;
     this.#assignmentClaimTimeoutSeconds = options.assignmentClaimTimeoutSeconds ?? 30;
     this.#ephemeralInputVault = options.ephemeralInputVault ?? new EncryptedInputRouter();
     this.#allowPlaintextEphemeralInputs = options.allowPlaintextEphemeralInputs ?? false;
@@ -258,12 +266,14 @@ export class BrowserScheduler {
       throw new Error(`Browser Fabric global browser capacity must be an integer from 1 to ${MAX_ACTIVE_BROWSER_LEASES}`);
     }
     if (!Number.isInteger(this.#assignmentClaimTimeoutSeconds) || this.#assignmentClaimTimeoutSeconds < 5 || this.#assignmentClaimTimeoutSeconds > 300) throw new Error("assignment claim timeout must be between 5 and 300 seconds");
+    if (!Number.isInteger(this.#cdpClientGraceSeconds) || this.#cdpClientGraceSeconds < MIN_CDP_CLIENT_GRACE_SECONDS || this.#cdpClientGraceSeconds > MAX_CDP_CLIENT_GRACE_SECONDS) {
+      throw new Error(`CDP client grace must be an integer from ${MIN_CDP_CLIENT_GRACE_SECONDS} to ${MAX_CDP_CLIENT_GRACE_SECONDS} seconds`);
+    }
     this.#kernel = new SchedulerKernel({
       clock: this.#clock,
       capabilitySigner: this.#capabilitySigner,
       recipes: this.#recipes,
       maxActiveBrowserLeases: this.#maxActiveBrowserLeases,
-      reconnectGraceSeconds: this.#reconnectGraceSeconds,
       assignmentClaimTimeoutSeconds: this.#assignmentClaimTimeoutSeconds,
       ephemeralInputVault: this.#ephemeralInputVault
     });
@@ -960,6 +970,9 @@ export class BrowserScheduler {
         const session = this.#kernel.session(state, lease.sessionId);
         if (session.status === "allocating") {
           session.status = "ready";
+          // A client that gave up while the session was queued never connects; the grace frees
+          // the browser slot long before the session TTL.
+          session.reconnectGraceUntil = after(this.#clock, this.#cdpClientGraceSeconds);
           session.updatedAt = timestamp;
           state.sessions.set(session.id, session);
           this.#kernel.materializeSessionCapability(state, session);
@@ -1069,7 +1082,7 @@ export class BrowserScheduler {
       const session = this.#kernel.session(state, sessionId);
       if (session.externalConnectionCount > 0) session.externalConnectionCount -= 1;
       if (!isTerminalSession(session.status) && session.externalConnectionCount === 0 && session.status === "active") session.status = "ready";
-      if (!isTerminalSession(session.status) && session.externalConnectionCount === 0) session.reconnectGraceUntil = after(this.#clock, this.#reconnectGraceSeconds);
+      if (!isTerminalSession(session.status) && session.externalConnectionCount === 0) session.reconnectGraceUntil = after(this.#clock, this.#cdpClientGraceSeconds);
       session.updatedAt = now(this.#clock);
       state.sessions.set(session.id, session);
       this.#kernel.event(state, session.project, { kind: "browser_session", id: session.id }, "browser_session.cdp_disconnected", { externalConnectionCount: session.externalConnectionCount });
@@ -1452,7 +1465,7 @@ export class BrowserScheduler {
     });
   }
 
-  public async recover(): Promise<{ expiredSessions: number; expiredJobs: number; offlineWorkers: number; expiredInputs: number; reconnectReleased: number }> {
+  public async recover(): Promise<{ expiredSessions: number; expiredJobs: number; offlineWorkers: number; expiredInputs: number; clientGraceReleased: number }> {
     return this.#store.transact((state) => recoverSchedulerState(state, { clock: this.#clock, kernel: this.#kernel, assignmentClaimTimeoutSeconds: this.#assignmentClaimTimeoutSeconds }));
   }
 

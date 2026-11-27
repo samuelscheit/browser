@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
 
 import WebSocket, { WebSocketServer } from "ws";
@@ -9,6 +9,7 @@ const MAX_HTTP_BODY_BYTES = 256 * 1024;
 const MAX_HTTP_RESPONSE_BYTES = 1024 * 1024;
 const MAX_BUFFERED_MESSAGES = 64;
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
+const CANCEL_TIMEOUT_MS = 10_000;
 
 export type CdpRelayConfig = {
   apiBaseUrl: string;
@@ -154,15 +155,43 @@ async function boundedRequestBody(request: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function sanitizeApiJson(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const result = { ...(value as Record<string, unknown>) };
+  if (!isJsonObject(value)) return value;
+  const result = { ...value };
   delete result.cdpEndpoint;
   delete result.capability;
   return result;
 }
 
-async function relayApiRequest(request: IncomingMessage, response: import("node:http").ServerResponse, config: CdpRelayConfig, route: ParsedClientApiRoute): Promise<void> {
+/** Undefined for an empty or non-JSON body (e.g. a proxy's HTML error page). */
+function parseJsonBody(raw: Buffer): unknown {
+  if (raw.length === 0) return undefined;
+  try {
+    return JSON.parse(raw.toString("utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function writeJson(response: ServerResponse, status: number, body: unknown, contentType = "application/json"): void {
+  response.writeHead(status, { "content-type": `${contentType}; charset=utf-8`, "cache-control": "no-store" });
+  response.end(JSON.stringify(body));
+}
+
+/** Every relay error is an RFC 9457 problem object, shaped like the Fabric API's own problems. */
+export function relayProblem(status: number, code: string, detail: string): Record<string, unknown> {
+  return { type: `https://browser-fabric.dev/problems/${code}`, title: code.replaceAll("_", " "), status, detail, code };
+}
+
+function writeProblem(response: ServerResponse, status: number, code: string, detail: string): void {
+  writeJson(response, status, relayProblem(status, code, detail), "application/problem+json");
+}
+
+async function relayApiRequest(request: IncomingMessage, response: ServerResponse, config: CdpRelayConfig, route: ParsedClientApiRoute): Promise<void> {
   try {
     const body = await boundedRequestBody(request);
     const bodyText = body.toString("utf8");
@@ -179,17 +208,22 @@ async function relayApiRequest(request: IncomingMessage, response: import("node:
     });
     const raw = Buffer.from(await upstream.arrayBuffer());
     if (raw.length > MAX_HTTP_RESPONSE_BYTES) throw new Error("Fabric API response is too large");
+    const payload = parseJsonBody(raw);
+    if (!upstream.ok) {
+      // A client always gets a problem object for an error, never an empty, `null` or HTML body.
+      if (isJsonObject(payload)) writeJson(response, upstream.status, sanitizeApiJson(payload), "application/problem+json");
+      else writeProblem(response, upstream.status, "fabric_api_error", `Fabric API request failed with HTTP ${upstream.status}`);
+      return;
+    }
     if (raw.length === 0) {
       response.writeHead(upstream.status, { "cache-control": "no-store" });
       response.end();
       return;
     }
-    const json = sanitizeApiJson(JSON.parse(raw.toString("utf8")));
-    response.writeHead(upstream.status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-    response.end(JSON.stringify(json));
+    if (payload === undefined) throw new Error("Fabric API returned a non-JSON response");
+    writeJson(response, upstream.status, sanitizeApiJson(payload));
   } catch {
-    response.writeHead(502, { "content-type": "application/problem+json; charset=utf-8", "cache-control": "no-store" });
-    response.end(JSON.stringify({ detail: "Fabric client relay request failed" }));
+    writeProblem(response, 502, "relay_failed", "Fabric client relay request failed");
   }
 }
 
@@ -238,11 +272,18 @@ function privateCdpEndpoint(value: string, baseUrl: string): string {
   return `${base.protocol}//${base.host}${endpoint.pathname}?${endpoint.searchParams.toString()}`;
 }
 
-async function fabricSession(config: CdpRelayConfig, route: ParsedCdpSessionRoute): Promise<{ status?: unknown; cdpEndpoint?: unknown }> {
+/** The session reached a terminal status; there is nothing left to cancel. */
+export class FabricSessionEndedError extends Error {}
+
+/** The session stayed unready past the relay's readiness deadline. */
+export class FabricSessionReadyTimeoutError extends Error {}
+
+async function fabricSession(config: CdpRelayConfig, route: ParsedCdpSessionRoute, signal?: AbortSignal): Promise<{ status?: unknown; cdpEndpoint?: unknown }> {
   let response: Response;
   try {
     response = await globalThis.fetch(fabricSessionUrl(config, route), {
       headers: { accept: "application/json", ...config.headers },
+      ...(signal ? { signal } : {}),
     });
   } catch {
     throw new Error("Fabric API session lookup failed");
@@ -253,37 +294,103 @@ async function fabricSession(config: CdpRelayConfig, route: ParsedCdpSessionRout
   return session;
 }
 
+/** Sleep that an abort ends early; the caller's loop then observes the abort. */
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
 /**
  * Resolve only an endpoint that Fabric has made ready. Applications may open
  * their opaque local relay connection as soon as they create a session; this
  * bounded poll keeps the Fabric capability entirely inside relay memory.
+ * `signal` stops the poll once the waiting client has gone.
  */
 export async function resolveFabricCdpEndpoint(
   config: CdpRelayConfig,
   route: ParsedCdpSessionRoute,
-  options: { now?: () => number; wait?: (ms: number) => Promise<void> } = {},
+  options: {
+    now?: () => number;
+    wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+    signal?: AbortSignal;
+    onStatus?: (status: unknown) => void;
+  } = {},
 ): Promise<string> {
   const now = options.now ?? Date.now;
-  const wait = options.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const wait = options.wait ?? abortableDelay;
   const deadline = now() + config.readyTimeoutMs;
   let delayMs = 100;
   while (true) {
-    const session = await fabricSession(config, route);
+    options.signal?.throwIfAborted();
+    const session = await fabricSession(config, route, options.signal);
+    options.onStatus?.(session.status);
     if ((session.status === "ready" || session.status === "active") && validCdpEndpoint(session.cdpEndpoint)) {
       return privateCdpEndpoint(session.cdpEndpoint, config.cdpGatewayBaseUrl);
     }
     if (["released", "cancelled", "failed", "timed_out"].includes(String(session.status))) {
-      throw new Error(`Fabric session ended in ${String(session.status)}`);
+      throw new FabricSessionEndedError(`Fabric session ended in ${String(session.status)}`);
     }
-    if (now() >= deadline) throw new Error("Fabric session did not become ready before the relay deadline");
-    await wait(Math.min(delayMs, Math.max(1, deadline - now())));
+    if (now() >= deadline) throw new FabricSessionReadyTimeoutError("Fabric session did not become ready before the relay deadline");
+    await wait(Math.min(delayMs, Math.max(1, deadline - now())), options.signal);
     delayMs = Math.min(2_000, Math.ceil(delayMs * 1.5));
   }
 }
 
-async function relayConnection(client: WebSocket, config: CdpRelayConfig, route: ParsedCdpSessionRoute): Promise<void> {
+/**
+ * Cancel a session whose client left (or whose readiness wait failed) before it ever connected,
+ * so a queued or allocating session does not hold a browser slot until its TTL. Best effort:
+ * the scheduler's CDP client grace and the TTL still reclaim it when this request fails.
+ */
+export async function cancelFabricSession(config: CdpRelayConfig, route: ParsedCdpSessionRoute): Promise<void> {
+  try {
+    const response = await globalThis.fetch(`${fabricSessionUrl(config, route)}/cancel`, {
+      method: "POST",
+      headers: { accept: "application/json", ...config.headers },
+      signal: AbortSignal.timeout(CANCEL_TIMEOUT_MS),
+    });
+    if (!response.ok) console.warn(JSON.stringify({ event: "relay.session_cancel_failed", sessionId: route.sessionId, status: response.status }));
+  } catch {
+    console.warn(JSON.stringify({ event: "relay.session_cancel_failed", sessionId: route.sessionId }));
+  }
+}
+
+/** Relay clients per Fabric session, so one client leaving never cancels a session another still uses. */
+class SessionClients {
+  readonly #clients = new Map<string, Set<WebSocket>>();
+
+  public add(sessionId: string, client: WebSocket): void {
+    const clients = this.#clients.get(sessionId) ?? new Set<WebSocket>();
+    clients.add(client);
+    this.#clients.set(sessionId, clients);
+    client.once("close", () => {
+      clients.delete(client);
+      if (clients.size === 0 && this.#clients.get(sessionId) === clients) this.#clients.delete(sessionId);
+    });
+  }
+
+  public hasOthers(sessionId: string, client: WebSocket): boolean {
+    return [...(this.#clients.get(sessionId) ?? [])].some((other) => other !== client);
+  }
+}
+
+async function relayConnection(client: WebSocket, config: CdpRelayConfig, route: ParsedCdpSessionRoute, sessions: SessionClients): Promise<void> {
   let upstream: WebSocket | undefined;
   let closed = false;
+  let lastStatus: unknown;
+  const clientGone = new AbortController();
+  const abandon = () => {
+    // Never cancel a session already observed active (a reconnecting client leaves it to reconnect grace)
+    // or one still tracked by another client on this relay.
+    if (lastStatus === "active") return;
+    if (!sessions.hasOthers(route.sessionId, client)) void cancelFabricSession(config, route);
+  };
   const buffered: Array<{ data: WebSocket.RawData; binary: boolean }> = [];
   const closeBoth = (code: number, reason: string) => {
     if (closed) return;
@@ -303,11 +410,20 @@ async function relayConnection(client: WebSocket, config: CdpRelayConfig, route:
     }
     buffered.push({ data, binary: isBinary });
   });
-  client.on("close", () => closeBoth(1000, "client disconnected"));
+  client.on("close", () => {
+    closeBoth(1000, "client disconnected");
+    clientGone.abort();
+  });
   client.on("error", () => closeBoth(1011, "relay client error"));
   try {
-    const endpoint = await resolveFabricCdpEndpoint(config, route);
-    if (closed) return;
+    const endpoint = await resolveFabricCdpEndpoint(config, route, {
+      signal: clientGone.signal,
+      onStatus: (status) => { lastStatus = status; },
+    });
+    if (closed) {
+      abandon();
+      return;
+    }
     upstream = new WebSocket(endpoint, {
       headers: config.headers,
       perMessageDeflate: false,
@@ -324,18 +440,21 @@ async function relayConnection(client: WebSocket, config: CdpRelayConfig, route:
     });
     upstream.on("close", () => closeBoth(1000, "Fabric CDP connection closed"));
     upstream.on("error", () => closeBoth(1011, "Fabric CDP connection unavailable"));
-  } catch {
+  } catch (error) {
     closeBoth(1011, "Fabric CDP session unavailable");
+    if (!(error instanceof FabricSessionEndedError) && (clientGone.signal.aborted || error instanceof FabricSessionReadyTimeoutError)) {
+      abandon();
+    }
   }
 }
 
 export function createCdpClientRelayServer(config: CdpRelayConfig): { server: Server; close(): Promise<void> } {
   let activeConnections = 0;
+  const sessions = new SessionClients();
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://fabric-cdp-client-relay.invalid");
     if (request.method === "GET" && url.pathname === "/healthz") {
-      response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-      response.end(JSON.stringify({ status: "ok", activeConnections }));
+      writeJson(response, 200, { status: "ok", activeConnections });
       return;
     }
     const apiRoute = parseClientApiRoute(request.url ?? "/", request.method);
@@ -343,8 +462,7 @@ export function createCdpClientRelayServer(config: CdpRelayConfig): { server: Se
       void relayApiRequest(request, response, config, apiRoute);
       return;
     }
-    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-    response.end("not found");
+    writeProblem(response, 404, "not_found", "route not found");
   });
   const relay = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_PAYLOAD_BYTES });
   server.on("upgrade", (request: IncomingMessage, socket, head) => {
@@ -357,7 +475,8 @@ export function createCdpClientRelayServer(config: CdpRelayConfig): { server: Se
     relay.handleUpgrade(request, socket, head, (client) => {
       activeConnections += 1;
       client.once("close", () => { activeConnections = Math.max(0, activeConnections - 1); });
-      void relayConnection(client, config, route);
+      sessions.add(route.sessionId, client);
+      void relayConnection(client, config, route, sessions);
     });
   });
   return {

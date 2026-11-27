@@ -1,5 +1,5 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
-import type { SqlClient } from "./store";
+import type { SqlClient } from "./postgres-store";
 
 type PgQueryable = Pick<Pool, "query"> | Pick<PoolClient, "query">;
 type PgPool = Pick<Pool, "query" | "connect">;

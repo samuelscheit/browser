@@ -14,7 +14,7 @@ for pass in 1 2; do
   for migration in deploy/postgres/*.sql; do run_sql --file "$migration"; done
 done
 count="$(psql --no-psqlrc --tuples-only --no-align --dbname "$DB_NAME" -c "SELECT count(*) FROM pg_tables WHERE schemaname='public'")"
-[ "$count" -eq 23 ] || { echo "expected 23 Fabric tables, got $count" >&2; exit 1; }
+[ "$count" -eq 24 ] || { echo "expected 24 Fabric tables, got $count" >&2; exit 1; }
 if psql --no-psqlrc --tuples-only --no-align --dbname "$DB_NAME" -c "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND column_name ~ '(password|cookie|secret|token)' AND column_name !~ '(_ref$|_hash$|public_key|certificate|encryption)'" | grep -q .; then
   echo "secret-value-like columns found in Fabric schema" >&2
   exit 1

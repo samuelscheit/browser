@@ -1,4 +1,4 @@
-import type { FabricState } from "./store";
+import type { FabricState } from "./state";
 import type { FabricStore } from "./store";
 import type { Clock } from "./clock";
 import type { SchedulerKernel } from "./scheduler-kernel";

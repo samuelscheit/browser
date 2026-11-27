@@ -1,7 +1,7 @@
 import type { BrowserSession, JobStatus } from "@browser-fabric/contracts";
 import { type RecipeDefinition } from "@browser-fabric/recipes";
 import type { Clock } from "./clock";
-import type { FabricState } from "./store";
+import type { FabricState } from "./state";
 import type { SchedulerKernel } from "./scheduler-kernel";
 
 const asDate = (iso: string) => new Date(iso).getTime();
@@ -11,13 +11,13 @@ const terminalJob = (status: JobStatus): boolean => ["succeeded", "failed", "blo
 
 export interface RecoveryOptions { clock: Clock; kernel: SchedulerKernel; assignmentClaimTimeoutSeconds: number; }
 
-export function recoverSchedulerState(state: FabricState, options: RecoveryOptions): { expiredSessions: number; expiredJobs: number; offlineWorkers: number; expiredInputs: number; reconnectReleased: number } {
+export function recoverSchedulerState(state: FabricState, options: RecoveryOptions): { expiredSessions: number; expiredJobs: number; offlineWorkers: number; expiredInputs: number; clientGraceReleased: number } {
 
   let expiredSessions = 0;
   let expiredJobs = 0;
   let offlineWorkers = 0;
   let expiredInputs = 0;
-  let reconnectReleased = 0;
+  let clientGraceReleased = 0;
   const timestamp = options.clock.now().getTime();
   for (const worker of state.workers.values()) {
     if (worker.health !== "offline" && timestamp - asDate(worker.lastHeartbeatAt) > 30_000) {
@@ -122,8 +122,8 @@ export function recoverSchedulerState(state: FabricState, options: RecoveryOptio
       continue;
     }
     if (session.reconnectGraceUntil && asDate(session.reconnectGraceUntil) <= timestamp && session.externalConnectionCount === 0) {
-      options.kernel.releaseSession(state, session, "released", "CDP reconnect grace elapsed");
-      reconnectReleased += 1;
+      options.kernel.releaseSession(state, session, "released", "no CDP client connected within the grace period");
+      clientGraceReleased += 1;
     }
   }
   // A worker crash is recoverable for jobs: release the orphaned lease and requeue only
@@ -181,5 +181,5 @@ export function recoverSchedulerState(state: FabricState, options: RecoveryOptio
       }
     }
   }
-  return { expiredSessions, expiredJobs, offlineWorkers, expiredInputs, reconnectReleased };
+  return { expiredSessions, expiredJobs, offlineWorkers, expiredInputs, clientGraceReleased };
 }
