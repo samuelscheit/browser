@@ -18,7 +18,7 @@ Options:
   --vision               send a screenshot with every observation
   --upload-dir <dir>     allow uploading files from this directory (repeatable)
   --keep-tab             leave the tab open (prints its id); --target <id> continues in a tab
-  --remote, --name <n>   which fabric browser (as for every command)
+  --remote, --name <n>, --profile <p>  which fabric browser (as for every command)
   --json                 print the full result, including every step, as JSON
 
 Keys: ANTHROPIC_API_KEY / OPENAI_API_KEY (+ ANTHROPIC_BASE_URL / OPENAI_BASE_URL).
@@ -37,6 +37,7 @@ const options = {
   target: { type: "string" },
   remote: { type: "boolean" },
   name: { type: "string" },
+  profile: { type: "string" },
   json: { type: "boolean" },
   help: { type: "boolean", short: "h" },
 } as const;
@@ -69,7 +70,7 @@ function describeResult(result: TaskResult): string {
  * `fabric task`: run the agent against the endpoint of a fabric browser. `endpoint` resolves
  * (and starts, when needed) the browser that `--remote` / `--name` select.
  */
-export async function taskCommand(argv: string[], dependencies: { endpoint(selection: { remote: boolean; name?: string }): Promise<string> }): Promise<TaskResult | undefined> {
+export async function taskCommand(argv: string[], dependencies: { endpoint(selection: { remote: boolean; name?: string; profile?: string }): Promise<string> }): Promise<TaskResult | undefined> {
   const { values, positionals } = parseArgs({ args: argv, options, allowPositionals: true, strict: true });
   if (values.help) {
     console.log(TASK_HELP);
@@ -93,7 +94,11 @@ export async function taskCommand(argv: string[], dependencies: { endpoint(selec
     }
     if (!resultSchema || typeof resultSchema !== "object" || Array.isArray(resultSchema)) throw new Error("--schema must contain a JSON Schema object");
   }
-  const cdpEndpoint = await dependencies.endpoint({ remote: values.remote ?? false, ...(values.name ? { name: values.name } : {}) });
+  const cdpEndpoint = await dependencies.endpoint({
+    remote: values.remote ?? false,
+    ...(values.name ? { name: values.name } : {}),
+    ...(values.profile ? { profile: values.profile } : {}),
+  });
   const controller = new AbortController();
   const stop = () => controller.abort(new Error("interrupted"));
   process.once("SIGINT", stop);

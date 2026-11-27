@@ -5,10 +5,10 @@ behind one stable, unauthenticated loopback address that every CDP tool understa
 
 | Command | Browser | Endpoint |
 | --- | --- | --- |
-| `fabric up` | **Your everyday Chrome** with your real profile: agents share your logins, and you see what they do (default) | `http://127.0.0.1:9222` |
-| `fabric up --profile <name>` | A separate Chrome fabric starts, profile in `~/.config/fabric/profiles/<name>` | `http://127.0.0.1:9222` |
-| `fabric up --headless` | The same, headless (profile `agent` unless `--profile`) | `http://127.0.0.1:9222` |
-| `fabric up --remote` | Remote Fabric browser from your deployment, with a persistent profile (logins survive) | `http://127.0.0.1:9223` |
+| `fabric up` | **Your everyday Chrome** with your real profile: agents share your logins, and you see what they do (default, named `local`) | `http://127.0.0.1:9222` |
+| `fabric up --profile <name>` | A separate Chrome fabric starts, profile in `~/.config/fabric/profiles/<name>`, named `<name>` (runs alongside `local`) | `http://127.0.0.1:9224+` |
+| `fabric up --headless` | The same, headless (profile and browser name `agent` unless `--profile` / `--name`) | `http://127.0.0.1:9224+` |
+| `fabric up --remote` | Remote Fabric browser from your deployment, with a persistent profile (logins survive, named `remote`) | `http://127.0.0.1:9223` |
 | `fabric up --remote --fresh` | Remote Fabric browser with a throwaway profile | `http://127.0.0.1:9223` |
 
 Every command (`up`, `mcp`, `goto`, `shot`, `eval`, `tabs`, `view`, `down`) uses the local browser
@@ -79,8 +79,12 @@ const page = browser.contexts()[0].pages()[0] ?? await browser.contexts()[0].new
 const browser = await puppeteer.connect({ browserURL: "http://127.0.0.1:9222" });
 ```
 
-Quick actions (they start the browser when needed and act on the **current tab**, the one most
-recently created, navigated or activated; `--tab <index|id>` picks another and makes it current):
+Quick actions act on the **current agent tab** (the one most recently created, navigated or
+activated; `--tab <index|id>` picks another and makes it current). Pass `--profile <name>` or
+`--name <name>` to target a specific running browser — if that browser is not running, the action
+fails instead of falling back to your everyday Chrome. Without `--name` or `--profile`, a quick
+action uses the sole running browser for that mode, starts the default browser if none is running,
+or asks you to pass `--name` / `--profile` when several browsers are running:
 
 ```sh
 fabric goto news.ycombinator.com        # waits for load, prints title and URL
@@ -175,7 +179,11 @@ your user can drive the browser, exactly as with `--remote-debugging-port`.
 
 ## Several browsers
 
-`--name <name>` runs additional browsers side by side (they get ports from 9224), e.g.
+`--profile <name>` automatically names the browser `<name>` and gives it a free port from 9224, so
+`fabric up --headless --profile research` runs alongside your everyday Chrome (`local` on `:9222`)
+without needing `--name`; target it with `fabric goto example.com --profile research` (or
+`--name research`) and stop it with `fabric down research` (or `fabric down --profile research`).
+`--name <name>` also runs additional browsers side by side, e.g.
 `fabric up --remote --fresh --name research` and `fabric goto example.com --name research`.
 
 ## Using the API directly

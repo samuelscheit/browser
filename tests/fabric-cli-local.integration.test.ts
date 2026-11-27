@@ -37,10 +37,15 @@ run("fabric CLI with a local headless Chrome", () => {
 
   test("up is idempotent and refuses a running browser with different settings", () => {
     const started = JSON.parse(ok("up", "--headless", "--port", String(port), "--json"));
-    expect(started).toMatchObject({ status: "ready", endpoint: `http://127.0.0.1:${port}`, request: { mode: "local", name: "local", headless: true, profile: "agent" } });
+    expect(started).toMatchObject({ status: "ready", endpoint: `http://127.0.0.1:${port}`, request: { mode: "local", name: "agent", headless: true, profile: "agent" } });
     const again = JSON.parse(ok("up", "--headless", "--port", String(port), "--json"));
     expect(again.pid).toBe(started.pid);
-    const conflict = fabric("up", "--port", String(port));
+    // Same name ("agent") without --port reuses its existing port idempotently.
+    const againNoPort = JSON.parse(ok("up", "--headless", "--json"));
+    expect(againNoPort.pid).toBe(started.pid);
+    expect(againNoPort.request.port).toBe(port);
+    // Different settings under the same name ("agent") fail.
+    const conflict = fabric("up", "--profile", "agent", "--port", String(port));
     expect(conflict.code).toBe(1);
     expect(conflict.stderr).toContain("already running with other settings");
   });
@@ -83,7 +88,7 @@ run("fabric CLI with a local headless Chrome", () => {
       for (let attempt = 0; attempt < 50 && !(await fetch(origin).then((response) => response.ok, () => false)); attempt += 1) await Bun.sleep(50);
       ok("goto", origin);
       expect(ok("eval", "document.cookie = 'session=fresh; max-age=86400; path=/'; document.cookie")).toBe("session=fresh");
-      expect(ok("down", "local")).toBe("stopped local");
+      expect(ok("down", "agent")).toBe("stopped agent");
       ok("up", "--headless", "--port", String(port));
       ok("goto", origin);
       expect(ok("eval", "document.cookie")).toBe("session=fresh");
@@ -97,11 +102,42 @@ run("fabric CLI with a local headless Chrome", () => {
     const health = await (await fetch(`http://127.0.0.1:${port}/healthz`)).json() as { detail: string };
     const chromePid = Number(/pid (\d+)/.exec(health.detail)?.[1]);
     expect(chromePid).toBeGreaterThan(0);
-    expect(ok("down", "local")).toBe("stopped local");
+    expect(ok("down", "agent")).toBe("stopped agent");
     expect(() => process.kill(chromePid, 0)).toThrow();
     await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
     expect(ok("status")).toContain("no browser running");
-    expect(ok("down", "local")).toBe("local is not running");
+    expect(ok("down", "agent")).toBe("agent is not running");
+  });
+
+  test("multiple --profile browsers coexist without --name, and quick actions never fall back to another browser", () => {
+    const alpha = JSON.parse(ok("up", "--headless", "--profile", "alpha", "--json"));
+    const beta = JSON.parse(ok("up", "--headless", "--profile", "beta", "--json"));
+    try {
+      expect(alpha.request).toMatchObject({ name: "alpha", profile: "alpha", headless: true });
+      expect(beta.request).toMatchObject({ name: "beta", profile: "beta", headless: true });
+      expect(alpha.request.port).not.toBe(beta.request.port);
+      // Re-running `up --headless --profile alpha` without --port is idempotent.
+      expect(JSON.parse(ok("up", "--headless", "--profile", "alpha", "--json")).pid).toBe(alpha.pid);
+      // Bare quick action refuses to guess when two local browsers run.
+      const ambiguous = fabric("eval", "1 + 1");
+      expect(ambiguous.code).toBe(1);
+      expect(ambiguous.stderr).toContain("several local browsers are running (alpha, beta)");
+      // Missing --profile or --name fails clearly instead of falling back.
+      const missing = fabric("eval", "--profile", "gamma", "1 + 1");
+      expect(missing.code).toBe(1);
+      expect(missing.stderr).toContain('browser "gamma" is not running');
+      // Each browser is addressed independently via --profile or --name (without repeating --headless).
+      expect(ok("goto", "--profile", "alpha", "data:text/html,<title>Alpha</title>")).toContain("Alpha");
+      expect(ok("goto", "--profile", "beta", "data:text/html,<title>Beta</title>")).toContain("Beta");
+      expect(ok("eval", "--profile", "alpha", "document.title")).toBe("Alpha");
+      expect(ok("eval", "--name", "beta", "document.title")).toBe("Beta");
+      // Stopping one leaves a sole running browser, which bare actions can then use.
+      expect(ok("down", "--profile", "alpha")).toBe("stopped alpha");
+      expect(ok("eval", "document.title")).toBe("Beta");
+    } finally {
+      fabric("down", "alpha");
+      fabric("down", "beta");
+    }
   });
 
   test("an MCP-style lazy start costs no browser until the first client, and up wakes it", async () => {

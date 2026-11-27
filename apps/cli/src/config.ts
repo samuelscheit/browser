@@ -112,7 +112,7 @@ export const logPath = (name: string, home = fabricHome()) => join(runDirectory(
 export const localProfileDirectory = (profile: string, home = fabricHome()) => join(home, "profiles", profile);
 
 export function assertName(name: string): string {
-  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) throw new Error(`browser name ${JSON.stringify(name)} must be lowercase letters, digits and dashes`);
+  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(name)) throw new Error(`browser name ${JSON.stringify(name)} must be lowercase letters, digits, dashes and underscores`);
   return name;
 }
 

@@ -26,11 +26,17 @@ export function liveState(name: string): DaemonState | undefined {
   return undefined;
 }
 
+export function liveStates(): DaemonState[] {
+  return listStates()
+    .map((state) => liveState(state.request.name))
+    .filter((state): state is DaemonState => state !== undefined);
+}
+
 function sameRequest(left: BrowserRequest, right: BrowserRequest): boolean {
   return left.mode === right.mode && left.port === right.port && left.fresh === right.fresh
     && (left.profile ?? "") === (right.profile ?? "") && (left.project ?? "") === (right.project ?? "")
     && (left.recipe ?? "") === (right.recipe ?? "") && (left.egress ?? "") === (right.egress ?? "")
-    && left.headless === right.headless;
+    && left.headless === right.headless && (left.chrome ?? "") === (right.chrome ?? "");
 }
 
 async function portFree(port: number): Promise<boolean> {
@@ -41,11 +47,13 @@ async function portFree(port: number): Promise<boolean> {
   });
 }
 
-/** A named browser gets its mode's well-known port; extra names take the next free one. */
+/** A mode's default browser gets its well-known port; a running browser keeps its port; extra names take the next free one. */
 export async function choosePort(name: string, mode: BrowserRequest["mode"], requested?: number): Promise<number> {
   if (requested !== undefined) return requested;
+  const existing = liveState(name);
+  if (existing) return existing.request.port;
   if (name === mode) return DEFAULT_PORTS[mode];
-  const taken = new Set(listStates().map((state) => state.request.port));
+  const taken = new Set(liveStates().map((state) => state.request.port));
   for (let port = 9224; port < 9300; port += 1) if (!taken.has(port) && await portFree(port)) return port;
   throw new Error("no free port between 9224 and 9299; pass --port");
 }
@@ -74,6 +82,17 @@ export async function up(request: BrowserRequest, options: { timeoutMs?: number;
     // Any /json request makes the endpoint start (or resume) its browser.
     if (running.status === "idle") await fetch(`${endpointUrl(running.request.port)}/json/version`).catch(() => undefined);
   } else {
+    if (request.mode === "local" && request.profile) {
+      const inUse = liveStates().find((state) =>
+        state.request.name !== request.name
+        && state.request.mode === "local"
+        && state.request.profile === request.profile
+        && state.status !== "failed",
+      );
+      if (inUse) {
+        throw new Error(`profile "${request.profile}" is already in use by browser "${inUse.request.name}" (${endpointUrl(inUse.request.port)}). Reuse it with \`--name ${inUse.request.name}\`, or run \`fabric down ${inUse.request.name}\` first.`);
+      }
+    }
     removeState(request.name);
     mkdirSync(runDirectory(), { recursive: true, mode: 0o700 });
     const log = openSync(logPath(request.name), "a", 0o600);

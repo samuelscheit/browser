@@ -77,7 +77,8 @@ fabric down                    # detaches; never quits Chrome or closes your tab
 ```
 
 Prefer an isolated browser? `fabric up --profile research` starts a separate Chrome with its own
-profile; `--headless` runs it headless.
+profile under the browser name `research` (alongside your everyday Chrome); `--headless` runs it
+headless, and quick actions target it with `--profile research` or `--name research`.
 
 ### MCP
 

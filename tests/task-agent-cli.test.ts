@@ -112,5 +112,17 @@ describe("fabric task arguments", () => {
     expect(HELP).toContain("fabric task \"<goal>\"");
     const { out } = await captured(() => taskCommand(["--help"], { endpoint }));
     expect(out).toBe(TASK_HELP);
+    expect(TASK_HELP).toContain("--profile");
+  });
+
+  test("forwards --profile to the browser endpoint selector", async () => {
+    const selections: unknown[] = [];
+    await expect(taskCommand(["goal", "--model", "openai/fake", "--profile", "sb-report"], {
+      endpoint: async (selection) => {
+        selections.push(selection);
+        throw new Error("stop before browser");
+      },
+    })).rejects.toThrow("stop before browser");
+    expect(selections).toEqual([{ remote: false, profile: "sb-report" }]);
   });
 });
